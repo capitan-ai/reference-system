@@ -1,0 +1,444 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id                            String               @id @default(uuid())
+  squareCustomerId              String?              @unique
+  phoneE164                     String?              @db.VarChar(32)
+  email                         String?              @db.VarChar(255)
+  createdAt                     DateTime             @default(now())
+  firstPaidSeen                 Boolean              @default(false)
+  firstName                     String?              @db.VarChar(100)
+  lastName                      String?              @db.VarChar(100)
+  fullName                      String?              @db.VarChar(200)
+  GiftCards                     GiftCardCache[]
+  RefClicks                     RefClick[]
+  RefLinks                      RefLink?
+  RefMatches                    RefMatch[]
+  FriendRewards                 RefReward[]          @relation("FriendRewards")
+  RefRewards                    RefReward[]          @relation("ReferrerRewards")
+
+  @@map("customers")
+}
+
+model RefLink {
+  id             String          @id @default(uuid())
+  customerId     String          @unique
+  refCode        String          @unique
+  url            String
+  issuedAt       DateTime        @default(now())
+  status         RefLinkStatus   @default(ACTIVE)
+  createdAt      DateTime        @default(now())
+  customer       Customer        @relation(fields: [customerId], references: [id])
+  ReferralEvents ReferralEvent[] @relation("RefLinkEvents")
+
+  @@map("ref_links")
+}
+
+model RefClick {
+  id          String    @id @default(uuid())
+  refCode     String
+  refSid      String?   @db.VarChar(255)
+  customerId  String?
+  firstSeenAt DateTime  @default(now())
+  ipHash      String?   @db.VarChar(64)
+  userAgent   String?   @db.VarChar(500)
+  landingUrl  String?   @db.VarChar(500)
+  utmSource   String?   @db.VarChar(100)
+  utmMedium   String?   @db.VarChar(100)
+  utmCampaign String?   @db.VarChar(100)
+  matched     Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  customer    Customer? @relation(fields: [customerId], references: [id])
+
+  @@map("ref_clicks")
+}
+
+model RefMatch {
+  id                  String               @id @default(uuid())
+  bookingId           String               @unique
+  customerId          String
+  refCode             String
+  refClickId          String?
+  matchedVia          MatchMethod
+  confidence          Float                @default(0.0)
+  matchedAt           DateTime             @default(now())
+  createdAt           DateTime             @default(now())
+  customer            Customer             @relation(fields: [customerId], references: [id])
+  ReferralEvents      ReferralEvent[]
+  RevenueAttributions RevenueAttribution[]
+
+  @@map("ref_matches")
+}
+
+model RefReward {
+  id                 String          @id @default(uuid())
+  type               RewardType
+  referrerCustomerId String?
+  friendCustomerId   String?
+  bookingId          String?
+  refMatchId         String?
+  amount             Int
+  currency           String          @default("USD")
+  status             RewardStatus    @default(PENDING)
+  reason             String?
+  createdAt          DateTime        @default(now())
+  grantedAt          DateTime?
+  redeemedAt         DateTime?
+  friend             Customer?       @relation("FriendRewards", fields: [friendCustomerId], references: [id])
+  referrer           Customer?       @relation("ReferrerRewards", fields: [referrerCustomerId], references: [id])
+  ReferralEvents     ReferralEvent[]
+
+  @@unique([type, referrerCustomerId, friendCustomerId])
+  @@map("ref_rewards")
+}
+
+model Idempotency {
+  id        String   @id
+  createdAt DateTime @default(now())
+
+  @@map("idempotency")
+}
+
+model GiftCardCache {
+  id               String       @id @default(uuid())
+  squareGiftCardId String       @unique
+  ownerCustomerId  String
+  role             GiftCardRole
+  lastBalanceCents Int          @default(0)
+  createdAt        DateTime     @default(now())
+  owner            Customer     @relation(fields: [ownerCustomerId], references: [id])
+
+  @@map("gift_card_cache")
+}
+
+model ProcessedEvent {
+  idempotencyKey String   @id
+  createdAt      DateTime @default(now())
+
+  @@map("processed_events")
+}
+
+model GiftCardRun {
+  id                String    @id @default(uuid())
+  correlation_id    String    @unique
+  square_event_id   String?
+  square_event_type String?
+  trigger_type      String
+  resource_id       String?
+  stage             String?
+  status            String    @default("pending")
+  attempts          Int       @default(0)
+  last_error        String?
+  payload           Json?
+  context           Json?
+  resumed_at        DateTime? @db.Timestamptz(6)
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([square_event_id])
+  @@index([status])
+  @@map("giftcard_runs")
+}
+
+model GiftCardJob {
+  id             String            @id @default(uuid())
+  correlation_id String
+  trigger_type   String
+  stage          String
+  status         GiftCardJobStatus @default(queued)
+  payload        Json
+  context        Json?
+  attempts       Int               @default(0)
+  max_attempts   Int               @default(5)
+  scheduled_at   DateTime          @default(now()) @db.Timestamptz(6)
+  locked_at      DateTime?         @db.Timestamptz(6)
+  lock_owner     String?
+  last_error     String?
+  created_at     DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime          @default(now()) @db.Timestamptz(6)
+
+  @@unique([correlation_id, stage], map: "giftcard_jobs_correlation_stage_key")
+  @@index([status, scheduled_at], map: "giftcard_jobs_status_scheduled_idx")
+  @@map("giftcard_jobs")
+}
+
+model ReferralProcessRun {
+  id             String           @id @default(uuid())
+  processType    String
+  status         ProcessRunStatus @default(pending)
+  startedAt      DateTime         @default(now())
+  completedAt    DateTime?
+  durationMs     Int?
+  totalCount     Int?             @default(0)
+  successCount   Int?             @default(0)
+  failureCount   Int?             @default(0)
+  metadata       Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  ReferralEvents ReferralEvent[]
+
+  @@map("referral_process_runs")
+}
+
+model ReferralEvent {
+  id                  String              @id @default(uuid())
+  eventType           ReferralEventType
+  occurredAt          DateTime            @default(now())
+  processRunId        String?
+  referrerCustomerId  String?
+  friendCustomerId    String?
+  refRewardId         String?
+  refLinkId           String?
+  refMatchId          String?
+  amountCents         Int?
+  currency            String              @default("USD")
+  revenueAttributedId String?
+  source              String?
+  metadata            Json?
+  createdAt           DateTime            @default(now())
+  Notifications       NotificationEvent[]
+  processRun          ReferralProcessRun? @relation(fields: [processRunId], references: [id])
+  refLink             RefLink?            @relation("RefLinkEvents", fields: [refLinkId], references: [id])
+  refMatch            RefMatch?           @relation(fields: [refMatchId], references: [id])
+  refReward           RefReward?          @relation(fields: [refRewardId], references: [id])
+  revenueAttribution  RevenueAttribution? @relation(fields: [revenueAttributedId], references: [id])
+
+  @@index([eventType, occurredAt], map: "ref_event_type_ts_idx")
+  @@index([referrerCustomerId], map: "ref_event_referrer_idx")
+  @@map("referral_events")
+}
+
+model NotificationEvent {
+  id                 String                   @id @default(uuid())
+  channel            NotificationChannel
+  templateType       NotificationTemplateType
+  status             NotificationStatus       @default(queued)
+  customerId         String?
+  referrerCustomerId String?
+  referralEventId    String?
+  externalId         String?                  @db.VarChar(255)
+  templateId         String?                  @db.VarChar(255)
+  sentAt             DateTime?
+  statusAt           DateTime?
+  errorCode          String?                  @db.VarChar(255)
+  errorMessage       String?
+  metadata           Json?
+  createdAt          DateTime                 @default(now())
+  referralEvent      ReferralEvent?           @relation(fields: [referralEventId], references: [id])
+
+  @@index([channel, status, createdAt], map: "notification_channel_status_idx")
+  @@map("notification_events")
+}
+
+model ReferrerStat {
+  id                     String   @id @default(uuid())
+  referrerCustomerId     String   @unique
+  newCustomersTotal      Int      @default(0)
+  newCustomersLast7d     Int      @default(0)
+  codesRedeemedTotal     Int      @default(0)
+  rewardsPaidCents       Int      @default(0)
+  rewardsPendingCents    Int      @default(0)
+  smsSent                Int      @default(0)
+  emailsSent             Int      @default(0)
+  revenueAttributedCents Int      @default(0)
+  conversionRate         Float    @default(0)
+  updatedAt              DateTime @updatedAt
+  createdAt              DateTime @default(now())
+
+  @@map("referrer_stats")
+}
+
+model RevenueAttribution {
+  id                 String          @id @default(uuid())
+  paymentId          String?         @unique
+  bookingId          String?
+  customerId         String
+  referrerCustomerId String?
+  refMatchId         String?
+  amountCents        Int
+  currency           String          @default("USD")
+  occurredAt         DateTime        @default(now())
+  metadata           Json?
+  createdAt          DateTime        @default(now())
+  ReferralEvents     ReferralEvent[]
+  refMatch           RefMatch?       @relation(fields: [refMatchId], references: [id])
+
+  @@index([referrerCustomerId], map: "revenue_referrer_idx")
+  @@map("revenue_attribution")
+}
+
+model AnalyticsDeadLetter {
+  id           String    @id @default(uuid())
+  eventType    String
+  payload      Json
+  errorMessage String?
+  retryCount   Int       @default(0)
+  lastTriedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@map("analytics_dead_letter")
+}
+
+model DevicePassRegistration {
+  deviceLibraryIdentifier String
+  passTypeIdentifier      String
+  serialNumber            String
+  pushToken               String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@id([deviceLibraryIdentifier, passTypeIdentifier, serialNumber])
+  @@map("device_pass_registrations")
+}
+
+model AnalyticsEvent {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventType        String   @map("event_type") @db.VarChar(100)
+  source           String?  @db.VarChar(100)
+  squareCustomerId String?  @map("square_customer_id") @db.VarChar(64)
+  bookingId        String?  @map("booking_id") @db.VarChar(64)
+  paymentId        String?  @map("payment_id") @db.VarChar(64)
+  referralCode     String?  @map("referral_code") @db.VarChar(64)
+  amountCents      Int?     @map("amount_cents")
+  metadata         Json?
+  createdAt        DateTime @map("created_at") @default(now()) @db.Timestamptz(6)
+
+  @@index([eventType, createdAt])
+  @@index([squareCustomerId, createdAt])
+  @@map("analytics_events")
+}
+
+model square_existing_clients {
+  id                         Int       @id @default(autoincrement())
+  square_customer_id         String    @unique
+  given_name                 String?
+  family_name                String?
+  email_address              String?
+  phone_number               String?
+  got_signup_bonus           Boolean?  @default(false)
+  activated_as_referrer      Boolean?  @default(false)
+  personal_code              String?   @unique
+  created_at                 DateTime? @default(now()) @db.Timestamp(6)
+  updated_at                 DateTime? @default(now()) @db.Timestamp(6)
+  gift_card_id               String?
+  referral_code              String?   @unique(map: "unique_referral_code")
+  referral_url               String?
+  total_referrals            Int?      @default(0)
+  total_rewards              Int?      @default(0)
+  email_sent_at              DateTime? @db.Timestamptz(6)
+  first_payment_completed    Boolean?  @default(false)
+  ip_addresses               String[]  @default([])
+  first_ip_address           String?
+  last_ip_address            String?
+  used_referral_code         String?
+  referral_email_sent        Boolean?  @default(false)
+  gift_card_order_id         String?
+  gift_card_line_item_uid    String?
+  gift_card_delivery_channel String?
+  gift_card_activation_url   String?
+  gift_card_pass_kit_url     String?
+  gift_card_digital_email    String?
+  referral_sms_sent          Boolean?  @default(false)
+  referral_sms_sent_at       DateTime? @db.Timestamptz(6)
+  referral_sms_sid           String?
+  gift_card_gan              String?
+
+  @@index([activated_as_referrer], map: "idx_activated_referrer")
+  @@index([gift_card_id], map: "idx_gift_card_id")
+  @@index([personal_code], map: "idx_personal_code")
+  @@index([referral_code], map: "idx_referral_code")
+  @@index([gift_card_delivery_channel], map: "idx_square_clients_gift_card_delivery")
+  @@index([gift_card_order_id], map: "idx_square_clients_gift_card_order")
+  @@index([square_customer_id], map: "idx_square_customer_id")
+}
+
+model square_gift_card_gan_audit {
+  gift_card_id       String    @id
+  square_customer_id String?
+  resolved_gan       String?
+  verified_at        DateTime? @default(now()) @db.Timestamptz(6)
+  raw_payload        Json?
+}
+
+enum RefLinkStatus {
+  NOT_ISSUED
+  ACTIVE
+  REVOKED
+}
+
+enum MatchMethod {
+  EMAIL
+  PHONE
+  IP_UA
+  MANUAL
+}
+
+enum RewardType {
+  FRIEND_DISCOUNT
+  REFERRER_REWARD
+}
+
+enum RewardStatus {
+  PENDING
+  GRANTED
+  REDEEMED
+  VOID
+}
+
+enum GiftCardRole {
+  referrer
+  friend
+}
+
+enum GiftCardJobStatus {
+  queued
+  running
+  completed
+  error
+}
+
+enum ReferralEventType {
+  NEW_CUSTOMER
+  CODE_REDEEMED
+  REWARD_GRANTED_NEW
+  REWARD_GRANTED_REFERRER
+  GIFT_CARD_ACTIVATED
+  REVENUE_FROM_REFERRAL
+  PROCESS_COMPLETED
+  CUSTOM
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+}
+
+enum NotificationStatus {
+  queued
+  sent
+  delivered
+  failed
+  bounced
+}
+
+enum NotificationTemplateType {
+  REFERRAL_INVITE
+  REFERRER_ACTIVATION
+  FRIEND_ACTIVATION
+  OTHER
+}
+
+enum ProcessRunStatus {
+  pending
+  running
+  completed
+  failed
+}

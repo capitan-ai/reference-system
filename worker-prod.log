@@ -1,0 +1,69 @@
+{"ts":"2025-12-03T23:33:44.576Z","level":"info","event":"giftcard.worker.start","workerId":"b2aebea2-ea09-4e26-965b-93f5ef4efd76","pollIntervalMs":2000,"circuitCooldownMs":60000}
+{"ts":"2025-12-03T23:39:59.299Z","level":"info","event":"giftcard.worker.job.start","workerId":"b2aebea2-ea09-4e26-965b-93f5ef4efd76","jobId":"28f73d6b-584f-422f-ab26-19163a34f468","stage":"booking","correlationId":"booking-created:529de241c4627e13c594888d","attempts":1}
+📅 Processing booking created for customer: 28KVX7W71Q3N0YKFJ4MHA45SYC
+Full booking data: {
+  "id": "c28257zs9bds33",
+  "source": "FIRST_PARTY_MERCHANT",
+  "status": "ACCEPTED",
+  "all_day": false,
+  "version": 0,
+  "start_at": "2025-12-04T17:00:00Z",
+  "created_at": "2025-12-03T23:39:56Z",
+  "updated_at": "2025-12-03T23:39:56Z",
+  "customer_id": "28KVX7W71Q3N0YKFJ4MHA45SYC",
+  "location_id": "LNQKVBTQZN3EZ",
+  "location_type": "BUSINESS_LOCATION",
+  "creator_details": {
+    "creator_type": "TEAM_MEMBER",
+    "team_member_id": "TMWAtQTYmZpwwxii"
+  },
+  "appointment_segments": [
+    {
+      "team_member_id": "TM-zXe9fXe4axYWn",
+      "any_team_member": false,
+      "duration_minutes": 140,
+      "intermission_minutes": 0,
+      "service_variation_id": "CJI5WHOAKSFTASYPJ4MSYZLS",
+      "service_variation_version": 1764783981722,
+      "service_variation_client_id": "CJI5WHOAKSFTASYPJ4MSYZLS"
+    }
+  ],
+  "transition_time_minutes": 0
+}
+🔍 Step 1: Checking if customer exists in database...
+   Found 1 customer(s) in database
+🔍 Step 2: Getting customer record...
+   Customer: Desiree Santos
+🎉 First booking detected for customer: 28KVX7W71Q3N0YKFJ4MHA45SYC
+   Name: Desiree Santos
+🔍 Step 3: Checking for referral code...
+   🔍 Checking appointment segment custom fields for referral code...
+   No referral code in booking, checking custom attributes...
+   Fetching custom attributes for customer 28KVX7W71Q3N0YKFJ4MHA45SYC...
+   Full custom attributes response: {
+  "customAttributes": [
+    {
+      "key": "square:c11dd5ac-8382-4570-9c7b-2bdcb1c781f1",
+      "value": [
+        "a7b40271-729a-41aa-801b-fb1fffb83650"
+      ],
+      "version": 1,
+      "visibility": "VISIBILITY_READ_WRITE_VALUES",
+      "updatedAt": "2025-09-05T19:12:55.485Z",
+      "createdAt": "2025-09-05T19:12:55.485Z"
+    }
+  ]
+}
+   📋 Custom attribute: key="square:c11dd5ac-8382-4570-9c7b-2bdcb1c781f1", value="a7b40271-729a-41aa-801b-fb1fffb83650"
+   Custom attributes from Square: {
+  "square:c11dd5ac-8382-4570-9c7b-2bdcb1c781f1": [
+    "a7b40271-729a-41aa-801b-fb1fffb83650"
+  ]
+}
+   🔍 Checking all custom attribute values for valid referral codes...
+   Final referral code result: None
+ℹ️ Customer booked without referral code
+   - Will receive referral code after first payment
+   - No gift card given
+✅ Booking processing completed for customer: 28KVX7W71Q3N0YKFJ4MHA45SYC
+{"ts":"2025-12-03T23:40:00.131Z","level":"info","event":"giftcard.worker.job.completed","workerId":"b2aebea2-ea09-4e26-965b-93f5ef4efd76","jobId":"28f73d6b-584f-422f-ab26-19163a34f468","stage":"booking","correlationId":"booking-created:529de241c4627e13c594888d"}

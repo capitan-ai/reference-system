@@ -1,0 +1,61 @@
+# 🔑 APPLE_PASS_CERTIFICATE_PEM_BASE64 Value
+
+## ✅ Ready to Copy
+
+**Variable Name:** `APPLE_PASS_CERTIFICATE_PEM_BASE64`
+
+**Value:**
+```
+LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUdNekNDQlJ1Z0F3SUJBZ0lRR2pCVkhuUUd4TW4yT1pQbW9HY0RsekFOQmdrcWhraUc5dzBCQVFzRkFEQjEKTVVRd1FnWURWUVFERER0QmNIQnNaU0JYYjNKc1pIZHBaR1VnUkdWMlpXeHZjR1Z5SUZKbGJHRjBhVzl1Y3lCRApaWEowYVdacFkyRjBhVzl1SUVGMWRHaHZjbWwwZVRFTE1Ba0dBMVVFQ3d3Q1J6UXhFekFSQmdOVkJBb01Da0Z3CmNHeGxJRWx1WXk0eEN6QUpCZ05WQkFZVEFsVlRNQjRYRFRJMU1URXlOREUyTXpJeE4xb1hEVEkyTVRJeU5ERTIKTXpJeE5sb3dnYVV4TGpBc0Jnb0praWFKay9Jc1pBRUJEQjV3WVhOekxtTnZiUzV6ZEhWa2FXOTZiM0pwYm1FdQpaMmxtZEdOaGNtUXhOVEF6QmdOVkJBTU1MRkJoYzNNZ1ZIbHdaU0JKUkRvZ2NHRnpjeTVqYjIwdWMzUjFaR2x2CmVtOXlhVzVoTG1kcFpuUmpZWEprTVJNd0VRWURWUVFMREFwTldFRlhVVmxDVmpKTU1Sb3dHQVlEVlFRS0RCRlYKYldsMElGSmhhMmhwYldKbGEyOTJZVEVMTUFrR0ExVUVCaE1DVlZNd2dnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQQpBNElCRHdBd2dnRUtBb0lCQVFET1pwZEdVV29vTTZwdit1Z05XWTJxT2R6cHR5S1JwWDFVL0VkbUNDR1BuTWhYClVTS1NsOGUyOXYzM05lVit4dVhoaURoc3QrR0FqSkVQZnFxbHliQVBmRnV3U2RhNy9pZUxjdDkxR1pkWTg2bUYKbHdDOTYwU0NKY0xVeWVvdVlnMGJTYnhIMFFDOW1ya2NPbWdoaUZic3RwaXFpeWo4SE92bzAyK3I2VFI3Vnl6Vgp0a1BWUlFDRWZCZ0dRbUFBSTFvWUlXcUdvZnFiWHRkTXJDeUdleDJsVlU3YTJ3dnkweWFtOWtidCtZNFRIbnp3Ckx5aGZ4STNOb0U1ekJGV2UwdDhObUduNmhGaFF5SFVXZWdPeWN5TU45LzJpaGFrY09DblpjMWE1bmwvN1pIUm0KdkFXS21rKyt0bEhod2Jub01LRitXTXVNaHN4cm5mUnlkZTR6bGFrZkFnTUJBQUdqZ2dLTU1JSUNpREFNQmdOVgpIUk1CQWY4RUFqQUFNQjhHQTFVZEl3UVlNQmFBRkZ2WitoM25taG9MbzVsMklsQ0dQcEhJVzNlb01IQUdDQ3NHCkFRVUZCd0VCQkdRd1lqQXRCZ2dyQmdFRkJRY3dBb1loYUhSMGNEb3ZMMk5sY25SekxtRndjR3hsTG1OdmJTOTMKZDJSeVp6UXVaR1Z5TURFR0NDc0dBUVVGQnpBQmhpVm9kSFJ3T2k4dmIyTnpjQzVoY0hCc1pTNWpiMjB2YjJOegpjREF6TFhkM1pISm5OREEwTUlJQkhnWURWUjBnQklJQkZUQ0NBUkV3Z2dFTkJna3Foa2lHOTJOa0JRRXdnZjh3CmdjTUdDQ3NHQVFVRkJ3SUNNSUcyRElHelVtVnNhV0Z1WTJVZ2IyNGdkR2hwY3lCalpYSjBhV1pwWTJGMFpTQmkKZVNCaGJua2djR0Z5ZEhrZ1lYTnpkVzFsY3lCaFkyTmxjSFJoYm1ObElHOW1JSFJvWlNCMGFHVnVJR0Z3Y0d4cApZMkZpYkdVZ2MzUmhibVJoY21RZ2RHVnliWE1nWVc1a0lHTnZibVJwZEdsdmJuTWdiMllnZFhObExDQmpaWEowCmFXWnBZMkYwWlNCd2IyeHBZM2tnWVc1a0lHTmxjblJwWm1sallYUnBiMjRnY0hKaFkzUnBZMlVnYzNSaGRHVnQKWlc1MGN5NHdOd1lJS3dZQkJRVUhBZ0VXSzJoMGRIQnpPaTh2ZDNkM0xtRndjR3hsTG1OdmJTOWpaWEowYVdacApZMkYwWldGMWRHaHZjbWwwZVM4d0hnWURWUjBsQkJjd0ZRWUlLd1lCQlFVSEF3SUdDU3FHU0liM1kyUUVEakF5CkJnTlZIUjhFS3pBcE1DZWdKYUFqaGlGb2RIUndPaTh2WTNKc0xtRndjR3hsTG1OdmJTOTNkMlJ5WnpRdE9DNWoKY213d0hRWURWUjBPQkJZRUZMYm40SGwwRHRZMHYydmJjR0piR2Z3dHM3QjFNQTRHQTFVZER3RUIvd1FFQXdJSApnREF1QmdvcWhraUc5Mk5rQmdFUUJDQU1IbkJoYzNNdVkyOXRMbk4wZFdScGIzcHZjbWx1WVM1bmFXWjBZMkZ5ClpEQVFCZ29xaGtpRzkyTmtCZ01DQkFJRkFEQU5CZ2txaGtpRzl3MEJBUXNGQUFPQ0FRRUFaTTNESm5DNVQweVUKVUtFVUF4Ym03c2lBdm9HNW5aQWtuMmJDbnlsTnAxWnIxT3JIL2tBQ3MybVU1ZDBEV2U2aHh4dGlSeVBnR0ZYNgpmTkJ0ZUI5dVdETk55MlV0TmRiamlZT2V2ZEdOSXh6bHl5azJRaXIyN2R0bGlkSzVscHRiQUxKU1B1TnQwbnN2ClhXY0h4K2phbnMrYnBlWDltWE5KVnA5VEZUZWgxTkEwTzNlYndJem9nOFVNdVhWazRkNGRkdnBrdjdQdFR2b3kKencwLzFiSk91ZUJiK3RtMUpLNGFFc1JwSlY5SENmWGtETjlQU0NIYUdXK0k1bTFSWWJheTNNbFkxK2hucm9nSApuaVZEdFo1Q29aT0hyTXpwK2NxcjRoVGJqUDZMNzBDV1VTRWxJRFVwWWZjKy9jYlp4bnhQQmxGd2h3ekNFLzNOCldrb3hoRDhDVFE9PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+```
+
+## 📋 How to Add to Vercel
+
+1. **Go to Vercel Dashboard:**
+   - https://vercel.com/dashboard
+   - Select your project
+
+2. **Navigate to Settings:**
+   - Click **Settings** → **Environment Variables**
+
+3. **Add the Variable:**
+   - Click **Add New**
+   - **Key:** `APPLE_PASS_CERTIFICATE_PEM_BASE64`
+   - **Value:** (paste the value above - it's all one line, no newlines)
+   - **Environment:** Select **Production** (and Preview if you want)
+   - Click **Save**
+
+4. **Redeploy:**
+   - After adding, Vercel will automatically redeploy
+   - Or manually trigger a redeploy
+
+5. **Test:**
+   ```bash
+   node scripts/test-wallet-endpoint.js 2A47E49DFEAC4394 https://www.zorinastudio-referral.com
+   ```
+
+## ✅ Verification
+
+After adding, check:
+```
+https://www.zorinastudio-referral.com/api/test-apple-env
+```
+
+Should show:
+- `APPLE_PASS_CERTIFICATE_PEM_BASE64`: ✅ Found (2952 chars)
+
+## 📝 Notes
+
+- ✅ Certificate is clean PEM format (no metadata)
+- ✅ Base64 encoded (single line, no newlines)
+- ✅ Ready to paste into Vercel
+- ✅ Length: 2952 characters
+
+## 🎯 Next Steps
+
+1. Copy the value above
+2. Add to Vercel as `APPLE_PASS_CERTIFICATE_PEM_BASE64`
+3. Redeploy
+4. Test the endpoint
+5. Apple Wallet should work! 🎉
+

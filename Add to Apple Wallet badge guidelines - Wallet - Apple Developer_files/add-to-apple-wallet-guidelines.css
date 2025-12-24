@@ -1,0 +1,491 @@
+h2 + h3 {
+	margin-top: 0.4em;
+}
+
+.row.divider-top {
+	padding-top: 4em;
+}
+
+.row-flex {
+	margin: 4em 0;
+}
+.row-flex:last-of-type {
+	margin-bottom: 0;
+}
+
+.row-flex.divider-top {
+	margin-top: 0;
+	padding-top: 4em;
+}
+
+.section-button .row:not(:first-of-type),
+.section-print .row:not(:first-of-type),
+.section-dads .row:not(:first-of-type) {
+	margin-top: 38px;
+}
+
+.row.row-alignment,
+.row.row-whitespace {
+	margin-top: 3em;
+}
+
+.section-print figcaption {
+	margin: 2em 0 1em;
+}
+
+#overlay-content .agreement .form-box label {
+	font-size: 14px;
+}
+
+@media only screen and (max-width: 734px) {
+	.row.divider-top {
+		padding-top: 2em;
+	}
+	.row-flex {
+		margin: 0;
+		padding: 1em 0 2em;
+	}
+	.row-flex:last-of-type {
+		padding-bottom: 0;
+	}
+	.row-flex.divider-top {
+		margin-top: 0;
+		padding-top: 2em;
+	}
+	.section-button .row,
+	.section-print .row,
+	.section-dads .row {
+		margin-top: 0;
+	}
+	.row.row-alignment,
+	.row.row-whitespace {
+		margin-top: 1em;
+	}
+	.image-flex {
+		margin-top: 1em;
+	}
+	.section-print figcaption.caption-preferred {
+		margin: -1em 0 1em;
+	}
+}
+
+/* ========== Images ========== */
+.lockup-hero {
+	margin-top: 2em;
+	width: 830px;
+	height: 485px;
+}
+
+.screen-ios {
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/screen-ios-large.jpg");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.screen-ios {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/screen-ios-large_2x.jpg");
+	}
+}
+
+.sample-email {
+	border: 1px solid #ccc;
+	width: 408px;
+	height: 443px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-large.png");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.sample-email {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-large_2x.png");
+	}
+}
+
+.sample-web {
+	border: 1px solid #ccc;
+	width: 408px;
+	height: 423px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-large.png");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.sample-web {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-large_2x.png");
+	}
+}
+
+.button-sidebar {
+	margin-bottom: 0.5em;
+}
+
+.button-two-line {
+	margin-top: 2em;
+	width: 193px;
+	height: 61px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-two-line-large.png");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.button-two-line {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-two-line-large_2x.png");
+	}
+}
+
+.button-one-line {
+	width: 357px;
+	height: 61px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-one-line-large.png");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.button-one-line {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-one-line-large_2x.png");
+	}
+}
+
+.button-localized {
+	width: 170px;
+	height: 61px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/assets/elements/badges/add-to-apple-wallet/add-to-apple-wallet-kr.svg");
+}
+
+:lang(zh-CN) .button-localized {
+	background-image: url("/assets/elements/badges/add-to-apple-wallet/add-to-apple-wallet-cn.svg");
+}
+
+:lang(ja-JP) .button-localized {
+	width: 193px;
+	background-image: url("/assets/elements/badges/add-to-apple-wallet/add-to-apple-wallet-jp.svg");
+}
+
+.button-background {
+	width: 288px;
+	height: 134px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-background-large.jpg");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.button-background {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-background-large_2x.jpg");
+	}
+}
+
+.button-clearspace {
+	width: 206px;
+	height: 74px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-clearspace-large.png");
+}
+@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+	only screen and (min-resolution: 1.5dppx),
+	only screen and (min-resolution: 144dpi) {
+	.button-clearspace {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-clearspace-large_2x.png");
+	}
+}
+
+.print-cashpoint {
+	width: 408px;
+	height: 528px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-cashpoint-large_2x.jpg?2");
+}
+
+.print-poster {
+	width: 408px;
+	height: 528px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-poster-large_2x.jpg?2");
+}
+
+.print-clearspace {
+	width: 300px;
+	height: 89px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-clearspace.svg");
+}
+
+.print-codes {
+	width: 326px;
+	height: 124px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-codes.svg");
+}
+
+.print-alignment {
+	width: 326px;
+	height: 152px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-alignment.svg");
+}
+
+.print-whitespace-yes {
+	display: inline-block;
+	margin-right: 20px;
+	width: 151px;
+	height: 195px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-whitespace-yes.svg");
+}
+
+.print-whitespace-no {
+	display: inline-block;
+	width: 151px;
+	height: 195px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-whitespace-no.svg");
+}
+
+.just-dont {
+	margin: 0 auto;
+	width: 177px;
+	height: 513px;
+	background-size: 100% 100%;
+	background-repeat: no-repeat;
+	background-position: center;
+	background-image: url("/wallet/add-to-apple-wallet-guidelines/images/dont.svg");
+}
+
+@media only screen and (max-width: 1068px) {
+	.lockup-hero {
+		width: 692px;
+		height: 405px;
+	}
+
+	.screen-ios {
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/screen-ios-medium.jpg");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.screen-ios {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/screen-ios-medium_2x.jpg");
+		}
+	}
+	.sample-email {
+		width: 346px;
+		height: 375px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-large.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.sample-email {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-large_2x.png");
+		}
+	}
+	.sample-web {
+		width: 346px;
+		height: 359px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-large.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.sample-web {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-large_2x.png");
+		}
+	}
+	.button-two-line {
+		width: 157px;
+		height: 49px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-two-line-medium.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.button-two-line {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-two-line-medium_2x.png");
+		}
+	}
+	.button-one-line {
+		width: 288px;
+		height: 49px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-one-line-medium.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.button-one-line {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/button-one-line-medium_2x.png");
+		}
+	}
+	:lang(ja-JP) .button-localized,
+	.button-localized {
+		width: 157px;
+	}
+	.button-clearspace {
+		width: 168px;
+		height: 60px;
+	}
+	.print-cashpoint {
+		width: 346px;
+		height: 448px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-cashpoint-medium_2x.jpg?2");
+	}
+	.print-poster {
+		width: 346px;
+		height: 448px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-poster-medium_2x.jpg?2");
+	}
+	.print-clearspace {
+		width: 230px;
+		height: 68px;
+	}
+	.print-codes {
+		width: 230px;
+		height: 88px;
+	}
+	.print-alignment {
+		width: 230px;
+		height: 107px;
+	}
+	.print-whitespace-yes {
+		margin-right: 8px;
+		width: 109px;
+		height: 140px;
+	}
+	.print-whitespace-no {
+		width: 109px;
+		height: 140px;
+	}
+}
+
+@media only screen and (max-width: 734px) {
+	.section-button .row:not(:first-of-type),
+	.section-print .row:not(:first-of-type),
+	.section-dads .row:not(:first-of-type) {
+		margin-top: 0;
+	}
+	.lockup-hero {
+		width: 87%;
+		height: auto;
+	}
+	.sample-email {
+		width: 320px;
+		height: 347px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-small.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.sample-email {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-email-small_2x.png");
+		}
+	}
+	.sample-web {
+		width: 320px;
+		height: 332px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-small.png");
+	}
+	@media only screen and (-webkit-min-device-pixel-ratio: 1.5),
+		only screen and (min-resolution: 1.5dppx),
+		only screen and (min-resolution: 144dpi) {
+		.sample-web {
+			background-image: url("/wallet/add-to-apple-wallet-guidelines/images/sample-web-small_2x.png");
+		}
+	}
+	.print-cashpoint {
+		width: 320px;
+		height: 415px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-cashpoint-small_2x.jpg?2");
+	}
+	.print-poster {
+		width: 320px;
+		height: 415px;
+		background-image: url("/wallet/add-to-apple-wallet-guidelines/images/print-poster-small_2x.jpg?2");
+	}
+	.print-codes {
+		width: 280px;
+		height: 106px;
+	}
+	.print-clearspace {
+		width: 280px;
+		height: 82px;
+	}
+	.print-alignment {
+		margin: 1em 0 0;
+		width: 280px;
+		height: 133px;
+	}
+	.print-whitespace-yes,
+	.print-whitespace-no {
+		width: 133px;
+		height: 174px;
+	}
+	.just-dont {
+		margin: 0 0;
+	}
+}
+
+@media only screen and (max-width: 320px) {
+	.lockup-hero {
+		width: 280px;
+		height: 178px;
+	}
+	.sample-email {
+		width: 280px;
+		height: 303px;
+	}
+	.print-poster {
+		width: 280px;
+		height: 362px;
+	}
+	.sample-web {
+		width: 280px;
+		height: 291px;
+	}
+	.print-cashpoint {
+		width: 280px;
+		height: 362px;
+	}
+}
+
+/* ========== Grid ========== */
+#main section.section:not(:last-of-type) {
+	padding-bottom: 0;
+}
+
+@media only screen and (max-width: 734px) {
+	#main section.section:not(:last-of-type) {
+		padding-bottom: 0;
+	}
+}
