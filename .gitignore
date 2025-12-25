@@ -1,0 +1,51 @@
+# dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# production
+build/
+dist/
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# local env files
+.env
+.env.*.local
+
+# Vercel
+.vercel/
+
+# testing
+coverage/
+
+# misc
+.DS_Store
+*.pem
+*.p12
+
+# TypeScript / Next.js generated
+next-env.d.ts
+node_modules
+.next
+.vercel
+.env
+.env.*
+certs
+certs/*
+*.pem
+*.p12
+*.key
+*.log
+worker*.log
+reports/*.json
+VERCEL_*ENV_VARS*.txt
+VERCEL_*PEM_KEYS*.txt
+APPLE_*CERTIFICATE*BASE64*.txt
