@@ -1516,7 +1516,8 @@ async function sendReferralCodeToNewClient(
         
         if (!retrySuccess) {
           console.error(`❌ Failed to save personal_code after 3 retry attempts`)
-          throw new Error(`Failed to generate unique personal_code after multiple attempts`)
+          // Don't throw - log error but continue (code generation is not critical for payment processing)
+          console.warn(`⚠️ Continuing without personal_code - customer will need manual code assignment`)
         }
       } else {
         throw updateError
