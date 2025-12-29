@@ -1476,27 +1476,48 @@ async function sendReferralCodeToNewClient(
       // Handle duplicate key error (race condition - code was taken between check and update)
       if (updateError.code === '23505' && updateError.message?.includes('personal_code')) {
         console.warn(`⚠️ Personal code ${referralCode} was taken by another process, generating new one...`)
-        // Generate a new unique code and retry
-        referralCode = await generateUniquePersonalCode(customerName, customerId)
-        referralUrl = generateReferralUrl(referralCode)
         
-        // Update custom attribute and note with new code
-        await upsertCustomerCustomAttribute(customerId, REFERRAL_CODE_ATTRIBUTE_KEY, referralCode)
-        await appendReferralNote(customerId, referralCode, referralUrl)
+        // Retry up to 3 times with new codes
+        let retrySuccess = false
+        for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
+          try {
+            // Generate a new unique code
+            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralUrl = generateReferralUrl(referralCode)
+            
+            // Update custom attribute and note with new code
+            await upsertCustomerCustomAttribute(customerId, REFERRAL_CODE_ATTRIBUTE_KEY, referralCode)
+            await appendReferralNote(customerId, referralCode, referralUrl)
+            
+            // Retry the update
+            await prisma.$executeRaw`
+              UPDATE square_existing_clients 
+              SET 
+                personal_code = ${referralCode},
+                referral_url = ${referralUrl},
+                activated_as_referrer = TRUE,
+                got_signup_bonus = TRUE,
+                referral_email_sent = TRUE,
+                updated_at = NOW()
+              WHERE square_customer_id = ${customerId}
+            `
+            console.log(`✅ Retried with new unique code: ${referralCode}`)
+            retrySuccess = true
+            break
+          } catch (retryError) {
+            if (retryError.code === '23505' && retryError.message?.includes('personal_code')) {
+              console.warn(`⚠️ Retry attempt ${retryAttempt + 1} also failed with duplicate code, trying again...`)
+              continue
+            } else {
+              throw retryError
+            }
+          }
+        }
         
-        // Retry the update
-        await prisma.$executeRaw`
-          UPDATE square_existing_clients 
-          SET 
-            personal_code = ${referralCode},
-            referral_url = ${referralUrl},
-            activated_as_referrer = TRUE,
-            got_signup_bonus = TRUE,
-            referral_email_sent = TRUE,
-            updated_at = NOW()
-          WHERE square_customer_id = ${customerId}
-        `
-        console.log(`✅ Retried with new unique code: ${referralCode}`)
+        if (!retrySuccess) {
+          console.error(`❌ Failed to save personal_code after 3 retry attempts`)
+          throw new Error(`Failed to generate unique personal_code after multiple attempts`)
+        }
       } else {
         throw updateError
       }
