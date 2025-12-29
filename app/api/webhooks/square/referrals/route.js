@@ -2200,12 +2200,15 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       }
     }
 
-    // 4. Mark first payment as completed
-    await prisma.$executeRaw`
-      UPDATE square_existing_clients 
-      SET first_payment_completed = TRUE
-      WHERE square_customer_id = ${customerId}
-    `
+    // 4. Mark first payment as completed ONLY if there were no errors
+    // This allows the client to retry processing if something failed
+    if (!paymentHadError) {
+      await prisma.$executeRaw`
+        UPDATE square_existing_clients 
+        SET first_payment_completed = TRUE
+        WHERE square_customer_id = ${customerId}
+      `
+    }
 
     const paymentAmountCents = extractPaymentAmountCents(paymentData)
     if (paymentAmountCents) {
