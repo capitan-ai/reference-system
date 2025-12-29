@@ -1404,7 +1404,7 @@ async function sendReferralCodeToNewClient(
       console.log(`✅ Generated new personal_code in name+ID format: ${referralCode}`)
     }
     
-    const referralUrl = generateReferralUrl(referralCode)
+    let referralUrl = generateReferralUrl(referralCode)
     
     let referrerGiftCardId = null
     let referrerGiftCardMeta = null
