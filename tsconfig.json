@@ -26,13 +26,15 @@
       {
         "name": "next"
       }
-    ]
+    ],
+    "checkJs": false
   },
   "include": [
     "next-env.d.ts",
     ".next/types/**/*.ts",
     "**/*.ts",
-    "**/*.tsx"
+    "**/*.tsx",
+    "**/*.js"
   ],
   "exclude": [
     "node_modules"

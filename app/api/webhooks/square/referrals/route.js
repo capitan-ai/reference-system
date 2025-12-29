@@ -28,15 +28,6 @@ const {
   getFriendlyLocationIdFromBooking,
   addLocationMetadata
 } = require('../../../../../lib/config/location-map')
-const {
-  recordReferralEvent,
-  recordRevenueEvent,
-  recordAnalyticsEvent,
-  startProcessRun,
-  completeProcessRun,
-  ReferralEventType,
-  ProcessRunStatus
-} = require('../../../../../lib/analytics-service')
 const { getSquareEnvironmentName } = require('../../../../../lib/utils/square-env')
 
 let squareApisCache = null
@@ -116,20 +107,88 @@ const REFERRAL_SMS_TEMPLATE =
  * @param {number} maxRetries - Maximum number of retry attempts (default: 3)
  * @returns {Promise<string|null>} - QR code data URI or null if all attempts fail
  */
-async function generateGiftCardQrDataUri(giftCardGan, maxRetries = 3) {
+async function generateGiftCardQrDataUri(giftCardGan, maxRetries = 3, options = {}) {
   if (!giftCardGan) {
     console.warn('⚠️ Cannot generate QR code - gift card GAN is missing')
     return null
   }
 
-  const qrData = `sqgc://${giftCardGan}`
+  // Ensure GAN is clean (only digits, no spaces or special chars)
+  let cleanGan = giftCardGan.toString().trim().replace(/\D/g, '')
+  
+  // Square gift card GANs are typically 16 digits
+  // But can be 10-16 digits depending on the card type
+  if (!cleanGan || cleanGan.length < 10 || cleanGan.length > 16) {
+    console.warn(`⚠️ Invalid GAN format for QR code: ${giftCardGan} (cleaned: ${cleanGan}, length: ${cleanGan?.length || 0})`)
+    console.warn(`   Square GANs should be 10-16 digits. Current GAN may be invalid.`)
+    
+    // Try to verify with Square API if giftCardId is available
+    if (options.giftCardsApi && options.giftCardId) {
+      try {
+        console.log(`   🔍 Attempting to verify GAN with Square API using giftCardId: ${options.giftCardId}`)
+        const verifyResponse = await options.giftCardsApi.retrieveGiftCard(options.giftCardId)
+        const verifiedGan = verifyResponse.result?.giftCard?.gan
+        if (verifiedGan) {
+          const verifiedCleanGan = verifiedGan.toString().trim().replace(/\D/g, '')
+          if (verifiedCleanGan && verifiedCleanGan.length >= 10 && verifiedCleanGan.length <= 16) {
+            console.log(`   ✅ Found valid GAN from Square: ${verifiedCleanGan}`)
+            cleanGan = verifiedCleanGan
+          } else {
+            console.error(`   ❌ Square returned invalid GAN format: ${verifiedGan}`)
+            return null
+          }
+        } else {
+          console.error(`   ❌ Square API did not return GAN for gift card ${options.giftCardId}`)
+          return null
+        }
+      } catch (verifyError) {
+        console.error(`   ❌ Could not verify GAN with Square: ${verifyError.message}`)
+        return null
+      }
+    } else {
+      return null
+    }
+  }
+
+  // Verify GAN exists in Square if giftCardsApi is provided (optional verification)
+  if (options.giftCardsApi && options.giftCardId) {
+    try {
+      const verifyResponse = await options.giftCardsApi.retrieveGiftCard(options.giftCardId)
+      const verifiedGan = verifyResponse.result?.giftCard?.gan
+      const verifiedState = verifyResponse.result?.giftCard?.state
+      
+      if (verifiedGan) {
+        const verifiedCleanGan = verifiedGan.toString().trim().replace(/\D/g, '')
+        if (verifiedCleanGan !== cleanGan) {
+          console.warn(`⚠️ GAN mismatch! Using: ${cleanGan}, Square has: ${verifiedCleanGan}`)
+          console.warn(`   Updating to use Square's verified GAN: ${verifiedCleanGan}`)
+          cleanGan = verifiedCleanGan
+        }
+        
+        // Check if gift card is activated
+        if (verifiedState !== 'ACTIVE' && verifiedState !== 'PENDING') {
+          console.warn(`⚠️ Gift card state is ${verifiedState}, QR code may not work until card is ACTIVE`)
+        } else {
+          console.log(`✅ Gift card verified: GAN=${cleanGan}, State=${verifiedState}, Length=${cleanGan.length} digits`)
+        }
+      }
+    } catch (verifyError) {
+      console.warn(`⚠️ Could not verify GAN with Square (non-critical): ${verifyError.message}`)
+      // Continue anyway - maybe gift card doesn't exist yet or API error
+    }
+  }
+
+  const qrData = `sqgc://${cleanGan}`
+  console.log(`📱 Generating QR code for GAN: ${cleanGan} (format: ${qrData})`)
   const configs = [
-    // Try with optimal settings first
-    { margin: 1, scale: 4, errorCorrectionLevel: 'M' },
-    // Fallback to simpler settings
-    { margin: 1, scale: 3, errorCorrectionLevel: 'L' },
-    // Try with minimal settings as last resort
-    { margin: 0, scale: 2, errorCorrectionLevel: 'L' }
+    // Optimal settings for Square scanner compatibility
+    { margin: 4, scale: 8, errorCorrectionLevel: 'H', width: 400 },
+    // High quality fallback
+    { margin: 3, scale: 6, errorCorrectionLevel: 'M', width: 300 },
+    // Standard quality fallback
+    { margin: 2, scale: 5, errorCorrectionLevel: 'M', width: 250 },
+    // Minimum acceptable quality
+    { margin: 1, scale: 4, errorCorrectionLevel: 'M', width: 200 }
   ]
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -157,9 +216,9 @@ async function generateGiftCardQrDataUri(giftCardGan, maxRetries = 3) {
         // Even on failure, try one more time with the simplest possible configuration
         try {
           const fallbackUri = await QRCode.toDataURL(qrData, {
-            margin: 0,
-            scale: 1,
-            errorCorrectionLevel: 'L',
+            margin: 2,
+            scale: 4,
+            errorCorrectionLevel: 'M',
             width: 200
           })
           
@@ -341,8 +400,27 @@ async function sendGiftCardEmailNotification({
     console.log(`   🔄 Normalized gift card number ${giftCardGan} → ${ganForEmail}`)
   }
 
+  // Validate GAN format before generating QR code
+  const cleanGanForValidation = ganForEmail.toString().trim().replace(/\D/g, '')
+  if (!cleanGanForValidation || cleanGanForValidation.length < 10 || cleanGanForValidation.length > 16) {
+    console.error(`❌ Invalid GAN format for QR code generation: ${ganForEmail}`)
+    console.error(`   Cleaned GAN: ${cleanGanForValidation}, length: ${cleanGanForValidation?.length || 0}`)
+    console.error(`   Square GANs must be 10-16 digits. QR code will not be generated.`)
+  }
+
   // Generate QR code (always included - most important)
-  const qrDataUri = await generateGiftCardQrDataUri(ganForEmail)
+  // Pass giftCardsApi and giftCardId for verification
+  const qrDataUri = await generateGiftCardQrDataUri(ganForEmail, 3, {
+    giftCardsApi,
+    giftCardId
+  })
+  
+  if (!qrDataUri) {
+    console.error(`❌ CRITICAL: Failed to generate QR code for gift card ${ganForEmail}`)
+    console.error(`   Customer will receive email without QR code - they can still use GAN manually`)
+  } else {
+    console.log(`✅ QR code generated successfully for GAN: ${cleanGanForValidation}`)
+  }
 
   // Wait for PassKit URL if requested and giftCardId is provided
   let finalPassKitUrl = passKitUrl
@@ -603,7 +681,7 @@ async function appendGiftCardNote(customerId, giftCardGan, amountCents, contextL
     const noteLabel = contextLabel || 'Referral gift card'
     const noteEntry = `[${issuedOn}] ${noteLabel}: ${giftCardGan} ($${amountDisplay})`
 
-    if (existingNote.includes(giftCardGan)) {
+    if (existingNote && existingNote.includes(giftCardGan)) {
       console.log(`📝 Customer note already lists gift card ${giftCardGan}, skipping update`)
       return
     }
@@ -634,7 +712,7 @@ async function appendReferralNote(customerId, referralCode, referralUrl) {
     const issuedOn = new Date().toISOString().split('T')[0]
     const noteEntry = `[${issuedOn}] Personal referral code: ${referralCode} – ${referralUrl}`
 
-    if (existingNote.includes(referralCode) || existingNote.includes(referralUrl)) {
+    if (existingNote && (existingNote.includes(referralCode) || existingNote.includes(referralUrl))) {
       console.log(`📝 Customer note already lists referral code ${referralCode}, skipping update`)
       return
     }
@@ -1184,10 +1262,10 @@ async function trackIpAddress(customerId, ipAddress) {
 
     if (currentData && currentData.length > 0) {
       const data = currentData[0]
-      let ipAddresses = data.ip_addresses || []
+      let ipAddresses = Array.isArray(data.ip_addresses) ? data.ip_addresses : []
       
       // Add new IP if not already tracked
-      if (!ipAddresses.includes(ipAddress)) {
+      if (Array.isArray(ipAddresses) && !ipAddresses.includes(ipAddress)) {
         ipAddresses.push(ipAddress)
         
         await prisma.$executeRaw`
@@ -1434,21 +1512,6 @@ async function sendReferralCodeToNewClient(
         smsAnalytics.reason = smsResult.error || smsResult.reason || 'sms-error'
       }
     }
-    
-    await recordReferralEvent({
-      eventType: ReferralEventType.NEW_CUSTOMER,
-      referrerCustomerId: customerId,
-      metadata: addLocationMetadata(
-        {
-          referralCode,
-          referralUrl,
-          emailSent: Boolean(email),
-          sms: smsAnalytics,
-          giftCardId: referrerGiftCardId
-        },
-        locationId
-      )
-    })
 
     console.log(`📧 Referral code generated and sent:`)
     console.log(`   - Customer: ${customerName}`)
@@ -1655,7 +1718,6 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
 // Process payment completion (client completes first payment)
 async function processPaymentCompletion(paymentData, runContext = {}) {
   let paymentHadError = false
-  let analyticsRun = null
   try {
     // Fix 1: Check if payment was already processed (idempotency)
     const paymentId = paymentData.id || paymentData.paymentId
@@ -1683,14 +1745,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       return
     }
 
-    analyticsRun = await startProcessRun({
-      processType: 'payment_completed',
-      metadata: {
-        paymentId: paymentId || null,
-        customerId
-      }
-    })
-
     if (runContext?.correlationId) {
       await updateGiftCardRunStage(prisma, runContext.correlationId, {
         stage: 'payment:received',
@@ -1713,7 +1767,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     // 1. Check if this is a new customer's first payment
     const customerData = await prisma.$queryRaw`
       SELECT square_customer_id, used_referral_code, got_signup_bonus, gift_card_id, 
-             given_name, family_name, email_address, first_payment_completed
+             given_name, family_name, email_address, first_payment_completed, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
     `
@@ -1761,6 +1815,13 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
         referrerCustomerId = referrer.square_customer_id
+
+        // Guard: block referrer reward if customer used their own code
+        const isSelfReferral = referrer.square_customer_id === customerId
+        if (isSelfReferral) {
+          console.log(`⚠️ Skipping referrer reward because this looks like self-referral (customerId=${customerId})`)
+          referrerCustomerId = null
+        }
 
         // Check if referrer already has a gift card
         const referrerData = await prisma.$queryRaw`
@@ -1902,20 +1963,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               } else {
                 console.log('⚠️ Referrer gift card email skipped – missing email address')
               }
-
-              await recordReferralEvent({
-                eventType: ReferralEventType.REWARD_GRANTED_REFERRER,
-                referrerCustomerId: referrer.square_customer_id,
-                friendCustomerId: customerId,
-                amountCents: rewardAmountCents,
-        metadata: addLocationMetadata(
-          {
-            referralCode: customer.used_referral_code,
-            giftCardId: referrerGiftCard.giftCardId
-          },
-          paymentLocationId
-        )
-              })
             } else {
               paymentHadError = true
               if (runContext?.correlationId) {
@@ -1992,20 +2039,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               } else {
                 console.log('⚠️ Referrer load email skipped – missing email address or card number')
               }
-
-              await recordReferralEvent({
-                eventType: ReferralEventType.REWARD_GRANTED_REFERRER,
-                referrerCustomerId: referrer.square_customer_id,
-                friendCustomerId: customerId,
-                amountCents: rewardAmountCents,
-        metadata: addLocationMetadata(
-          {
-            referralCode: customer.used_referral_code,
-            giftCardId: referrerInfo.gift_card_id
-          },
-          paymentLocationId
-        )
-              })
             } else {
               paymentHadError = true
               if (runContext?.correlationId) {
@@ -2085,22 +2118,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
         paymentData.approvedMoney?.currency ||
         paymentData.approved_money?.currency ||
         'USD'
-
-      await recordRevenueEvent({
-        paymentId: paymentId || null,
-        bookingId: orderId || null,
-        customerId,
-        referrerCustomerId,
-        amountCents: paymentAmountCents,
-        currency: paymentCurrency,
-        metadata: addLocationMetadata(
-          {
-            sourceType: paymentData.source_type || paymentData.sourceType || null,
-            status: paymentData.status || null
-          },
-          paymentLocationId
-        )
-      })
     }
 
     if (runContext?.correlationId && !paymentHadError) {
@@ -2152,22 +2169,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       })
     }
     throw error
-  } finally {
-    if (analyticsRun?.id) {
-      await completeProcessRun({
-        runId: analyticsRun.id,
-        status: paymentHadError ? ProcessRunStatus.failed : ProcessRunStatus.completed,
-        totals: {
-          totalCount: 1,
-          successCount: paymentHadError ? 0 : 1,
-          failureCount: paymentHadError ? 1 : 0
-        },
-        metadata: {
-          paymentId: paymentData.id || paymentData.paymentId || null,
-          customerId: paymentData.customerId || paymentData.customer_id || null
-        }
-      })
-    }
   }
 
   if (paymentHadError) {
@@ -2225,20 +2226,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
       console.log(`📍 Booking attributed to location: ${bookingLocationId}`)
     }
 
-    await recordAnalyticsEvent({
-      eventType: 'booking_created',
-      squareCustomerId: customerId,
-      bookingId,
-      source: bookingData.sourceType || bookingData.locationType || null,
-      metadata: addLocationMetadata(
-        {
-          status: bookingData.status || null,
-          serviceCount: Array.isArray(bookingData.appointments) ? bookingData.appointments.length : null
-        },
-        bookingLocationId
-      )
-    })
-
     if (runContext?.correlationId) {
       await updateGiftCardRunStage(prisma, runContext.correlationId, {
         stage: 'booking:received',
@@ -2254,7 +2241,8 @@ async function processBookingCreated(bookingData, runContext = {}) {
       SELECT square_customer_id, got_signup_bonus, used_referral_code, email_address,
              given_name, family_name, phone_number, gift_card_id,
              gift_card_order_id, gift_card_line_item_uid, gift_card_delivery_channel,
-             gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email
+             gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email,
+             personal_code, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
     `
@@ -2372,10 +2360,15 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
     console.log(`🎉 First booking detected for customer: ${customerId}`)
     console.log(`   Name: ${customer.given_name} ${customer.family_name}`)
-    console.log('🔍 Step 3: Checking for referral code...')
+    console.log(`   Personal code: ${customer.personal_code || 'N/A'}`)
+    console.log(`   Activated as referrer: ${customer.activated_as_referrer || false}`)
+    console.log('🔍 Step 3: Checking for referral code in Square webhook data...')
+    console.log(`   📦 Booking ID: ${bookingId}`)
+    console.log(`   📦 Full booking payload keys: ${Object.keys(bookingData).join(', ')}`)
 
     // Get referral code from booking data or custom attributes
     let referralCode = null
+    let referralCodeSource = null // Track where we found it
     
     // First check if booking has referral code data
     if (bookingData.serviceVariationCapabilityDetails) {
@@ -2386,7 +2379,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
         for (let key in extensionData.values) {
           if (key.toLowerCase().includes('referral') || key.toLowerCase().includes('ref')) {
             referralCode = extensionData.values[key]
+            referralCodeSource = 'serviceVariationCapabilityDetails'
             console.log(`   ✅ Found referral code in serviceVariationCapabilityDetails: ${referralCode}`)
+            console.log(`   📍 Source: serviceVariationCapabilityDetails[${key}]`)
             break
           }
         }
@@ -2420,7 +2415,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
             const testReferrer = await findReferrerByCode(value)
             if (testReferrer) {
               referralCode = value
+              referralCodeSource = 'booking.custom_fields'
               console.log(`   ✅ Found referral code in booking.custom_fields: ${value}`)
+              console.log(`   📍 Source: booking.custom_fields[${fieldName || fieldKey}]`)
               console.log(`   ✅ Referrer: ${testReferrer.given_name} ${testReferrer.family_name} (${testReferrer.square_customer_id})`)
               break
             } else {
@@ -2464,7 +2461,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
               const testReferrer = await findReferrerByCode(value)
               if (testReferrer) {
                 referralCode = value
+                referralCodeSource = 'appointment_segments.custom_fields'
                 console.log(`   ✅ Found referral code in appointment segment custom fields: ${value}`)
+                console.log(`   📍 Source: appointment_segments[].custom_fields[${fieldName || fieldKey}]`)
                 console.log(`   ✅ Referrer: ${testReferrer.given_name} ${testReferrer.family_name} (${testReferrer.square_customer_id})`)
                 break
               } else {
@@ -2491,7 +2490,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
         const testReferrer = await findReferrerByCode(codeValue)
         if (testReferrer) {
           referralCode = codeValue
+          referralCodeSource = 'customer.custom_attributes[referral_code]'
           console.log(`   ✅ Valid referral code found: ${codeValue}`)
+          console.log(`   📍 Source: customer.custom_attributes['referral_code']`)
           console.log(`   ✅ Referrer: ${testReferrer.given_name} ${testReferrer.family_name} (${testReferrer.square_customer_id})`)
         } else {
           console.log(`   ⚠️ 'referral_code' value "${codeValue}" not found in database`)
@@ -2521,7 +2522,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
             
             if (testReferrer) {
               referralCode = value
+              referralCodeSource = `customer.custom_attributes[${key}]`
               console.log(`   ✅ Found referral code in custom attribute: ${key} = ${value}`)
+              console.log(`   📍 Source: customer.custom_attributes['${key}']`)
               console.log(`   ✅ Referrer: ${testReferrer.given_name} ${testReferrer.family_name} (${testReferrer.square_customer_id})`)
               console.log(`   ✅ Referrer has personal_code: ${testReferrer.personal_code}`)
               break
@@ -2535,16 +2538,66 @@ async function processBookingCreated(bookingData, runContext = {}) {
     }
 
     console.log(`   Final referral code result: ${referralCode || 'None'}`)
+    if (referralCode) {
+      console.log(`   📍 Referral code source: ${referralCodeSource || 'unknown'}`)
+    }
+
+    // EARLY VALIDATION: Check if customer is trying to use their own code
+    if (referralCode && customer.personal_code) {
+      const normalizedCustomerCode = customer.personal_code.toUpperCase().trim()
+      const normalizedReferralCode = referralCode.toUpperCase().trim()
+      if (normalizedCustomerCode === normalizedReferralCode) {
+        console.log(`   ❌ BLOCKED: Customer tried to use their own personal_code`)
+        console.log(`   ⚠️ Customer personal_code: ${customer.personal_code}`)
+        console.log(`   ⚠️ Referral code used: ${referralCode}`)
+        console.log(`   ⚠️ Skipping to prevent self-referral abuse`)
+        
+        referralCode = null // Clear it so no reward is given
+      }
+    }
 
     // NOW check for referral code and give gift card
     if (referralCode) {
       console.log(`🎁 Customer used referral code: ${referralCode}`)
+      console.log(`   📋 Customer ID: ${customerId}`)
+      console.log(`   📋 Customer name: ${customer.given_name} ${customer.family_name}`)
+      console.log(`   📋 Customer personal_code: ${customer.personal_code || 'N/A'}`)
+      console.log(`   📍 Code source: ${referralCodeSource || 'unknown'}`)
 
       // Find the referrer
       const referrer = await findReferrerByCode(referralCode)
 
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
+        console.log(`   📋 Referrer ID: ${referrer.square_customer_id}`)
+        console.log(`   📋 Referrer personal_code: ${referrer.personal_code}`)
+
+        // STRICT VALIDATION: Prevent self-referral and abuse
+        const isSelfReferral = referrer.square_customer_id === customerId
+        const isOwnCode = customer.personal_code && 
+                          customer.personal_code.toUpperCase().trim() === referralCode.toUpperCase().trim()
+        const isKnownReferrer = customer.activated_as_referrer === true
+        
+        console.log(`   🔒 Validation checks:`)
+        console.log(`      - Is self-referral (same customer ID): ${isSelfReferral}`)
+        console.log(`      - Is own code (personal_code matches): ${isOwnCode}`)
+        console.log(`      - Is known referrer: ${isKnownReferrer}`)
+        
+        if (isSelfReferral || isOwnCode || isKnownReferrer) {
+          const reason = isSelfReferral 
+            ? 'Customer ID matches referrer ID (self-referral)'
+            : isOwnCode
+            ? 'Customer used their own personal_code'
+            : 'Customer is already an activated referrer'
+          
+          console.log(`   ❌ BLOCKED: ${reason}`)
+          console.log(`   ⚠️ Skipping friend reward to prevent abuse`)
+          console.log(`   📝 Referral code will NOT be saved to used_referral_code`)
+          
+          return
+        }
+        
+        console.log(`   ✅ Validation passed - referral code is valid`)
         
         // Give friend their $10 gift card IMMEDIATELY
         const locationId = process.env.SQUARE_LOCATION_ID?.trim()
@@ -2634,34 +2687,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
               updated_at = NOW()
             WHERE square_customer_id = ${customerId}
           `
-
-          await recordReferralEvent({
-            eventType: ReferralEventType.CODE_REDEEMED,
-            referrerCustomerId: referrer.square_customer_id,
-            friendCustomerId: customerId,
-            metadata: addLocationMetadata(
-              {
-                referralCode,
-                bookingId,
-                friendGiftCardId: friendGiftCard.giftCardId
-              },
-              bookingLocationId
-            )
-          })
-
-          await recordReferralEvent({
-            eventType: ReferralEventType.REWARD_GRANTED_NEW,
-            referrerCustomerId: referrer.square_customer_id,
-            friendCustomerId: customerId,
-            amountCents: friendGiftCard.amountCents,
-            metadata: addLocationMetadata(
-              {
-                referralCode,
-                giftCardId: friendGiftCard.giftCardId
-              },
-              bookingLocationId
-            )
-          })
 
           console.log(`✅ Friend received $10 gift card IMMEDIATELY: ${friendGiftCard.giftCardId}`)
           console.log(`   - Customer: ${customer.given_name} ${customer.family_name}`)

@@ -9,35 +9,33 @@ datasource db {
 }
 
 model Customer {
-  id                            String               @id @default(uuid())
-  squareCustomerId              String?              @unique
-  phoneE164                     String?              @db.VarChar(32)
-  email                         String?              @db.VarChar(255)
-  createdAt                     DateTime             @default(now())
-  firstPaidSeen                 Boolean              @default(false)
-  firstName                     String?              @db.VarChar(100)
-  lastName                      String?              @db.VarChar(100)
-  fullName                      String?              @db.VarChar(200)
-  GiftCards                     GiftCardCache[]
-  RefClicks                     RefClick[]
-  RefLinks                      RefLink?
-  RefMatches                    RefMatch[]
-  FriendRewards                 RefReward[]          @relation("FriendRewards")
-  RefRewards                    RefReward[]          @relation("ReferrerRewards")
+  id               String      @id @default(uuid())
+  squareCustomerId String?     @unique
+  phoneE164        String?     @db.VarChar(32)
+  email            String?     @db.VarChar(255)
+  createdAt        DateTime    @default(now())
+  firstPaidSeen    Boolean     @default(false)
+  firstName        String?     @db.VarChar(100)
+  lastName         String?     @db.VarChar(100)
+  fullName         String?     @db.VarChar(200)
+  RefClicks        RefClick[]
+  RefLinks         RefLink?
+  RefMatches       RefMatch[]
+  FriendRewards    RefReward[] @relation("FriendRewards")
+  RefRewards       RefReward[] @relation("ReferrerRewards")
 
   @@map("customers")
 }
 
 model RefLink {
-  id             String          @id @default(uuid())
-  customerId     String          @unique
-  refCode        String          @unique
-  url            String
-  issuedAt       DateTime        @default(now())
-  status         RefLinkStatus   @default(ACTIVE)
-  createdAt      DateTime        @default(now())
-  customer       Customer        @relation(fields: [customerId], references: [id])
-  ReferralEvents ReferralEvent[] @relation("RefLinkEvents")
+  id         String        @id @default(uuid())
+  customerId String        @unique
+  refCode    String        @unique
+  url        String
+  issuedAt   DateTime      @default(now())
+  status     RefLinkStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+  customer   Customer      @relation(fields: [customerId], references: [id])
 
   @@map("ref_links")
 }
@@ -62,61 +60,39 @@ model RefClick {
 }
 
 model RefMatch {
-  id                  String               @id @default(uuid())
-  bookingId           String               @unique
-  customerId          String
-  refCode             String
-  refClickId          String?
-  matchedVia          MatchMethod
-  confidence          Float                @default(0.0)
-  matchedAt           DateTime             @default(now())
-  createdAt           DateTime             @default(now())
-  customer            Customer             @relation(fields: [customerId], references: [id])
-  ReferralEvents      ReferralEvent[]
-  RevenueAttributions RevenueAttribution[]
+  id         String      @id @default(uuid())
+  bookingId  String      @unique
+  customerId String
+  refCode    String
+  refClickId String?
+  matchedVia MatchMethod
+  confidence Float       @default(0.0)
+  matchedAt  DateTime    @default(now())
+  createdAt  DateTime    @default(now())
+  customer   Customer    @relation(fields: [customerId], references: [id])
 
   @@map("ref_matches")
 }
 
 model RefReward {
-  id                 String          @id @default(uuid())
+  id                 String       @id @default(uuid())
   type               RewardType
   referrerCustomerId String?
   friendCustomerId   String?
   bookingId          String?
   refMatchId         String?
   amount             Int
-  currency           String          @default("USD")
-  status             RewardStatus    @default(PENDING)
+  currency           String       @default("USD")
+  status             RewardStatus @default(PENDING)
   reason             String?
-  createdAt          DateTime        @default(now())
+  createdAt          DateTime     @default(now())
   grantedAt          DateTime?
   redeemedAt         DateTime?
-  friend             Customer?       @relation("FriendRewards", fields: [friendCustomerId], references: [id])
-  referrer           Customer?       @relation("ReferrerRewards", fields: [referrerCustomerId], references: [id])
-  ReferralEvents     ReferralEvent[]
+  friend             Customer?    @relation("FriendRewards", fields: [friendCustomerId], references: [id])
+  referrer           Customer?    @relation("ReferrerRewards", fields: [referrerCustomerId], references: [id])
 
   @@unique([type, referrerCustomerId, friendCustomerId])
   @@map("ref_rewards")
-}
-
-model Idempotency {
-  id        String   @id
-  createdAt DateTime @default(now())
-
-  @@map("idempotency")
-}
-
-model GiftCardCache {
-  id               String       @id @default(uuid())
-  squareGiftCardId String       @unique
-  ownerCustomerId  String
-  role             GiftCardRole
-  lastBalanceCents Int          @default(0)
-  createdAt        DateTime     @default(now())
-  owner            Customer     @relation(fields: [ownerCustomerId], references: [id])
-
-  @@map("gift_card_cache")
 }
 
 model ProcessedEvent {
@@ -170,52 +146,6 @@ model GiftCardJob {
   @@map("giftcard_jobs")
 }
 
-model ReferralProcessRun {
-  id             String           @id @default(uuid())
-  processType    String
-  status         ProcessRunStatus @default(pending)
-  startedAt      DateTime         @default(now())
-  completedAt    DateTime?
-  durationMs     Int?
-  totalCount     Int?             @default(0)
-  successCount   Int?             @default(0)
-  failureCount   Int?             @default(0)
-  metadata       Json?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  ReferralEvents ReferralEvent[]
-
-  @@map("referral_process_runs")
-}
-
-model ReferralEvent {
-  id                  String              @id @default(uuid())
-  eventType           ReferralEventType
-  occurredAt          DateTime            @default(now())
-  processRunId        String?
-  referrerCustomerId  String?
-  friendCustomerId    String?
-  refRewardId         String?
-  refLinkId           String?
-  refMatchId          String?
-  amountCents         Int?
-  currency            String              @default("USD")
-  revenueAttributedId String?
-  source              String?
-  metadata            Json?
-  createdAt           DateTime            @default(now())
-  Notifications       NotificationEvent[]
-  processRun          ReferralProcessRun? @relation(fields: [processRunId], references: [id])
-  refLink             RefLink?            @relation("RefLinkEvents", fields: [refLinkId], references: [id])
-  refMatch            RefMatch?           @relation(fields: [refMatchId], references: [id])
-  refReward           RefReward?          @relation(fields: [refRewardId], references: [id])
-  revenueAttribution  RevenueAttribution? @relation(fields: [revenueAttributedId], references: [id])
-
-  @@index([eventType, occurredAt], map: "ref_event_type_ts_idx")
-  @@index([referrerCustomerId], map: "ref_event_referrer_idx")
-  @@map("referral_events")
-}
-
 model NotificationEvent {
   id                 String                   @id @default(uuid())
   channel            NotificationChannel
@@ -232,47 +162,9 @@ model NotificationEvent {
   errorMessage       String?
   metadata           Json?
   createdAt          DateTime                 @default(now())
-  referralEvent      ReferralEvent?           @relation(fields: [referralEventId], references: [id])
 
   @@index([channel, status, createdAt], map: "notification_channel_status_idx")
   @@map("notification_events")
-}
-
-model ReferrerStat {
-  id                     String   @id @default(uuid())
-  referrerCustomerId     String   @unique
-  newCustomersTotal      Int      @default(0)
-  newCustomersLast7d     Int      @default(0)
-  codesRedeemedTotal     Int      @default(0)
-  rewardsPaidCents       Int      @default(0)
-  rewardsPendingCents    Int      @default(0)
-  smsSent                Int      @default(0)
-  emailsSent             Int      @default(0)
-  revenueAttributedCents Int      @default(0)
-  conversionRate         Float    @default(0)
-  updatedAt              DateTime @updatedAt
-  createdAt              DateTime @default(now())
-
-  @@map("referrer_stats")
-}
-
-model RevenueAttribution {
-  id                 String          @id @default(uuid())
-  paymentId          String?         @unique
-  bookingId          String?
-  customerId         String
-  referrerCustomerId String?
-  refMatchId         String?
-  amountCents        Int
-  currency           String          @default("USD")
-  occurredAt         DateTime        @default(now())
-  metadata           Json?
-  createdAt          DateTime        @default(now())
-  ReferralEvents     ReferralEvent[]
-  refMatch           RefMatch?       @relation(fields: [refMatchId], references: [id])
-
-  @@index([referrerCustomerId], map: "revenue_referrer_idx")
-  @@map("revenue_attribution")
 }
 
 model AnalyticsDeadLetter {
@@ -297,23 +189,6 @@ model DevicePassRegistration {
 
   @@id([deviceLibraryIdentifier, passTypeIdentifier, serialNumber])
   @@map("device_pass_registrations")
-}
-
-model AnalyticsEvent {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  eventType        String   @map("event_type") @db.VarChar(100)
-  source           String?  @db.VarChar(100)
-  squareCustomerId String?  @map("square_customer_id") @db.VarChar(64)
-  bookingId        String?  @map("booking_id") @db.VarChar(64)
-  paymentId        String?  @map("payment_id") @db.VarChar(64)
-  referralCode     String?  @map("referral_code") @db.VarChar(64)
-  amountCents      Int?     @map("amount_cents")
-  metadata         Json?
-  createdAt        DateTime @map("created_at") @default(now()) @db.Timestamptz(6)
-
-  @@index([eventType, createdAt])
-  @@index([squareCustomerId, createdAt])
-  @@map("analytics_events")
 }
 
 model square_existing_clients {
@@ -393,27 +268,11 @@ enum RewardStatus {
   VOID
 }
 
-enum GiftCardRole {
-  referrer
-  friend
-}
-
 enum GiftCardJobStatus {
   queued
   running
   completed
   error
-}
-
-enum ReferralEventType {
-  NEW_CUSTOMER
-  CODE_REDEEMED
-  REWARD_GRANTED_NEW
-  REWARD_GRANTED_REFERRER
-  GIFT_CARD_ACTIVATED
-  REVENUE_FROM_REFERRAL
-  PROCESS_COMPLETED
-  CUSTOM
 }
 
 enum NotificationChannel {
@@ -434,11 +293,4 @@ enum NotificationTemplateType {
   REFERRER_ACTIVATION
   FRIEND_ACTIVATION
   OTHER
-}
-
-enum ProcessRunStatus {
-  pending
-  running
-  completed
-  failed
 }

@@ -16,6 +16,12 @@
       "NODE_ENV": "production"
     }
   },
+  "crons": [
+    {
+      "path": "/api/cron/giftcard-jobs",
+      "schedule": "* * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
@@ -30,7 +36,7 @@
         },
         {
           "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, Authorization, x-square-hmacsha256-signature, x-square-signature, x-admin-key"
+          "value": "Content-Type, Authorization, x-square-hmacsha256-signature, x-square-signature, x-admin-key, x-cron-key"
         }
       ]
     }

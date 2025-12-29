@@ -72,3 +72,4 @@ if (apiKey && fromEmail) {
   console.log('   Add it to Vercel: Settings → Environment Variables')
 }
 
+

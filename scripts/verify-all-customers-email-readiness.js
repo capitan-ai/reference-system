@@ -221,3 +221,4 @@ async function verifyAllCustomersEmailReadiness() {
 // Run verification
 verifyAllCustomersEmailReadiness()
 
+

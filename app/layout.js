@@ -6,8 +6,8 @@ const inter = Inter({ subsets: ['latin'], variable: '--font-body' })
 const playfair = Playfair_Display({ subsets: ['latin'], variable: '--font-display' })
 
 export const metadata = {
-  title: 'Реферальная система салона',
-  description: 'Система реферальных программ с автоматическими бонусами и уведомлениями',
+  title: 'Salon Referral System',
+  description: 'Referral program system with automatic bonuses and notifications',
 }
 
 export default function RootLayout({ children }) {

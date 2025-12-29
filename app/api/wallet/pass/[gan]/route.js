@@ -5,22 +5,14 @@ import { createRequire } from 'module'
 
 const require = createRequire(import.meta.url)
 
-const isTestEnv = process.env.NODE_ENV === 'test'
-
 function loadWithDiagnostics(label, loader) {
-  if (!isTestEnv) {
-    console.log(`🧩 Loading ${label}...`)
-  }
+  console.log(`🧩 Loading ${label}...`)
   try {
     const result = loader()
-    if (!isTestEnv) {
-      console.log(`✅ Loaded ${label}`)
-    }
+    console.log(`✅ Loaded ${label}`)
     return result
   } catch (error) {
-    if (!isTestEnv) {
-      console.error(`💥 Failed while loading ${label}:`, error)
-    }
+    console.error(`💥 Failed while loading ${label}:`, error)
     throw error
   }
 }
@@ -55,9 +47,7 @@ export async function GET(request, { params }) {
       )
     }
 
-    if (!isTestEnv) {
-      console.log(`🎫 Generating Apple Wallet pass for GAN: ${gan}`)
-    }
+    console.log(`🎫 Generating Apple Wallet pass for GAN: ${gan}`)
 
     const {
       giftCardGan,
@@ -68,9 +58,7 @@ export async function GET(request, { params }) {
       webServiceUrl
     } = await resolveGiftCardContext({ gan, prisma, giftCardsApi })
     
-    if (!isTestEnv) {
-      console.log('🔗 Setting webServiceURL in pass:', webServiceUrl)
-    }
+    console.log('🔗 Setting webServiceURL in pass:', webServiceUrl)
     if (originalLookupValue !== giftCardGan) {
       console.log(`   Normalized gift card number ${originalLookupValue} → ${giftCardGan}`)
     }
@@ -83,9 +71,7 @@ export async function GET(request, { params }) {
       webServiceUrl
     })
 
-    if (!isTestEnv) {
-      console.log(`✅ Generated Apple Wallet pass for ${gan}`)
-    }
+    console.log(`✅ Generated Apple Wallet pass for ${gan}`)
 
     return new Response(passBuffer, {
       headers: {
@@ -98,9 +84,7 @@ export async function GET(request, { params }) {
       }
     })
   } catch (error) {
-    if (!isTestEnv) {
-      console.error('❌ Error generating Apple Wallet pass:', error)
-    }
+    console.error('❌ Error generating Apple Wallet pass:', error)
     
     // Return user-friendly error
     return new Response(

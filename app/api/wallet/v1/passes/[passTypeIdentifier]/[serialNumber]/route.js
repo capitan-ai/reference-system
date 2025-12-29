@@ -53,34 +53,10 @@ export async function GET(request, { params }) {
     let balanceCents = 0
 
     try {
-      // Check GiftCardCache table
-      const giftCardCache = await prisma.giftCardCache.findFirst({
-        where: {
-          squareGiftCardId: {
-            contains: gan
-          }
-        },
-        include: {
-          owner: true
-        }
-      })
-
-      if (giftCardCache) {
-        customerInfo = giftCardCache.owner
-        balanceCents = giftCardCache.lastBalanceCents
-
-        // Get current balance from Square
-        try {
-          const squareGiftCard = await giftCardsApi.retrieveGiftCard(giftCardCache.squareGiftCardId)
-          if (squareGiftCard.result?.giftCard) {
-            balanceCents = squareGiftCard.result.giftCard.balanceMoney?.amount || 0
-          }
-        } catch (squareError) {
-          console.warn(`⚠️ Could not fetch current balance from Square: ${squareError.message}`)
-        }
-      } else {
-        // Try square_existing_clients table
-        const customer = await prisma.$queryRaw`
+      // Note: gift_card_cache table was removed as it was never populated
+      // Always fetch from Square API directly
+      // Try square_existing_clients table
+      const customer = await prisma.$queryRaw`
           SELECT square_customer_id, given_name, family_name, email_address, gift_card_id
           FROM square_existing_clients 
           WHERE gift_card_id LIKE ${`%${gan}%`}
@@ -108,7 +84,6 @@ export async function GET(request, { params }) {
             }
           }
         }
-      }
     } catch (dbError) {
       console.error(`⚠️ Database lookup error: ${dbError.message}`)
     }
