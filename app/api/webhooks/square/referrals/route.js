@@ -1572,7 +1572,14 @@ async function sendReferralCodeToNewClient(
       }
     }
     
-    if (!smsDestination) {
+    // Check if SMS sending is disabled
+    const smsDisabled = process.env.DISABLE_SMS_SENDING === 'true' || process.env.SMS_ENABLED === 'false'
+    
+    if (smsDisabled) {
+      console.log('ℹ️ Referral SMS sending is disabled (DISABLE_SMS_SENDING or SMS_ENABLED=false)')
+      smsAnalytics.skipped = true
+      smsAnalytics.reason = 'sms-disabled'
+    } else if (!smsDestination) {
       console.log('ℹ️ Referral SMS not sent — missing phone number')
       smsAnalytics.reason = 'missing-phone'
     } else if (smsAlreadySent) {
