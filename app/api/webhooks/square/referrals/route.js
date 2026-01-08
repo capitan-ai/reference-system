@@ -1,7 +1,7 @@
 const prisma = require('../../../../../lib/prisma-client')
 const crypto = require('crypto')
 const QRCode = require('qrcode')
-const { sendReferralCodeEmail, sendGiftCardIssuedEmail } = require('../../../../../lib/email-service-simple')
+const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
 const { sendReferralCodeSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
 const {
@@ -2069,6 +2069,36 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               } else {
                 console.log('⚠️ Referrer gift card email skipped – missing email address')
               }
+
+              // Send notification to admin about referral code usage (referrer reward)
+              try {
+                await sendReferralCodeUsageNotification({
+                  referralCode: customer.used_referral_code,
+                  customer: {
+                    square_customer_id: customerId,
+                    given_name: customer.given_name,
+                    family_name: customer.family_name,
+                    email_address: customer.email_address,
+                    phone_number: customer.phone_number
+                  },
+                  referrer: {
+                    square_customer_id: referrer.square_customer_id,
+                    given_name: referrer.given_name,
+                    family_name: referrer.family_name,
+                    email_address: referrer.email_address,
+                    personal_code: referrer.personal_code
+                  },
+                  giftCard: {
+                    giftCardId: referrerGiftCard.giftCardId,
+                    giftCardGan: referrerGiftCard.giftCardGan,
+                    amountCents: referrerGiftCard.amountCents
+                  },
+                  source: 'payment.completed (referrer_reward)'
+                })
+              } catch (notificationError) {
+                // Don't fail the whole process if notification fails
+                console.error('⚠️ Failed to send referral code usage notification:', notificationError.message)
+              }
             } else {
               paymentHadError = true
               if (runContext?.correlationId) {
@@ -2144,6 +2174,36 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 })
               } else {
                 console.log('⚠️ Referrer load email skipped – missing email address or card number')
+              }
+
+              // Send notification to admin about referral code usage (referrer reward - loaded)
+              try {
+                await sendReferralCodeUsageNotification({
+                  referralCode: customer.used_referral_code,
+                  customer: {
+                    square_customer_id: customerId,
+                    given_name: customer.given_name,
+                    family_name: customer.family_name,
+                    email_address: customer.email_address,
+                    phone_number: customer.phone_number
+                  },
+                  referrer: {
+                    square_customer_id: referrer.square_customer_id,
+                    given_name: referrer.given_name,
+                    family_name: referrer.family_name,
+                    email_address: referrer.email_address,
+                    personal_code: referrer.personal_code
+                  },
+                  giftCard: {
+                    giftCardId: referrerInfo.gift_card_id,
+                    giftCardGan: loadResult.giftCardGan,
+                    amountCents: rewardAmountCents
+                  },
+                  source: 'payment.completed (referrer_reward_loaded)'
+                })
+              } catch (notificationError) {
+                // Don't fail the whole process if notification fails
+                console.error('⚠️ Failed to send referral code usage notification:', notificationError.message)
               }
             } else {
               paymentHadError = true
@@ -2835,6 +2895,42 @@ async function processBookingCreated(bookingData, runContext = {}) {
             })
           } else {
             console.log('⚠️ Friend gift card email skipped – missing email address')
+          }
+
+          // Send notification to admin about referral code usage
+          try {
+            await sendReferralCodeUsageNotification({
+              referralCode,
+              customer: {
+                square_customer_id: customerId,
+                given_name: customer.given_name,
+                family_name: customer.family_name,
+                email_address: customer.email_address,
+                phone_number: customer.phone_number,
+                personal_code: customer.personal_code
+              },
+              referrer: {
+                square_customer_id: referrer.square_customer_id,
+                given_name: referrer.given_name,
+                family_name: referrer.family_name,
+                email_address: referrer.email_address,
+                personal_code: referrer.personal_code
+              },
+              booking: {
+                id: bookingId,
+                start_at: bookingData?.start_at,
+                location_id: bookingLocationId
+              },
+              giftCard: {
+                giftCardId: friendGiftCard.giftCardId,
+                giftCardGan: friendGiftCard.giftCardGan,
+                amountCents: friendGiftCard.amountCents
+              },
+              source: `booking.created (${referralCodeSource || 'unknown'})`
+            })
+          } catch (notificationError) {
+            // Don't fail the whole process if notification fails
+            console.error('⚠️ Failed to send referral code usage notification:', notificationError.message)
           }
         } else {
           bookingHadError = true
