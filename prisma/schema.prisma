@@ -1,0 +1,774 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model RefLink {
+  id         String               @id @default(uuid())
+  customerId String               @unique // square_customer_id from square_existing_clients
+  refCode    String               @unique
+  url        String
+  issuedAt   DateTime             @default(now())
+  status     RefLinkStatus        @default(ACTIVE)
+  createdAt  DateTime             @default(now())
+  customer   SquareExistingClient @relation(fields: [customerId], references: [square_customer_id])
+
+  @@map("ref_links")
+}
+
+model RefClick {
+  id          String                @id @default(uuid())
+  refCode     String
+  refSid      String?               @db.VarChar(255)
+  customerId  String? // square_customer_id from square_existing_clients
+  firstSeenAt DateTime              @default(now())
+  ipHash      String?               @db.VarChar(64)
+  userAgent   String?               @db.VarChar(500)
+  landingUrl  String?               @db.VarChar(500)
+  utmSource   String?               @db.VarChar(100)
+  utmMedium   String?               @db.VarChar(100)
+  utmCampaign String?               @db.VarChar(100)
+  matched     Boolean               @default(false)
+  createdAt   DateTime              @default(now())
+  customer    SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
+
+  @@map("ref_clicks")
+}
+
+model RefMatch {
+  id         String               @id @default(uuid())
+  bookingId  String               @unique
+  customerId String // square_customer_id from square_existing_clients
+  refCode    String
+  refClickId String?
+  matchedVia MatchMethod
+  confidence Float                @default(0.0)
+  matchedAt  DateTime             @default(now())
+  createdAt  DateTime             @default(now())
+  customer   SquareExistingClient @relation(fields: [customerId], references: [square_customer_id])
+
+  @@map("ref_matches")
+}
+
+model RefReward {
+  id                 String                @id @default(uuid())
+  type               RewardType
+  referrerCustomerId String? // square_customer_id from square_existing_clients
+  friendCustomerId   String? // square_customer_id from square_existing_clients
+  bookingId          String?
+  refMatchId         String?
+  amount             Int
+  currency           String                @default("USD")
+  status             RewardStatus          @default(PENDING)
+  reason             String?
+  createdAt          DateTime              @default(now())
+  grantedAt          DateTime?
+  redeemedAt         DateTime?
+  friend             SquareExistingClient? @relation("FriendRewards", fields: [friendCustomerId], references: [square_customer_id])
+  referrer           SquareExistingClient? @relation("ReferrerRewards", fields: [referrerCustomerId], references: [square_customer_id])
+
+  @@unique([type, referrerCustomerId, friendCustomerId])
+  @@map("ref_rewards")
+}
+
+model ProcessedEvent {
+  idempotencyKey String   @id
+  createdAt      DateTime @default(now())
+
+  @@map("processed_events")
+}
+
+model GiftCardRun {
+  id                String    @id @default(uuid())
+  correlation_id    String    @unique
+  square_event_id   String?
+  square_event_type String?
+  trigger_type      String
+  resource_id       String?
+  stage             String?
+  status            String    @default("pending")
+  attempts          Int       @default(0)
+  last_error        String?
+  payload           Json?
+  context           Json?
+  resumed_at        DateTime? @db.Timestamptz(6)
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([square_event_id])
+  @@index([status])
+  @@map("giftcard_runs")
+}
+
+model GiftCardJob {
+  id             String            @id @default(uuid())
+  correlation_id String
+  trigger_type   String
+  stage          String
+  status         GiftCardJobStatus @default(queued)
+  payload        Json
+  context        Json?
+  attempts       Int               @default(0)
+  max_attempts   Int               @default(5)
+  scheduled_at   DateTime          @default(now()) @db.Timestamptz(6)
+  locked_at      DateTime?         @db.Timestamptz(6)
+  lock_owner     String?
+  last_error     String?
+  created_at     DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime          @default(now()) @db.Timestamptz(6)
+
+  @@unique([correlation_id, stage], map: "giftcard_jobs_correlation_stage_key")
+  @@index([status, scheduled_at], map: "giftcard_jobs_status_scheduled_idx")
+  @@map("giftcard_jobs")
+}
+
+model NotificationEvent {
+  id                 String                   @id @default(uuid())
+  channel            NotificationChannel
+  templateType       NotificationTemplateType
+  status             NotificationStatus       @default(queued)
+  customerId         String?
+  referrerCustomerId String?
+  referralEventId    String?
+  externalId         String?                  @db.VarChar(255)
+  templateId         String?                  @db.VarChar(255)
+  sentAt             DateTime?
+  statusAt           DateTime?
+  errorCode          String?                  @db.VarChar(255)
+  errorMessage       String?
+  metadata           Json?
+  createdAt          DateTime                 @default(now())
+
+  @@index([channel, status, createdAt], map: "notification_channel_status_idx")
+  @@map("notification_events")
+}
+
+model AnalyticsDeadLetter {
+  id           String    @id @default(uuid())
+  eventType    String
+  payload      Json
+  errorMessage String?
+  retryCount   Int       @default(0)
+  lastTriedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@map("analytics_dead_letter")
+}
+
+model DevicePassRegistration {
+  deviceLibraryIdentifier String
+  passTypeIdentifier      String
+  serialNumber            String
+  pushToken               String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@id([deviceLibraryIdentifier, passTypeIdentifier, serialNumber])
+  @@map("device_pass_registrations")
+}
+
+model SquareExistingClient {
+  id                         Int       @id @default(autoincrement())
+  square_customer_id         String    @unique
+  given_name                 String?
+  family_name                String?
+  email_address              String?
+  phone_number               String?
+  got_signup_bonus           Boolean?  @default(false)
+  activated_as_referrer      Boolean?  @default(false)
+  personal_code              String?   @unique
+  created_at                 DateTime? @default(now()) @db.Timestamp(6)
+  updated_at                 DateTime? @default(now()) @db.Timestamp(6)
+  gift_card_id               String?
+  referral_code              String?   @unique(map: "unique_referral_code")
+  referral_url               String?
+  total_referrals            Int?      @default(0)
+  total_rewards              Int?      @default(0)
+  email_sent_at              DateTime? @db.Timestamptz(6)
+  first_payment_completed    Boolean?  @default(false)
+  ip_addresses               String[]  @default([])
+  first_ip_address           String?
+  last_ip_address            String?
+  used_referral_code         String?
+  referral_email_sent        Boolean?  @default(false)
+  gift_card_order_id         String?
+  gift_card_line_item_uid    String?
+  gift_card_delivery_channel String?
+  gift_card_activation_url   String?
+  gift_card_pass_kit_url     String?
+  gift_card_digital_email    String?
+  referral_sms_sent          Boolean?  @default(false)
+  referral_sms_sent_at       DateTime? @db.Timestamptz(6)
+  referral_sms_sid           String?
+  gift_card_gan              String?
+
+  // Relations
+  refLinks        RefLink[]
+  refMatches      RefMatch[]
+  friendRewards   RefReward[] @relation("FriendRewards")
+  referrerRewards RefReward[] @relation("ReferrerRewards")
+  refClicks       RefClick[]
+  bookings        Booking[]
+  payments        Payment[]
+
+  @@index([activated_as_referrer], map: "idx_activated_referrer")
+  @@index([gift_card_id], map: "idx_gift_card_id")
+  @@index([personal_code], map: "idx_personal_code")
+  @@index([referral_code], map: "idx_referral_code")
+  @@index([gift_card_delivery_channel], map: "idx_square_clients_gift_card_delivery")
+  @@index([gift_card_order_id], map: "idx_square_clients_gift_card_order")
+  @@index([square_customer_id], map: "idx_square_customer_id")
+  @@map("square_existing_clients")
+}
+
+model square_gift_card_gan_audit {
+  gift_card_id       String    @id
+  square_customer_id String?
+  resolved_gan       String?
+  verified_at        DateTime? @default(now()) @db.Timestamptz(6)
+  raw_payload        Json?
+}
+
+// ============================================================================
+// DASHBOARD TABLES - Main Tables for Dashboard Analytics
+// ============================================================================
+
+// ============================================================================
+// LOCATIONS TABLE
+// Store location mapping (Square ID to friendly name)
+// ============================================================================
+
+model Location {
+  id                              String  @id @default(uuid())
+  square_location_id              String  @unique // Square location ID
+  name                            String // Friendly name (Pacific Ave, Union St)
+  address_line_1                  String?
+  locality                        String? // City
+  administrative_district_level_1 String? // State
+  postal_code                     String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  bookings Booking[]
+  payments Payment[]
+  orders   Order[]
+
+  @@map("locations")
+}
+
+// ============================================================================
+// TEAM MEMBERS (MASTERS) TABLE
+// Active nail technicians/staff members
+// ============================================================================
+
+model TeamMember {
+  id                    String       @id @default(uuid())
+  square_team_member_id String       @unique // Square team member ID
+  given_name            String?
+  family_name           String?
+  email_address         String?
+  phone_number          String?
+  status                String? // ACTIVE, INACTIVE
+  location_code         TeamLocation @default(UNKNOWN_LOC)
+  role                  TeamRole     @default(UNKNOWN)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  appointment_segments BookingAppointmentSegment[]
+  processed_payments   Payment[]                   @relation("ProcessedByTeamMember")
+  order_line_items     OrderLineItem[]
+
+  @@index([square_team_member_id])
+  @@index([status])
+  @@map("team_members")
+}
+
+// ============================================================================
+// SERVICE VARIATIONS TABLE
+// Store service information (fetched from Square API)
+// ============================================================================
+
+model ServiceVariation {
+  id               String  @id @default(uuid())
+  square_id        String  @unique // Square service variation ID
+  name             String? // Service name (e.g., "Manicure", "Pedicure")
+  service_id       String? // Parent service ID
+  duration_minutes Int?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  appointment_segments BookingAppointmentSegment[]
+
+  @@map("service_variations")
+}
+
+// ============================================================================
+// BOOKINGS TABLE
+// Stores all bookings from booking.created/updated webhooks
+// ============================================================================
+
+model Booking {
+  id String @id // Square booking ID
+
+  // ===== BASIC FIELDS =====
+  customer_id   String? // Square customer ID
+  location_id   String
+  location_type String? // BUSINESS_LOCATION
+  start_at      DateTime
+  status        String // ACCEPTED, CANCELLED, etc.
+  all_day       Boolean  @default(false)
+  version       Int      @default(0)
+  source        String? // THIRD_PARTY_BUYER, FIRST_PARTY_MERCHANT
+
+  // ===== ADDRESS =====
+  address_line_1                  String?
+  locality                        String? // City
+  administrative_district_level_1 String? // State (CA)
+  postal_code                     String?
+
+  // ===== CREATOR DETAILS =====
+  creator_type           String? // CUSTOMER, STAFF, TEAM_MEMBER
+  creator_customer_id    String?
+  creator_team_member_id String?
+
+  // ===== MERCHANT =====
+  merchant_id String? // Square merchant ID
+
+  // ===== TRANSITION =====
+  transition_time_minutes Int? @default(0)
+
+  // ===== TIMESTAMPS =====
+  created_at DateTime
+  updated_at DateTime
+
+  // ===== RAW DATA =====
+  raw_json Json? // Immutable source of truth - full booking object from Square API
+
+  // Relations
+  customer             SquareExistingClient?       @relation(fields: [customer_id], references: [square_customer_id])
+  location             Location                    @relation(fields: [location_id], references: [square_location_id])
+  appointment_segments BookingAppointmentSegment[]
+  payments             Payment[]
+
+  @@index([customer_id])
+  @@index([location_id])
+  @@index([start_at])
+  @@index([status])
+  @@index([created_at])
+  @@index([creator_type])
+  @@map("bookings")
+}
+
+// ============================================================================
+// BOOKING APPOINTMENT SEGMENTS
+// Services in each booking (links to technicians)
+// ============================================================================
+
+model BookingAppointmentSegment {
+  id         String @id @default(uuid())
+  booking_id String
+
+  // ===== SEGMENT FIELDS =====
+  duration_minutes            Int
+  intermission_minutes        Int     @default(0)
+  service_variation_id        String
+  service_variation_client_id String?
+  service_variation_version   BigInt?
+  team_member_id              String? // Nail technician ID
+  any_team_member             Boolean @default(false)
+
+  // Relations
+  booking           Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  service_variation ServiceVariation? @relation(fields: [service_variation_id], references: [square_id])
+  team_member       TeamMember?       @relation(fields: [team_member_id], references: [square_team_member_id])
+
+  @@index([booking_id])
+  @@index([team_member_id])
+  @@index([service_variation_id])
+  @@map("booking_appointment_segments")
+}
+
+// ============================================================================
+// ORDERS TABLE
+// Store order information (for discount tracking)
+// ============================================================================
+
+model Order {
+  id          String  @id // Square order ID
+  location_id String?
+  customer_id String?
+
+  // ===== ORDER FIELDS =====
+  state        String? // OPEN, COMPLETED, CANCELED
+  version      Int?
+  reference_id String?
+
+  // ===== TIMESTAMPS =====
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  location   Location?       @relation(fields: [location_id], references: [square_location_id])
+  payments   Payment[]
+  line_items OrderLineItem[]
+
+  @@index([customer_id])
+  @@index([location_id])
+  @@index([state])
+  @@map("orders")
+}
+
+// ============================================================================
+// ORDER LINE ITEMS TABLE
+// Store all line items from Square orders with all fields
+// ============================================================================
+
+model OrderLineItem {
+  id String @id @default(uuid())
+
+  // ===== ORDER CONTEXT =====
+  order_id    String // Square order ID
+  location_id String? // Square location ID
+  customer_id String? // Square customer ID
+  team_member_id String? // Who processed the payment (from payments table)
+
+  // ===== LINE ITEM FIELDS =====
+  uid               String? @unique // Unique identifier for this line item
+  catalog_object_id String? // Square catalog object ID
+  catalog_version   BigInt? // Catalog version
+  quantity          String? // Quantity as string (Square format)
+  name              String? // Item name
+  variation_name    String? // Variation name (e.g., "TOP master Anna")
+  item_type         String? // ITEM, CUSTOM_AMOUNT, etc.
+
+  // ===== MONEY AMOUNTS (all in cents) =====
+  base_price_money_amount   Int? // Base price
+  base_price_money_currency String? @default("USD")
+
+  gross_sales_money_amount   Int? // Gross sales
+  gross_sales_money_currency String? @default("USD")
+
+  total_tax_money_amount   Int?    @default(0) // Total tax
+  total_tax_money_currency String? @default("USD")
+
+  total_discount_money_amount   Int?    @default(0) // Total discount
+  total_discount_money_currency String? @default("USD")
+
+  total_money_amount   Int? // Total for this line item
+  total_money_currency String? @default("USD")
+
+  variation_total_price_money_amount   Int? // Variation total price
+  variation_total_price_money_currency String? @default("USD")
+
+  total_service_charge_money_amount   Int?    @default(0)
+  total_service_charge_money_currency String? @default("USD")
+
+  total_card_surcharge_money_amount   Int?    @default(0)
+  total_card_surcharge_money_currency String? @default("USD")
+
+  // ===== ORDER-LEVEL FIELDS (stored per line item for analytics) =====
+  order_state      String? // OPEN, COMPLETED, CANCELED
+  order_version    Int? // Order version
+  order_created_at DateTime? // When order was created
+  order_updated_at DateTime? // When order was last updated
+  order_closed_at  DateTime? // When order was closed (if completed)
+
+  // ===== ORDER TOTALS (for context) =====
+  order_total_tax_money_amount              Int?
+  order_total_tax_money_currency            String? @default("USD")
+  order_total_discount_money_amount         Int?
+  order_total_discount_money_currency       String? @default("USD")
+  order_total_tip_money_amount              Int?
+  order_total_tip_money_currency            String? @default("USD")
+  order_total_money_amount                  Int? // Total order amount
+  order_total_money_currency                String? @default("USD")
+  order_total_service_charge_money_amount   Int?
+  order_total_service_charge_money_currency String? @default("USD")
+  order_total_card_surcharge_money_amount   Int?
+  order_total_card_surcharge_money_currency String? @default("USD")
+
+  // ===== TIMESTAMPS =====
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  // Relations
+  order Order? @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  team_member TeamMember? @relation(fields: [team_member_id], references: [square_team_member_id])
+
+  @@index([order_id])
+  @@index([location_id])
+  @@index([customer_id])
+  @@index([team_member_id])
+  @@index([catalog_object_id])
+  @@index([uid])
+  @@index([order_state])
+  @@index([order_created_at])
+  @@map("order_line_items")
+}
+
+// ============================================================================
+// PAYMENTS TABLE
+// Stores all payments from payment.created/updated webhooks - ALL Square fields
+// ============================================================================
+
+model Payment {
+  id              String  @id // Square payment ID
+  square_event_id String?
+  event_type      String // "payment.created" or "payment.updated"
+  merchant_id     String?
+
+  // ===== CUSTOMER & LOCATION =====
+  customer_id String?
+  location_id String
+  order_id    String?
+  booking_id  String?
+
+  // ===== MONEY AMOUNTS (all as cents) =====
+  amount_money_amount     Int // Base amount in cents
+  amount_money_currency   String  @default("USD")
+  tip_money_amount        Int?
+  tip_money_currency      String? @default("USD")
+  total_money_amount      Int // Total amount
+  total_money_currency    String  @default("USD")
+  approved_money_amount   Int?
+  approved_money_currency String? @default("USD")
+
+  // ===== STATUS =====
+  status         String // COMPLETED, APPROVED, etc.
+  source_type    String? // CARD, CASH, etc.
+  delay_action   String? // CANCEL, etc.
+  delay_duration String? // PT70M format
+  delayed_until  DateTime?
+
+  // ===== STAFF/TEAM MEMBER =====
+  team_member_id String? // Who processed payment (admin)
+  employee_id    String? // Same as team_member_id usually
+
+  // ===== APPLICATION DETAILS =====
+  application_details_square_product String? // SQUARE_POS, etc.
+
+  // ===== CAPABILITIES =====
+  capabilities String[] @default([])
+
+  // ===== CARD DETAILS =====
+  card_application_cryptogram          String?
+  card_application_identifier          String?
+  card_application_name                String? // AMEX CREDIT, VISA CREDIT
+  card_auth_result_code                String?
+  card_avs_status                      String? // AVS_NOT_CHECKED
+  card_bin                             String?
+  card_brand                           String? // VISA, AMEX, etc.
+  card_type                            String? // CREDIT, DEBIT
+  card_exp_month                       Int?
+  card_exp_year                        Int?
+  card_fingerprint                     String?
+  card_last_4                          String?
+  card_payment_account_reference       String?
+  card_prepaid_type                    String? // NOT_PREPAID
+  card_entry_method                    String? // CONTACTLESS, etc.
+  card_statement_description           String?
+  card_status                          String? // CAPTURED, AUTHORIZED
+  card_verification_method             String? // NONE
+  card_verification_results            String? // SUCCESS
+  card_cvv_status                      String? // CVV_NOT_CHECKED
+  card_payment_timeline_authorized_at  DateTime?
+  card_payment_timeline_captured_at    DateTime?
+  card_emv_authorization_response_code String?
+
+  // ===== DEVICE DETAILS =====
+  device_id                   String?
+  device_installation_id      String?
+  device_name                 String? // iPad, etc.
+  card_device_id              String?
+  card_device_installation_id String?
+  card_device_name            String?
+
+  // ===== RECEIPT =====
+  receipt_number String?
+  receipt_url    String?
+
+  // ===== PROCESSING FEES =====
+  processing_fee_amount   Int?
+  processing_fee_currency String? @default("USD")
+  processing_fee_type     String? // INITIAL, ADJUSTMENT
+
+  // ===== REFUND INFO =====
+  refund_ids String[] @default([])
+
+  // ===== TIMESTAMPS =====
+  created_at        DateTime
+  updated_at        DateTime
+  square_created_at DateTime? // Square webhook timestamp
+
+  // ===== VERSION =====
+  version Int?
+
+  // Relations
+  customer    SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
+  booking     Booking?              @relation(fields: [booking_id], references: [id])
+  location    Location              @relation(fields: [location_id], references: [square_location_id])
+  order       Order?                @relation(fields: [order_id], references: [id])
+  team_member TeamMember?           @relation("ProcessedByTeamMember", fields: [team_member_id], references: [square_team_member_id])
+  tenders     PaymentTender[]
+
+  @@index([customer_id])
+  @@index([location_id])
+  @@index([order_id])
+  @@index([booking_id])
+  @@index([team_member_id])
+  @@index([status])
+  @@index([created_at])
+  @@index([source_type])
+  @@index([card_brand])
+  @@map("payments")
+}
+
+// ============================================================================
+// PAYMENT TENDERS TABLE
+// Payment methods used in each payment (CARD, CASH, GIFT_CARD, etc.)
+// ============================================================================
+
+model PaymentTender {
+  id         String  @id @default(uuid())
+  payment_id String
+  tender_id  String? // Square tender ID
+
+  // ===== TENDER FIELDS =====
+  type                  String // CARD, CASH, SQUARE_GIFT_CARD, BANK_ACCOUNT, etc.
+  amount_money_amount   Int // Tender amount in cents
+  amount_money_currency String  @default("USD")
+  note                  String?
+
+  // ===== CARD DETAILS (if type = CARD) =====
+  card_status                          String? // CAPTURED, AUTHORIZED
+  card_application_cryptogram          String?
+  card_application_identifier          String?
+  card_application_name                String?
+  card_auth_result_code                String?
+  card_avs_status                      String?
+  card_bin                             String?
+  card_brand                           String? // VISA, AMEX, etc.
+  card_type                            String? // CREDIT, DEBIT
+  card_exp_month                       Int?
+  card_exp_year                        Int?
+  card_fingerprint                     String?
+  card_last_4                          String?
+  card_payment_account_reference       String?
+  card_prepaid_type                    String?
+  card_entry_method                    String?
+  card_statement_description           String?
+  card_verification_method             String?
+  card_verification_results            String?
+  card_cvv_status                      String?
+  card_payment_timeline_authorized_at  DateTime?
+  card_payment_timeline_captured_at    DateTime?
+  card_emv_authorization_response_code String?
+  card_device_id                       String?
+  card_device_installation_id          String?
+  card_device_name                     String?
+
+  // ===== CASH DETAILS (if type = CASH) =====
+  cash_buyer_tendered_amount   Int?
+  cash_buyer_tendered_currency String? @default("USD")
+  cash_change_back_amount      Int?
+  cash_change_back_currency    String? @default("USD")
+
+  // ===== GIFT CARD DETAILS (if type = SQUARE_GIFT_CARD) =====
+  gift_card_id  String?
+  gift_card_gan String? // Gift Account Number
+
+  // ===== BANK ACCOUNT DETAILS (if type = BANK_ACCOUNT) =====
+  bank_account_details_account_last_4 String?
+  bank_account_details_account_type   String?
+  bank_account_details_routing_number String?
+
+  // ===== TIMESTAMPS =====
+  created_at DateTime
+
+  payment Payment @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+
+  @@index([payment_id])
+  @@index([type])
+  @@index([gift_card_id])
+  @@index([card_brand])
+  @@map("payment_tenders")
+}
+
+enum RefLinkStatus {
+  NOT_ISSUED
+  ACTIVE
+  REVOKED
+}
+
+enum MatchMethod {
+  EMAIL
+  PHONE
+  IP_UA
+  MANUAL
+}
+
+enum RewardType {
+  FRIEND_DISCOUNT
+  REFERRER_REWARD
+}
+
+enum RewardStatus {
+  PENDING
+  GRANTED
+  REDEEMED
+  VOID
+}
+
+enum GiftCardJobStatus {
+  queued
+  running
+  completed
+  error
+}
+
+enum NotificationChannel {
+  SMS
+  EMAIL
+}
+
+enum NotificationStatus {
+  queued
+  sent
+  delivered
+  failed
+  bounced
+}
+
+enum NotificationTemplateType {
+  REFERRAL_INVITE
+  REFERRER_ACTIVATION
+  FRIEND_ACTIVATION
+  OTHER
+}
+
+// ============================================================================ 
+// TEAM MEMBER ROLE ENUM
+// ============================================================================ 
+// Role enum for team members
+enum TeamRole {
+  TOP_MASTER
+  MASTER
+  JUNIOR
+  ADMIN
+  UNKNOWN
+}
+
+// Location enum for team members (friendly selectable)
+enum TeamLocation {
+  PACIFIC_AVE
+  UNION_ST
+  UNKNOWN_LOC
+}
