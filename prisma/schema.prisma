@@ -8,19 +8,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model RefLink {
-  id         String               @id @default(uuid())
-  customerId String               @unique // square_customer_id from square_existing_clients
-  refCode    String               @unique
-  url        String
-  issuedAt   DateTime             @default(now())
-  status     RefLinkStatus        @default(ACTIVE)
-  createdAt  DateTime             @default(now())
-  customer   SquareExistingClient @relation(fields: [customerId], references: [square_customer_id])
-
-  @@map("ref_links")
-}
-
 model RefClick {
   id          String                @id @default(uuid())
   refCode     String
@@ -38,49 +25,6 @@ model RefClick {
   customer    SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
 
   @@map("ref_clicks")
-}
-
-model RefMatch {
-  id         String               @id @default(uuid())
-  bookingId  String               @unique
-  customerId String // square_customer_id from square_existing_clients
-  refCode    String
-  refClickId String?
-  matchedVia MatchMethod
-  confidence Float                @default(0.0)
-  matchedAt  DateTime             @default(now())
-  createdAt  DateTime             @default(now())
-  customer   SquareExistingClient @relation(fields: [customerId], references: [square_customer_id])
-
-  @@map("ref_matches")
-}
-
-model RefReward {
-  id                 String                @id @default(uuid())
-  type               RewardType
-  referrerCustomerId String? // square_customer_id from square_existing_clients
-  friendCustomerId   String? // square_customer_id from square_existing_clients
-  bookingId          String?
-  refMatchId         String?
-  amount             Int
-  currency           String                @default("USD")
-  status             RewardStatus          @default(PENDING)
-  reason             String?
-  createdAt          DateTime              @default(now())
-  grantedAt          DateTime?
-  redeemedAt         DateTime?
-  friend             SquareExistingClient? @relation("FriendRewards", fields: [friendCustomerId], references: [square_customer_id])
-  referrer           SquareExistingClient? @relation("ReferrerRewards", fields: [referrerCustomerId], references: [square_customer_id])
-
-  @@unique([type, referrerCustomerId, friendCustomerId])
-  @@map("ref_rewards")
-}
-
-model ProcessedEvent {
-  idempotencyKey String   @id
-  createdAt      DateTime @default(now())
-
-  @@map("processed_events")
 }
 
 model GiftCardRun {
@@ -148,18 +92,6 @@ model NotificationEvent {
   @@map("notification_events")
 }
 
-model AnalyticsDeadLetter {
-  id           String    @id @default(uuid())
-  eventType    String
-  payload      Json
-  errorMessage String?
-  retryCount   Int       @default(0)
-  lastTriedAt  DateTime?
-  createdAt    DateTime  @default(now())
-
-  @@map("analytics_dead_letter")
-}
-
 model DevicePassRegistration {
   deviceLibraryIdentifier String
   passTypeIdentifier      String
@@ -208,10 +140,6 @@ model SquareExistingClient {
   gift_card_gan              String?
 
   // Relations
-  refLinks        RefLink[]
-  refMatches      RefMatch[]
-  friendRewards   RefReward[] @relation("FriendRewards")
-  referrerRewards RefReward[] @relation("ReferrerRewards")
   refClicks       RefClick[]
   bookings        Booking[]
   payments        Payment[]
@@ -700,31 +628,6 @@ model PaymentTender {
   @@index([gift_card_id])
   @@index([card_brand])
   @@map("payment_tenders")
-}
-
-enum RefLinkStatus {
-  NOT_ISSUED
-  ACTIVE
-  REVOKED
-}
-
-enum MatchMethod {
-  EMAIL
-  PHONE
-  IP_UA
-  MANUAL
-}
-
-enum RewardType {
-  FRIEND_DISCOUNT
-  REFERRER_REWARD
-}
-
-enum RewardStatus {
-  PENDING
-  GRANTED
-  REDEEMED
-  VOID
 }
 
 enum GiftCardJobStatus {
