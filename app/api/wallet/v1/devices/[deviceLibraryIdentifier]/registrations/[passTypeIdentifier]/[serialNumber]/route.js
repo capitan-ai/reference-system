@@ -33,6 +33,14 @@ function verifyAuthToken(request, serialNumber) {
 }
 
 export async function POST(request, { params }) {
+  // Log IMMEDIATELY at the start - before any processing
+  console.log(`\n${'='.repeat(60)}`)
+  console.log(`📱 [${new Date().toISOString()}] REGISTRATION ENDPOINT HIT`)
+  console.log(`   URL: ${request.url}`)
+  console.log(`   Method: ${request.method}`)
+  console.log(`   Headers:`, Object.fromEntries(request.headers.entries()))
+  console.log(`${'='.repeat(60)}\n`)
+  
   const startTime = Date.now()
   
   try {
