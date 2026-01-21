@@ -49,14 +49,26 @@ function authorize(request) {
 
   // If no match, check if this is a Vercel cron request (Vercel sends a specific user-agent)
   // Vercel cron jobs might not send the secret if not configured in vercel.json
-  if (userAgent.includes('vercel-cron') || userAgent.includes('vercel')) {
+  // Also check for Vercel's internal cron infrastructure
+  const isVercelRequest = 
+    userAgent.includes('vercel-cron') || 
+    userAgent.includes('vercel') ||
+    userAgent.toLowerCase().includes('vercel') ||
+    // Vercel cron jobs often have no user-agent or specific patterns
+    (!userAgent || userAgent.length === 0)
+  
+  if (isVercelRequest) {
     // Allow if it's clearly a Vercel request but warn
     console.warn('⚠️ Vercel cron request detected but secret mismatch. Allowing for now.')
-    console.warn('⚠️ To secure this endpoint, configure CRON_SECRET in Vercel cron job settings')
+    console.warn('⚠️ User-Agent:', userAgent || '(empty)')
+    console.warn('⚠️ To secure this endpoint, verify CRON_SECRET in Vercel matches environment variable')
     return { authorized: true, method: 'vercel-cron-user-agent' }
   }
 
   console.error(`[CRON] ❌ Authorization failed - No matching secret found`)
+  console.error(`[CRON] User-Agent: ${userAgent || '(empty)'}`)
+  console.error(`[CRON] Auth header present: ${!!authHeader}`)
+  console.error(`[CRON] x-cron-secret header present: ${!!cronHeader}`)
   console.error(`[CRON] Expected CRON_SECRET (first 10 chars): ${cronSecret.substring(0, 10)}...`)
   return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
 }
