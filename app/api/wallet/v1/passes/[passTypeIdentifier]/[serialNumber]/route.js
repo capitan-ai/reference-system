@@ -100,7 +100,9 @@ export async function GET(request, { params }) {
                           : 'Guest')
 
     const baseUrl = process.env.APP_BASE_URL ? process.env.APP_BASE_URL.replace(/\/$/, '') : null
-    const webServiceUrl = baseUrl ? `${baseUrl}/api/wallet/v1` : null
+    // IMPORTANT: Apple appends /v1/devices/... to webServiceURL automatically
+    // So webServiceURL should be just the base path without /v1
+    const webServiceUrl = baseUrl ? `${baseUrl}/api/wallet` : null
 
     // Generate updated pass
     const passBuffer = await generateGiftCardPass({
