@@ -9,6 +9,8 @@ import prisma from '@/lib/prisma-client'
 
 const require = createRequire(import.meta.url)
 const { generateAuthToken } = require('../../../../../../../../../lib/wallet/pass-generator.js')
+const { resolveGiftCardContext } = require('../../../../../../../../../lib/wallet/giftcard-context.js')
+const { getGiftCardsApi } = require('../../../../../../../../../lib/wallet/clients.js')
 
 // Verify authentication token
 function verifyAuthToken(request, serialNumber) {
@@ -107,7 +109,55 @@ export async function POST(request, { params }) {
 
     console.log(`📱 Registering device: ${deviceLibraryIdentifier} for pass: ${serialNumber}`)
 
-    // Register or update device registration
+    // Fetch gift card information (serialNumber is the GAN)
+    let giftCardInfo = {
+      giftCardGan: serialNumber,
+      customerName: null,
+      customerEmail: null,
+      squareCustomerId: null,
+      giftCardId: null,
+      balanceCents: null
+    }
+
+    try {
+      const giftCardsApi = getGiftCardsApi()
+      const context = await resolveGiftCardContext({
+        gan: serialNumber,
+        prisma: prisma,
+        giftCardsApi: giftCardsApi
+      })
+
+      giftCardInfo.giftCardGan = context.giftCardGan
+      giftCardInfo.customerName = context.customerName
+      giftCardInfo.balanceCents = context.balanceCents
+
+      // Try to get customer email and Square customer ID from database
+      const customer = await prisma.$queryRaw`
+        SELECT square_customer_id, email_address, gift_card_id
+        FROM square_existing_clients 
+        WHERE 
+          (gift_card_gan IS NOT NULL AND gift_card_gan = ${serialNumber})
+          OR gift_card_id LIKE ${`%${serialNumber}%`}
+        LIMIT 1
+      `
+
+      if (customer && customer.length > 0) {
+        const cust = customer[0]
+        giftCardInfo.squareCustomerId = cust.square_customer_id || null
+        giftCardInfo.customerEmail = cust.email_address || null
+        giftCardInfo.giftCardId = cust.gift_card_id || null
+      }
+
+      console.log(`   Gift card info: ${giftCardInfo.customerName || 'Unknown'} - ${giftCardInfo.giftCardGan}`)
+      if (giftCardInfo.balanceCents) {
+        console.log(`   Balance: $${(giftCardInfo.balanceCents / 100).toFixed(2)}`)
+      }
+    } catch (giftCardError) {
+      console.warn(`⚠️ Could not fetch gift card info: ${giftCardError.message}`)
+      // Continue with registration even if gift card info lookup fails
+    }
+
+    // Register or update device registration with gift card information
     const result = await prisma.devicePassRegistration.upsert({
       where: {
         deviceLibraryIdentifier_passTypeIdentifier_serialNumber: {
@@ -118,13 +168,25 @@ export async function POST(request, { params }) {
       },
       update: {
         pushToken: pushToken,
+        giftCardGan: giftCardInfo.giftCardGan,
+        customerName: giftCardInfo.customerName,
+        customerEmail: giftCardInfo.customerEmail,
+        squareCustomerId: giftCardInfo.squareCustomerId,
+        giftCardId: giftCardInfo.giftCardId,
+        balanceCents: giftCardInfo.balanceCents,
         updatedAt: new Date()
       },
       create: {
         deviceLibraryIdentifier: deviceLibraryIdentifier,
         passTypeIdentifier: passTypeIdentifier,
         serialNumber: serialNumber,
-        pushToken: pushToken
+        pushToken: pushToken,
+        giftCardGan: giftCardInfo.giftCardGan,
+        customerName: giftCardInfo.customerName,
+        customerEmail: giftCardInfo.customerEmail,
+        squareCustomerId: giftCardInfo.squareCustomerId,
+        giftCardId: giftCardInfo.giftCardId,
+        balanceCents: giftCardInfo.balanceCents
       }
     })
 

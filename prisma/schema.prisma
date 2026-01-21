@@ -97,6 +97,15 @@ model DevicePassRegistration {
   passTypeIdentifier      String
   serialNumber            String
   pushToken               String?
+  
+  // Gift card information
+  giftCardGan             String?  // Gift Account Number (same as serialNumber typically)
+  customerName            String?  // Customer name (owner of gift card)
+  customerEmail           String?  // Customer email
+  squareCustomerId        String?  // Square customer ID
+  giftCardId              String?  // Square gift card ID
+  balanceCents            Int?     // Current balance in cents
+  
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
