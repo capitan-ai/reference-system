@@ -97,17 +97,17 @@ model DevicePassRegistration {
   passTypeIdentifier      String
   serialNumber            String
   pushToken               String?
-  
+
   // Gift card information
-  giftCardGan             String?  // Gift Account Number (same as serialNumber typically)
-  customerName            String?  // Customer name (owner of gift card)
-  customerEmail           String?  // Customer email
-  squareCustomerId        String?  // Square customer ID
-  giftCardId              String?  // Square gift card ID
-  balanceCents            Int?     // Current balance in cents
-  
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  giftCardGan      String? // Gift Account Number (same as serialNumber typically)
+  customerName     String? // Customer name (owner of gift card)
+  customerEmail    String? // Customer email
+  squareCustomerId String? // Square customer ID
+  giftCardId       String? // Square gift card ID
+  balanceCents     Int? // Current balance in cents
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@id([deviceLibraryIdentifier, passTypeIdentifier, serialNumber])
   @@map("device_pass_registrations")
@@ -115,7 +115,8 @@ model DevicePassRegistration {
 
 model SquareExistingClient {
   id                         Int       @id @default(autoincrement())
-  square_customer_id         String    @unique
+  organization_id            String // Multi-tenant isolation
+  square_customer_id         String    @unique // Square customer ID (unique for single org, composite unique below for multi-org)
   given_name                 String?
   family_name                String?
   email_address              String?
@@ -149,10 +150,15 @@ model SquareExistingClient {
   gift_card_gan              String?
 
   // Relations
+  organization    Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   refClicks       RefClick[]
   bookings        Booking[]
   payments        Payment[]
+  giftCards       GiftCard[]
+  referralProfile ReferralProfile?
 
+  @@unique([organization_id, square_customer_id])
+  @@index([organization_id])
   @@index([activated_as_referrer], map: "idx_activated_referrer")
   @@index([gift_card_id], map: "idx_gift_card_id")
   @@index([personal_code], map: "idx_personal_code")
@@ -172,8 +178,221 @@ model square_gift_card_gan_audit {
 }
 
 // ============================================================================
+// GIFT CARDS TABLE
+// Supports multiple gift cards per customer (friend bonus + referrer rewards)
+// ============================================================================
+model GiftCard {
+  id                    String             @id @default(uuid())
+  organization_id       String // Multi-tenant isolation
+  square_customer_id    String
+  square_gift_card_id   String             @unique // Square gift card ID
+  gift_card_gan         String? // Gift Account Number
+  reward_type           GiftCardRewardType // FRIEND_SIGNUP_BONUS, REFERRER_REWARD
+  initial_amount_cents  Int? // Initial amount when created
+  current_balance_cents Int? // Current balance (cached from Square)
+
+  // eGift activation metadata (if activated via Square order)
+  gift_card_order_id      String?
+  gift_card_line_item_uid String?
+
+  // Delivery/activation details
+  delivery_channel String? // square_egift_order, owner_funded_activate, owner_funded_adjust
+  activation_url   String? // Square digital card activation URL
+  pass_kit_url     String? // Apple/Google Wallet URL
+  digital_email    String? // Recipient email from Square
+
+  // Status tracking
+  is_active Boolean @default(true)
+  state     String? // PENDING, ACTIVE (from Square)
+
+  // Timestamps
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime  @updatedAt @db.Timestamptz(6)
+  last_balance_check_at DateTime? @db.Timestamptz(6) // When balance was last synced from Square
+
+  // Relations
+  organization   Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer       SquareExistingClient  @relation(fields: [square_customer_id], references: [square_customer_id])
+  transactions   GiftCardTransaction[]
+  ReferralReward ReferralReward[]
+
+  @@index([organization_id])
+  @@index([square_customer_id])
+  @@index([square_gift_card_id])
+  @@index([gift_card_gan])
+  @@index([reward_type])
+  @@index([is_active])
+  @@map("gift_cards")
+}
+
+// ============================================================================
+// GIFT CARD TRANSACTIONS TABLE
+// Track all gift card activities (create, load, use, refund)
+// ============================================================================
+model GiftCardTransaction {
+  id                   String                  @id @default(uuid())
+  gift_card_id         String
+  transaction_type     GiftCardTransactionType
+  amount_cents         Int // Amount added/used in this transaction
+  balance_before_cents Int? // Balance before transaction
+  balance_after_cents  Int? // Balance after transaction
+
+  // Reference IDs
+  square_activity_id String? // Square gift card activity ID
+  square_order_id    String? // Related Square order (if applicable)
+  square_payment_id  String? // Related Square payment (if used for payment)
+
+  // Context
+  reason        String? // COMPLIMENTARY, REFERRER_REWARD, FRIEND_BONUS, etc.
+  context_label String? // Human-readable context
+
+  // Metadata
+  metadata Json? // Store raw Square API response for debugging
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  // Relations
+  giftCard GiftCard @relation(fields: [gift_card_id], references: [id])
+
+  @@index([gift_card_id])
+  @@index([transaction_type])
+  @@index([created_at])
+  @@index([square_activity_id])
+  @@map("gift_card_transactions")
+}
+
+// ============================================================================
+// REFERRAL PROFILES TABLE
+// One-to-one with customer, stores referral program participation
+// ============================================================================
+model ReferralProfile {
+  id                 String  @id @default(uuid())
+  organization_id    String // Multi-tenant isolation
+  square_customer_id String  @unique
+  personal_code      String? @unique
+  referral_code      String? @unique // Alternative code format (if different from personal_code)
+  referral_url       String?
+
+  // Status flags
+  activated_as_referrer Boolean @default(false)
+
+  // Friend signup tracking
+  used_referral_code String? // Referral code they used when signing up (makes them a "friend")
+
+  // Notification tracking
+  referral_email_sent  Boolean   @default(false)
+  referral_sms_sent    Boolean   @default(false)
+  referral_sms_sent_at DateTime? @db.Timestamptz(6)
+  referral_sms_sid     String? // Twilio SMS SID
+
+  // Computed fields (can be calculated from ReferralReward table, but cached for performance)
+  total_referrals_count Int @default(0) // Aggregated count (for quick queries)
+  total_rewards_cents   Int @default(0) // Aggregated total (for quick queries)
+
+  // Timestamps
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime  @updatedAt @db.Timestamptz(6)
+  activated_at DateTime? @db.Timestamptz(6) // When activated_as_referrer became true
+
+  // Relations
+  organization Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer     SquareExistingClient @relation(fields: [square_customer_id], references: [square_customer_id])
+  rewards      ReferralReward[] // All rewards earned as referrer
+
+  @@index([organization_id])
+  @@index([square_customer_id])
+  @@index([personal_code])
+  @@index([referral_code])
+  @@index([used_referral_code])
+  @@index([activated_as_referrer])
+  @@map("referral_profiles")
+}
+
+// ============================================================================
+// REFERRAL REWARDS TABLE
+// Individual reward records (instead of aggregated totals)
+// ============================================================================
+model ReferralReward {
+  id                   String @id @default(uuid())
+  organization_id      String // Multi-tenant isolation
+  referrer_customer_id String // Who earned the reward (referrer)
+  referred_customer_id String // Who used the referral code (friend)
+
+  // Reward details
+  reward_amount_cents Int // Amount earned (typically 1000 = $10)
+  status              ReferralRewardStatus @default(PAID)
+
+  // Gift card that received the reward
+  gift_card_id String? // GiftCard.id that received the reward
+
+  // Triggering events
+  payment_id String? // Payment that triggered the reward (Square payment ID)
+  booking_id String? // Booking that triggered the reward (Square booking ID)
+
+  // Context
+  reward_type String? // "referrer_reward", "friend_bonus", etc.
+
+  // Metadata
+  metadata Json? // Store any additional context
+
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+  paid_at    DateTime? @db.Timestamptz(6) // When reward was actually paid out
+
+  // Relations
+  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  referrer     ReferralProfile @relation(fields: [referrer_customer_id], references: [square_customer_id])
+  giftCard     GiftCard?       @relation(fields: [gift_card_id], references: [id])
+
+  @@index([organization_id])
+  @@index([referrer_customer_id])
+  @@index([referred_customer_id])
+  @@index([gift_card_id])
+  @@index([payment_id])
+  @@index([booking_id])
+  @@index([status])
+  @@index([created_at])
+  @@map("referral_rewards")
+}
+
+// ============================================================================
 // DASHBOARD TABLES - Main Tables for Dashboard Analytics
 // ============================================================================
+
+// ============================================================================
+// ORGANIZATIONS TABLE
+// Multi-tenant isolation: One Square merchant = one organization
+// ============================================================================
+
+model Organization {
+  id                 String   @id @default(uuid())
+  square_merchant_id String   @unique // Square merchant ID
+  name               String? // Organization name
+  slug               String?  @unique // URL-friendly slug
+  settings           Json?    @default("{}") // Organization settings
+  is_active          Boolean  @default(true) // Active status
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  locations               Location[]
+  square_existing_clients SquareExistingClient[]
+  team_members            TeamMember[]
+  service_variations      ServiceVariation[]
+  bookings                Booking[]
+  orders                  Order[]
+  order_line_items        OrderLineItem[]
+  payments                Payment[]
+  payment_tenders         PaymentTender[]
+  gift_cards              GiftCard[]
+  referral_profiles       ReferralProfile[]
+  referral_rewards        ReferralReward[]
+  organization_users      OrganizationUser[]
+  user_roles              UserRole[] // User roles relation
+
+  @@index([square_merchant_id])
+  @@index([slug])
+  @@map("organizations")
+}
 
 // ============================================================================
 // LOCATIONS TABLE
@@ -182,7 +401,8 @@ model square_gift_card_gan_audit {
 
 model Location {
   id                              String  @id @default(uuid())
-  square_location_id              String  @unique // Square location ID
+  organization_id                 String // Multi-tenant isolation
+  square_location_id              String // Square location ID
   name                            String // Friendly name (Pacific Ave, Union St)
   address_line_1                  String?
   locality                        String? // City
@@ -192,10 +412,14 @@ model Location {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  bookings Booking[]
-  payments Payment[]
-  orders   Order[]
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings     Booking[]
+  payments     Payment[]
+  orders       Order[]
+  user_roles   UserRole[] // User roles relation
 
+  @@unique([organization_id, square_location_id])
+  @@index([organization_id])
   @@map("locations")
 }
 
@@ -206,7 +430,8 @@ model Location {
 
 model TeamMember {
   id                    String       @id @default(uuid())
-  square_team_member_id String       @unique // Square team member ID
+  organization_id       String // Multi-tenant isolation
+  square_team_member_id String // Square team member ID
   given_name            String?
   family_name           String?
   email_address         String?
@@ -218,10 +443,16 @@ model TeamMember {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  appointment_segments BookingAppointmentSegment[]
-  processed_payments   Payment[]                   @relation("ProcessedByTeamMember")
-  order_line_items     OrderLineItem[]
+  // Relations
+  organization                      Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings_as_technician            Booking[]       @relation("BookingTechnician")
+  bookings_as_administrator         Booking[]       @relation("BookingAdministrator")
+  order_line_items_as_technician    OrderLineItem[] @relation("OrderLineItemTechnician")
+  order_line_items_as_administrator OrderLineItem[] @relation("OrderLineItemAdministrator")
+  payments_as_administrator         Payment[]       @relation("PaymentAdministrator")
 
+  @@unique([organization_id, square_team_member_id])
+  @@index([organization_id])
   @@index([square_team_member_id])
   @@index([status])
   @@map("team_members")
@@ -234,7 +465,8 @@ model TeamMember {
 
 model ServiceVariation {
   id               String  @id @default(uuid())
-  square_id        String  @unique // Square service variation ID
+  organization_id  String // Multi-tenant isolation
+  square_id        String // Square service variation ID
   name             String? // Service name (e.g., "Manicure", "Pedicure")
   service_id       String? // Parent service ID
   duration_minutes Int?
@@ -242,9 +474,13 @@ model ServiceVariation {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  appointment_segments BookingAppointmentSegment[]
+  // Relations
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings     Booking[]
 
-  @@map("service_variations")
+  @@unique([organization_id, square_id])
+  @@index([organization_id])
+  @@map("service_variation")
 }
 
 // ============================================================================
@@ -253,17 +489,27 @@ model ServiceVariation {
 // ============================================================================
 
 model Booking {
-  id String @id // Square booking ID
+  id              String @id @default(uuid()) // Internal UUID PK
+  organization_id String // Multi-tenant isolation
+  booking_id      String // Square booking ID (external identifier)
+  location_id     String // Internal UUID FK to locations.id
 
   // ===== BASIC FIELDS =====
   customer_id   String? // Square customer ID
-  location_id   String
   location_type String? // BUSINESS_LOCATION
   start_at      DateTime
   status        String // ACCEPTED, CANCELLED, etc.
   all_day       Boolean  @default(false)
   version       Int      @default(0)
   source        String? // THIRD_PARTY_BUYER, FIRST_PARTY_MERCHANT
+
+  // ===== SERVICE FIELDS (from appointment_segments) =====
+  service_variation_id      String? // Internal UUID FK to service_variations.id
+  service_variation_version BigInt?
+  duration_minutes          Int? // Service duration
+  intermission_minutes      Int?    @default(0)
+  technician_id             String? // Internal UUID FK to team_members.id
+  any_team_member           Boolean @default(false)
 
   // ===== ADDRESS =====
   address_line_1                  String?
@@ -272,12 +518,12 @@ model Booking {
   postal_code                     String?
 
   // ===== CREATOR DETAILS =====
-  creator_type           String? // CUSTOMER, STAFF, TEAM_MEMBER
-  creator_customer_id    String?
-  creator_team_member_id String?
+  creator_type        String? // CUSTOMER, STAFF, TEAM_MEMBER
+  creator_customer_id String?
+  administrator_id    String? // Internal UUID FK to team_members.id
 
   // ===== MERCHANT =====
-  merchant_id String? // Square merchant ID
+  merchant_id String? // Square merchant ID (deprecated, use organization_id)
 
   // ===== TRANSITION =====
   transition_time_minutes Int? @default(0)
@@ -290,47 +536,23 @@ model Booking {
   raw_json Json? // Immutable source of truth - full booking object from Square API
 
   // Relations
-  customer             SquareExistingClient?       @relation(fields: [customer_id], references: [square_customer_id])
-  location             Location                    @relation(fields: [location_id], references: [square_location_id])
-  appointment_segments BookingAppointmentSegment[]
-  payments             Payment[]
+  organization      Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer          SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
+  location          Location              @relation(fields: [location_id], references: [id])
+  technician        TeamMember?           @relation("BookingTechnician", fields: [technician_id], references: [id])
+  administrator     TeamMember?           @relation("BookingAdministrator", fields: [administrator_id], references: [id])
+  service_variation ServiceVariation?     @relation(fields: [service_variation_id], references: [id])
+  payments          Payment[]
 
-  @@index([customer_id])
+  @@unique([organization_id, booking_id])
+  @@index([organization_id])
   @@index([location_id])
+  @@index([customer_id])
   @@index([start_at])
   @@index([status])
   @@index([created_at])
-  @@index([creator_type])
-  @@map("bookings")
-}
-
-// ============================================================================
-// BOOKING APPOINTMENT SEGMENTS
-// Services in each booking (links to technicians)
-// ============================================================================
-
-model BookingAppointmentSegment {
-  id         String @id @default(uuid())
-  booking_id String
-
-  // ===== SEGMENT FIELDS =====
-  duration_minutes            Int
-  intermission_minutes        Int     @default(0)
-  service_variation_id        String
-  service_variation_client_id String?
-  service_variation_version   BigInt?
-  team_member_id              String? // Nail technician ID
-  any_team_member             Boolean @default(false)
-
-  // Relations
-  booking           Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
-  service_variation ServiceVariation? @relation(fields: [service_variation_id], references: [square_id])
-  team_member       TeamMember?       @relation(fields: [team_member_id], references: [square_team_member_id])
-
   @@index([booking_id])
-  @@index([team_member_id])
-  @@index([service_variation_id])
-  @@map("booking_appointment_segments")
+  @@map("bookings")
 }
 
 // ============================================================================
@@ -339,9 +561,11 @@ model BookingAppointmentSegment {
 // ============================================================================
 
 model Order {
-  id          String  @id // Square order ID
-  location_id String?
-  customer_id String?
+  id              String  @id @default(uuid()) // Internal UUID PK
+  organization_id String // Multi-tenant isolation
+  order_id        String // Square order ID (external identifier)
+  location_id     String? // Internal UUID FK to locations.id
+  customer_id     String? // Square customer ID
 
   // ===== ORDER FIELDS =====
   state        String? // OPEN, COMPLETED, CANCELED
@@ -353,12 +577,16 @@ model Order {
   updated_at DateTime @updatedAt
 
   // Relations
-  location   Location?       @relation(fields: [location_id], references: [square_location_id])
-  payments   Payment[]
-  line_items OrderLineItem[]
+  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  location     Location?       @relation(fields: [location_id], references: [id])
+  payments     Payment[]
+  line_items   OrderLineItem[]
 
-  @@index([customer_id])
+  @@unique([organization_id, order_id])
+  @@index([organization_id])
   @@index([location_id])
+  @@index([customer_id])
+  @@index([order_id])
   @@index([state])
   @@map("orders")
 }
@@ -369,22 +597,24 @@ model Order {
 // ============================================================================
 
 model OrderLineItem {
-  id String @id @default(uuid())
+  id              String  @id @default(uuid())
+  organization_id String // Multi-tenant isolation
+  order_id        String // Internal UUID FK to orders.id
+  location_id     String? // Square location ID (for reference)
+  customer_id     String? // Square customer ID
 
-  // ===== ORDER CONTEXT =====
-  order_id    String // Square order ID
-  location_id String? // Square location ID
-  customer_id String? // Square customer ID
-  team_member_id String? // Who processed the payment (from payments table)
+  // ===== TEAM MEMBERS =====
+  technician_id    String? // Internal UUID FK to team_members.id
+  administrator_id String? // Internal UUID FK to team_members.id
 
   // ===== LINE ITEM FIELDS =====
-  uid               String? @unique // Unique identifier for this line item
-  catalog_object_id String? // Square catalog object ID
-  catalog_version   BigInt? // Catalog version
-  quantity          String? // Quantity as string (Square format)
-  name              String? // Item name
-  variation_name    String? // Variation name (e.g., "TOP master Anna")
-  item_type         String? // ITEM, CUSTOM_AMOUNT, etc.
+  uid                  String? @unique // Unique identifier for this line item
+  service_variation_id String? // Square service variation ID (formerly catalog_object_id)
+  catalog_version      BigInt? // Catalog version
+  quantity             String? // Quantity as string (Square format)
+  name                 String? // Item name
+  variation_name       String? // Variation name (e.g., "TOP master Anna")
+  item_type            String? // ITEM, CUSTOM_AMOUNT, etc.
 
   // ===== MONEY AMOUNTS (all in cents) =====
   base_price_money_amount   Int? // Base price
@@ -437,14 +667,18 @@ model OrderLineItem {
   updated_at DateTime @updatedAt
 
   // Relations
-  order Order? @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  team_member TeamMember? @relation(fields: [team_member_id], references: [square_team_member_id])
+  organization  Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  order         Order?       @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  technician    TeamMember?  @relation("OrderLineItemTechnician", fields: [technician_id], references: [id])
+  administrator TeamMember?  @relation("OrderLineItemAdministrator", fields: [administrator_id], references: [id])
 
+  @@unique([organization_id, uid], map: "order_line_items_organization_uid_unique")
+  @@index([organization_id])
   @@index([order_id])
   @@index([location_id])
   @@index([customer_id])
-  @@index([team_member_id])
-  @@index([catalog_object_id])
+  @@index([technician_id])
+  @@index([administrator_id])
   @@index([uid])
   @@index([order_state])
   @@index([order_created_at])
@@ -457,16 +691,18 @@ model OrderLineItem {
 // ============================================================================
 
 model Payment {
-  id              String  @id // Square payment ID
+  id              String  @id @default(uuid()) // Internal UUID PK
+  organization_id String // Multi-tenant isolation
+  payment_id      String // Square payment ID (external identifier)
   square_event_id String?
   event_type      String // "payment.created" or "payment.updated"
-  merchant_id     String?
+  merchant_id     String? // Square merchant ID (deprecated, use organization_id)
 
   // ===== CUSTOMER & LOCATION =====
-  customer_id String?
-  location_id String
-  order_id    String?
-  booking_id  String?
+  customer_id String? // Square customer ID
+  location_id String // Internal UUID FK to locations.id
+  order_id    String? // Internal UUID FK to orders.id
+  booking_id  String? // Internal UUID FK to bookings.id
 
   // ===== MONEY AMOUNTS (all as cents) =====
   amount_money_amount     Int // Base amount in cents
@@ -486,8 +722,7 @@ model Payment {
   delayed_until  DateTime?
 
   // ===== STAFF/TEAM MEMBER =====
-  team_member_id String? // Who processed payment (admin)
-  employee_id    String? // Same as team_member_id usually
+  administrator_id String? // Internal UUID FK to team_members.id
 
   // ===== APPLICATION DETAILS =====
   application_details_square_product String? // SQUARE_POS, etc.
@@ -549,18 +784,22 @@ model Payment {
   version Int?
 
   // Relations
-  customer    SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
-  booking     Booking?              @relation(fields: [booking_id], references: [id])
-  location    Location              @relation(fields: [location_id], references: [square_location_id])
-  order       Order?                @relation(fields: [order_id], references: [id])
-  team_member TeamMember?           @relation("ProcessedByTeamMember", fields: [team_member_id], references: [square_team_member_id])
-  tenders     PaymentTender[]
+  organization  Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer      SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
+  booking       Booking?              @relation(fields: [booking_id], references: [id])
+  location      Location              @relation(fields: [location_id], references: [id])
+  order         Order?                @relation(fields: [order_id], references: [id])
+  administrator TeamMember?           @relation("PaymentAdministrator", fields: [administrator_id], references: [id])
+  tenders       PaymentTender[]
 
-  @@index([customer_id])
+  @@unique([organization_id, payment_id])
+  @@index([organization_id])
   @@index([location_id])
   @@index([order_id])
   @@index([booking_id])
-  @@index([team_member_id])
+  @@index([customer_id])
+  @@index([payment_id])
+  @@index([administrator_id])
   @@index([status])
   @@index([created_at])
   @@index([source_type])
@@ -574,9 +813,10 @@ model Payment {
 // ============================================================================
 
 model PaymentTender {
-  id         String  @id @default(uuid())
-  payment_id String
-  tender_id  String? // Square tender ID
+  id              String  @id @default(uuid())
+  organization_id String // Multi-tenant isolation
+  payment_id      String // Internal UUID FK to payments.id
+  tender_id       String? // Square tender ID
 
   // ===== TENDER FIELDS =====
   type                  String // CARD, CASH, SQUARE_GIFT_CARD, BANK_ACCOUNT, etc.
@@ -630,8 +870,10 @@ model PaymentTender {
   // ===== TIMESTAMPS =====
   created_at DateTime
 
-  payment Payment @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  payment      Payment      @relation(fields: [payment_id], references: [id], onDelete: Cascade)
 
+  @@index([organization_id])
   @@index([payment_id])
   @@index([type])
   @@index([gift_card_id])
@@ -683,4 +925,148 @@ enum TeamLocation {
   PACIFIC_AVE
   UNION_ST
   UNKNOWN_LOC
+}
+
+// ============================================================================
+// GIFT CARD ENUMS
+// ============================================================================
+enum GiftCardRewardType {
+  FRIEND_SIGNUP_BONUS // Given to friend when they book with referral code
+  REFERRER_REWARD // Given to referrer when friend pays
+}
+
+enum GiftCardTransactionType {
+  CREATE // Gift card created
+  ACTIVATE // Gift card activated (PENDING -> ACTIVE)
+  ADJUST_INCREMENT // Money loaded onto card
+  ADJUST_DECREMENT // Money deducted from card
+  REDEEM // Gift card used for payment
+  REFUND // Refund transaction
+  BLOCK // Card blocked
+  UNBLOCK // Card unblocked
+  IMPORT // Imported from external source
+}
+
+// ============================================================================
+// REFERRAL ENUMS
+// ============================================================================
+enum ReferralRewardStatus {
+  PENDING // Reward earned but not yet paid
+  PAID // Reward successfully paid to gift card
+  FAILED // Reward payment failed
+  CANCELLED // Reward cancelled
+}
+
+// ============================================================================
+// ORGANIZATION USERS TABLE
+// Links Supabase Auth users to organizations with roles
+// ============================================================================
+
+enum OrganizationUserRole {
+  super_admin // System-wide admin with access to all organizations
+  owner // Organization owner
+  admin // Organization admin
+  viewer // Organization viewer
+}
+
+model OrganizationUser {
+  id              String               @id @default(uuid())
+  user_id         String // Supabase Auth user ID (auth.users.id)
+  organization_id String? // NULL for super_admin, required for others
+  role            OrganizationUserRole
+  is_primary      Boolean              @default(false) // Main organization for this user
+  created_at      DateTime             @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime             @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, organization_id])
+  @@index([user_id])
+  @@index([organization_id])
+  @@index([role])
+  @@index([user_id, is_primary], map: "idx_organization_users_user_primary")
+  @@map("organization_users")
+}
+
+// ============================================================================
+// PROFILES TABLE
+// User profiles linked to Supabase Auth
+// ============================================================================
+model Profile {
+  id         String   @id // References auth.users.id
+  email      String?
+  full_name  String?
+  avatar_url String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @updatedAt @db.Timestamptz(6)
+
+  @@map("profiles")
+}
+
+// ============================================================================
+// USER ROLES TABLE
+// Detailed roles with location-level access
+// ============================================================================
+enum UserRoleType {
+  super_admin
+  owner
+  manager
+  staff
+}
+
+model UserRole {
+  id              String       @id @default(uuid())
+  user_id         String // References auth.users.id
+  role            UserRoleType
+  organization_id String? // NULL for super_admin
+  location_id     String? // For manager/staff
+  created_at      DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime     @updatedAt @db.Timestamptz(6)
+
+  // Relations
+  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  location     Location?     @relation(fields: [location_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, organization_id], map: "user_roles_user_org_unique")
+  @@index([user_id])
+  @@index([organization_id])
+  @@index([location_id])
+  @@index([role])
+  @@map("user_roles")
+}
+
+// ============================================================================
+// PHONE VERIFICATION TABLES
+// For SMS-based phone verification in lookup page
+// ============================================================================
+
+model PhoneVerification {
+  id              String   @id @default(uuid())
+  phone_number    String   // Normalized phone number
+  code            String   @db.VarChar(6) // 6-digit verification code
+  verified        Boolean  @default(false)
+  expires_at      DateTime // Code expires after 10 minutes
+  attempts        Int      @default(0) // Track verification attempts
+  verified_at     DateTime?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([phone_number, verified])
+  @@index([expires_at])
+  @@map("phone_verifications")
+}
+
+model VerifiedPhoneSession {
+  id              String   @id @default(uuid())
+  phone_number    String   // Normalized phone number
+  session_token   String   @unique // Unique session token
+  expires_at      DateTime // Session expires after 30 days
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([phone_number])
+  @@index([session_token])
+  @@index([expires_at])
+  @@map("verified_phone_sessions")
 }
