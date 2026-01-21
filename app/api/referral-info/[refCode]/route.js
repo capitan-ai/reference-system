@@ -8,8 +8,41 @@ export async function GET(request, { params }) {
       return Response.json({ error: 'Referral code is required' }, { status: 400 })
     }
 
-    // Find the referrer by their personal code
-    const referrer = await prisma.$queryRaw`
+    // Normalize the code (trim and uppercase)
+    const normalizedCode = refCode.trim().toUpperCase()
+
+    // First, try to find in referral_profiles table (newer normalized table)
+    let referralProfile = await prisma.referralProfile.findFirst({
+      where: {
+        OR: [
+          { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
+          { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
+        ]
+      },
+      include: {
+        customer: {
+          select: {
+            square_customer_id: true,
+            given_name: true,
+            family_name: true,
+            email_address: true
+          }
+        }
+      }
+    })
+
+    if (referralProfile && referralProfile.customer) {
+      const referrerName = `${referralProfile.customer.given_name || ''} ${referralProfile.customer.family_name || ''}`.trim() || null
+      return Response.json({
+        referrerName: referrerName,
+        found: true,
+        code: normalizedCode
+      })
+    }
+
+    // Fallback to square_existing_clients for backward compatibility
+    // Try normalized match first
+    let referrer = await prisma.$queryRaw`
       SELECT 
         given_name,
         family_name,
@@ -17,9 +50,24 @@ export async function GET(request, { params }) {
         personal_code,
         square_customer_id
       FROM square_existing_clients
-      WHERE personal_code = ${refCode}
+      WHERE UPPER(TRIM(personal_code)) = ${normalizedCode}
       LIMIT 1
     `
+
+    // If not found, try exact match (case-sensitive)
+    if (!referrer || referrer.length === 0) {
+      referrer = await prisma.$queryRaw`
+        SELECT 
+          given_name,
+          family_name,
+          email_address,
+          personal_code,
+          square_customer_id
+        FROM square_existing_clients
+        WHERE personal_code = ${refCode}
+        LIMIT 1
+      `
+    }
 
     if (!referrer || referrer.length === 0) {
       return Response.json({ 
