@@ -32,6 +32,26 @@ function verifyAuthToken(request, serialNumber) {
   return matches
 }
 
+// Handle OPTIONS requests for CORS preflight (Apple Wallet may send these)
+export async function OPTIONS(request, { params }) {
+  console.log(`\n${'='.repeat(60)}`)
+  console.log(`📱 [${new Date().toISOString()}] OPTIONS (CORS preflight) REQUEST`)
+  console.log(`   URL: ${request.url}`)
+  console.log(`   Method: ${request.method}`)
+  console.log(`   Headers:`, Object.fromEntries(request.headers.entries()))
+  console.log(`${'='.repeat(60)}\n`)
+  
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Max-Age': '86400'
+    }
+  })
+}
+
 export async function POST(request, { params }) {
   // Log IMMEDIATELY at the start - before any processing
   console.log(`\n${'='.repeat(60)}`)
@@ -114,7 +134,14 @@ export async function POST(request, { params }) {
     console.log(`   Serial: ${serialNumber}`)
     console.log(`   Push token saved: ${!!pushToken}`)
 
-    return new Response('', { status: 201 })
+    return new Response('', { 
+      status: 201,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      }
+    })
   } catch (error) {
     const duration = Date.now() - startTime
     console.error(`❌ [${new Date().toISOString()}] Error registering device (${duration}ms):`)
@@ -163,12 +190,26 @@ export async function DELETE(request, { params }) {
 
     console.log(`✅ Device unregistered successfully (deleted ${result.count || 0} records)`)
 
-    return new Response('', { status: 200 })
+    return new Response('', { 
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      }
+    })
   } catch (error) {
     console.error('❌ Error unregistering device:', error)
     console.error(`   Error message: ${error.message}`)
     // If record doesn't exist, that's okay - return success
-    return new Response('', { status: 200 })
+    return new Response('', { 
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      }
+    })
   }
 }
 
