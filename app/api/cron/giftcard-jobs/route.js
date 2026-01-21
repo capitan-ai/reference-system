@@ -25,27 +25,40 @@ function authorize(request) {
     return { authorized: true, method: 'no-secret-set' }
   }
 
-  // Check Authorization header (Bearer token or plain secret)
+  // Log headers for debugging (sanitized)
   const authHeader = request.headers.get('Authorization') || ''
+  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key') || ''
+  const userAgent = request.headers.get('user-agent') || ''
+  
+  console.log(`[CRON] Auth check - User-Agent: ${userAgent.substring(0, 50)}`)
+  console.log(`[CRON] Auth check - Has Auth header: ${!!authHeader}`)
+  console.log(`[CRON] Auth check - Has x-cron-secret: ${!!cronHeader}`)
+  console.log(`[CRON] Auth check - CRON_SECRET set: ${!!cronSecret}`)
+
+  // Check Authorization header (Bearer token or plain secret)
   if (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret) {
+    console.log(`[CRON] ✅ Authorized via Authorization header`)
     return { authorized: true, method: 'vercel-cron-auth-header' }
   }
 
   // Check x-cron-secret header (alternative method)
-  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key')
   if (cronHeader === cronSecret) {
+    console.log(`[CRON] ✅ Authorized via x-cron-secret header`)
     return { authorized: true, method: 'vercel-cron-header' }
   }
 
   // If no match, check if this is a Vercel cron request (Vercel sends a specific user-agent)
-  const userAgent = request.headers.get('user-agent') || ''
+  // Vercel cron jobs might not send the secret if not configured in vercel.json
   if (userAgent.includes('vercel-cron') || userAgent.includes('vercel')) {
     // Allow if it's clearly a Vercel request but warn
     console.warn('⚠️ Vercel cron request detected but secret mismatch. Allowing for now.')
+    console.warn('⚠️ To secure this endpoint, configure CRON_SECRET in Vercel cron job settings')
     return { authorized: true, method: 'vercel-cron-user-agent' }
   }
 
-  return { authorized: false, reason: 'no-matching-secret' }
+  console.error(`[CRON] ❌ Authorization failed - No matching secret found`)
+  console.error(`[CRON] Expected CRON_SECRET (first 10 chars): ${cronSecret.substring(0, 10)}...`)
+  return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
 }
 
 async function handle(request) {
