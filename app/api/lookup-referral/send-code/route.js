@@ -1,33 +1,7 @@
 import { NextResponse } from 'next/server'
 import prisma from '../../../../lib/prisma-client'
 import { sendVerificationCodeSms } from '../../../../lib/twilio-service'
-
-/**
- * Normalize phone number to match database format
- */
-function normalizePhoneNumber(phone) {
-  if (!phone) return null
-  
-  let cleaned = phone.replace(/[^\d+]/g, '')
-  
-  if (cleaned.startsWith('+')) {
-    return cleaned
-  }
-  
-  if (cleaned.length === 10) {
-    return `+1${cleaned}`
-  }
-  
-  if (cleaned.length === 11 && cleaned.startsWith('1')) {
-    return `+${cleaned}`
-  }
-  
-  if (cleaned.length >= 10) {
-    return `+1${cleaned.slice(-10)}`
-  }
-  
-  return cleaned
-}
+import { findCustomerByPhone, normalizePhoneNumber } from '../../../../lib/utils/phone-matching'
 
 /**
  * Generate 6-digit verification code
@@ -37,9 +11,15 @@ function generateVerificationCode() {
 }
 
 export async function POST(request) {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:39',message:'POST send-code entry',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+  // #endregion
   try {
     const body = await request.json()
     const { phoneNumber } = body
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:43',message:'request parsed',data:{hasPhone:!!phoneNumber,phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
 
     if (!phoneNumber) {
       return NextResponse.json(
@@ -49,6 +29,9 @@ export async function POST(request) {
     }
 
     const normalized = normalizePhoneNumber(phoneNumber)
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:52',message:'phone normalized',data:{original:phoneNumber,normalized},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
     if (!normalized) {
       return NextResponse.json(
         { error: 'Invalid phone number format' },
@@ -56,18 +39,15 @@ export async function POST(request) {
       )
     }
 
-    // Check if customer exists (but don't reveal if they don't - security best practice)
-    const customer = await prisma.$queryRaw`
-      SELECT square_customer_id, phone_number, given_name, family_name
-      FROM square_existing_clients
-      WHERE phone_number = ${normalized}
-         OR phone_number = ${normalized.replace(/^\+/, '')}
-      LIMIT 1
-    `
+    // Check if customer exists - handle various phone number formats in database
+    const customer = await findCustomerByPhone(phoneNumber)
 
-    // Always send success message (don't reveal if customer exists)
+    // Always send success message (don't reveal if customer exists - security best practice)
     // But only actually send SMS if customer exists
-    if (!customer || customer.length === 0) {
+    if (!customer) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:62',message:'customer not found - no SMS sent',data:{normalized,original:phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+      // #endregion
       return NextResponse.json(
         { 
           success: true, 
@@ -76,6 +56,10 @@ export async function POST(request) {
         { status: 200 }
       )
     }
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:72',message:'customer found - proceeding to send SMS',data:{customerId:customer.square_customer_id,dbPhone:customer.phone_number},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
 
     // Generate verification code
     const code = generateVerificationCode()
@@ -95,13 +79,22 @@ export async function POST(request) {
     `
 
     // Send SMS with code
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:130',message:'before sending SMS',data:{to:normalized,codeLength:code.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+    // #endregion
     const smsResult = await sendVerificationCodeSms({
       to: normalized,
       code: code
     })
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:137',message:'SMS send result',data:{success:smsResult.success,skipped:smsResult.skipped,reason:smsResult.reason,error:smsResult.error,sid:smsResult.sid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+    // #endregion
 
     if (!smsResult.success && !smsResult.skipped) {
       console.error('Failed to send SMS:', smsResult.error)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:141',message:'SMS send failed',data:{error:smsResult.error,code:smsResult.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+      // #endregion
       return NextResponse.json(
         { error: 'Failed to send verification code. Please try again.' },
         { status: 500 }
@@ -114,6 +107,9 @@ export async function POST(request) {
     })
 
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'send-code/route.js:150',message:'send-code error caught',data:{error:error.message,errorStack:error.stack?.substring(0,200),errorName:error.constructor.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
     console.error('Error sending verification code:', error)
     return NextResponse.json(
       { error: 'Failed to send verification code' },

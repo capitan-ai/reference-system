@@ -2,33 +2,7 @@ import { NextResponse } from 'next/server'
 import { getSessionToken, verifySession } from '../../../../lib/utils/phone-verification-session'
 import prisma from '../../../../lib/prisma-client'
 import { generateReferralUrl } from '../../../../lib/utils/referral-url'
-
-/**
- * Normalize phone number to match database format
- */
-function normalizePhoneNumber(phone) {
-  if (!phone) return null
-  
-  let cleaned = phone.replace(/[^\d+]/g, '')
-  
-  if (cleaned.startsWith('+')) {
-    return cleaned
-  }
-  
-  if (cleaned.length === 10) {
-    return `+1${cleaned}`
-  }
-  
-  if (cleaned.length === 11 && cleaned.startsWith('1')) {
-    return `+${cleaned}`
-  }
-  
-  if (cleaned.length >= 10) {
-    return `+1${cleaned.slice(-10)}`
-  }
-  
-  return cleaned
-}
+import { findCustomerByPhone, normalizePhoneNumber } from '../../../../lib/utils/phone-matching'
 
 export async function POST(request) {
   // #region agent log
@@ -76,23 +50,10 @@ export async function POST(request) {
       
       if (valid && session) {
         // Session is valid! Skip SMS and return referral data directly
-        const customer = await prisma.$queryRaw`
-          SELECT 
-            square_customer_id,
-            phone_number,
-            personal_code,
-            referral_url,
-            given_name,
-            family_name,
-            email_address
-          FROM square_existing_clients
-          WHERE phone_number = ${normalized}
-             OR phone_number = ${normalized.replace(/^\+/, '')}
-          LIMIT 1
-        `
+        const customer = await findCustomerByPhone(phoneNumber)
 
-        if (customer && customer.length > 0) {
-          const cust = customer[0]
+        if (customer) {
+          const cust = customer
           
           // Generate personal_code if missing
           if (!cust.personal_code) {
