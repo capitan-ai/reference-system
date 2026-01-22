@@ -241,28 +241,8 @@ async function checkBookingHistory() {
         }
       }
       
-      // Check ref_matches in database
-      const refMatches = await prisma.$queryRaw`
-        SELECT 
-          id,
-          "refCode",
-          "matchedAt",
-          "matchedVia",
-          "bookingId"
-        FROM ref_matches
-        WHERE "customerId" = ${customer.square_customer_id}
-        ORDER BY "matchedAt" ASC
-      `
-      
-      if (refMatches && refMatches.length > 0) {
-        console.log(`\n   📋 Database RefMatches:`)
-        refMatches.forEach((match, idx) => {
-          console.log(`      ${idx + 1}. Code: ${match.refCode}`)
-          console.log(`         Matched at: ${match.matchedAt}`)
-          console.log(`         Via: ${match.matchedVia || 'N/A'}`)
-          console.log(`         Booking: ${match.bookingId || 'N/A'}`)
-        })
-      }
+      // Note: ref_matches table has been removed
+      // Referral matching is now tracked via square_existing_clients.used_referral_code
     }
     
     console.log(`\n${'='.repeat(80)}`)

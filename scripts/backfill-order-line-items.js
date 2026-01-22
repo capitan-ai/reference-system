@@ -136,7 +136,7 @@ async function processOrder(orderId) {
           customer_id: customerId || null,
           
           uid: lineItem.uid || null,
-          catalog_object_id: lineItem.catalog_object_id || null,
+          service_variation_id: lineItem.catalog_object_id || null,
           catalog_version: lineItem.catalog_version ? BigInt(lineItem.catalog_version) : null,
           quantity: lineItem.quantity || null,
           name: lineItem.name || null,

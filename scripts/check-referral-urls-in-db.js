@@ -11,29 +11,27 @@ async function checkReferralUrls() {
     console.log('='.repeat(60))
     console.log('')
     
-    // Get all referral links
-    const refLinks = await prisma.refLink.findMany({
-      include: {
-        customer: {
-          select: {
-            fullName: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            squareCustomerId: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: 'desc'
-      }
-    })
+    // Get all referral URLs from square_existing_clients
+    const customersWithUrls = await prisma.$queryRaw`
+      SELECT 
+        square_customer_id,
+        referral_code,
+        personal_code,
+        referral_url,
+        given_name,
+        family_name,
+        email_address,
+        updated_at
+      FROM square_existing_clients
+      WHERE referral_url IS NOT NULL AND referral_url != ''
+      ORDER BY updated_at DESC
+    `
     
-    console.log(`📊 Found ${refLinks.length} referral links in database`)
+    console.log(`📊 Found ${customersWithUrls.length} referral URLs in database`)
     console.log('')
     
-    if (refLinks.length === 0) {
-      console.log('❌ No referral links found')
+    if (customersWithUrls.length === 0) {
+      console.log('❌ No referral URLs found')
       return
     }
     
@@ -41,17 +39,17 @@ async function checkReferralUrls() {
     console.log('📋 All Referral URLs:')
     console.log('')
     
-    refLinks.forEach((link, index) => {
-      const customerName = link.customer?.fullName || 
-                           `${link.customer?.firstName || ''} ${link.customer?.lastName || ''}`.trim() || 
-                           link.customer?.email || 
-                           'Unknown'
+    customersWithUrls.forEach((customer, index) => {
+      const customerName = `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || 
+                          customer.email_address || 
+                          'Unknown'
+      const refCode = customer.referral_code || customer.personal_code || 'N/A'
       
-      console.log(`${index + 1}. ${link.refCode}`)
+      console.log(`${index + 1}. ${refCode}`)
       console.log(`   Customer: ${customerName}`)
-      console.log(`   URL: ${link.url}`)
-      console.log(`   Status: ${link.status}`)
-      console.log(`   Created: ${link.createdAt.toISOString().split('T')[0]}`)
+      console.log(`   Square Customer ID: ${customer.square_customer_id}`)
+      console.log(`   URL: ${customer.referral_url}`)
+      console.log(`   Updated: ${customer.updated_at ? new Date(customer.updated_at).toISOString().split('T')[0] : 'N/A'}`)
       console.log('')
     })
     
@@ -63,18 +61,17 @@ async function checkReferralUrls() {
     const specificCodes = ['IANA7748', 'BOZHENA8884']
     
     for (const code of specificCodes) {
-      const link = refLinks.find(l => l.refCode === code)
-      if (link) {
-        const customerName = link.customer?.fullName || 
-                           `${link.customer?.firstName || ''} ${link.customer?.lastName || ''}`.trim() || 
-                           link.customer?.email || 
+      const customer = customersWithUrls.find(c => 
+        c.referral_code === code || c.personal_code === code
+      )
+      if (customer) {
+        const customerName = `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || 
+                           customer.email_address || 
                            'Unknown'
         console.log(`✅ ${code}:`)
         console.log(`   Customer: ${customerName}`)
-        console.log(`   URL: ${link.url}`)
-        console.log(`   Database ID: ${link.id}`)
-        console.log(`   Customer ID: ${link.customerId}`)
-        console.log(`   Square Customer ID: ${link.customer?.squareCustomerId || 'N/A'}`)
+        console.log(`   URL: ${customer.referral_url}`)
+        console.log(`   Square Customer ID: ${customer.square_customer_id}`)
         console.log('')
       } else {
         console.log(`❌ ${code}: Not found in database`)
@@ -86,15 +83,12 @@ async function checkReferralUrls() {
     console.log('='.repeat(60))
     console.log('📊 Database Table Info:')
     console.log('')
-    console.log('Table: ref_links')
+    console.log('Table: square_existing_clients')
     console.log('Columns:')
-    console.log('  - id: UUID (primary key)')
-    console.log('  - customerId: UUID (foreign key to customers table)')
-    console.log('  - refCode: String (unique referral code)')
-    console.log('  - url: String (full referral URL - THIS IS WHERE URLs ARE STORED)')
-    console.log('  - status: RefLinkStatus (ACTIVE, NOT_ISSUED, REVOKED)')
-    console.log('  - issuedAt: DateTime')
-    console.log('  - createdAt: DateTime')
+    console.log('  - square_customer_id: String (primary key)')
+    console.log('  - referral_code: String (referral code)')
+    console.log('  - personal_code: String (personal code)')
+    console.log('  - referral_url: String (full referral URL - THIS IS WHERE URLs ARE STORED)')
     console.log('')
     
   } catch (error) {

@@ -268,34 +268,7 @@ async function analyzeDatabase() {
     console.log('\n\n🎯 SECTION 3: REFERRAL PROGRAM DATA')
     console.log('='.repeat(80))
     
-    // 3.1 Referral Links
-    console.log('\n3.1 Referral Links:')
-    try {
-      const refLinksStats = await prisma.refLink.groupBy({
-        by: ['status'],
-        _count: true
-      })
-      
-      const totalLinks = await prisma.refLink.count()
-      console.log(`   Total Referral Links:    ${formatNum(totalLinks)}`)
-      refLinksStats.forEach(stat => {
-        console.log(`      - ${stat.status}: ${formatNum(stat._count)}`)
-      })
-      
-      if (totalLinks > 0) {
-        const oldestLink = await prisma.refLink.findFirst({
-          orderBy: { createdAt: 'asc' }
-        })
-        const newestLink = await prisma.refLink.findFirst({
-          orderBy: { createdAt: 'desc' }
-        })
-        console.log(`   Date Range:              ${formatDate(oldestLink?.createdAt)} to ${formatDate(newestLink?.createdAt)}`)
-      }
-    } catch (error) {
-      console.log(`   ⚠️  Error: ${error.message}`)
-    }
-    
-    // 3.2 Referral Clicks
+    // 3.1 Referral Clicks
     console.log('\n3.2 Referral Clicks:')
     try {
       const clicksCount = await prisma.refClick.count()
@@ -337,87 +310,6 @@ async function analyzeDatabase() {
           console.log(`      ${idx + 1}. ${code.ref_code}: ${formatNum(code.clicks)} clicks, ${formatNum(code.matched)} matched`)
         })
       }
-    } catch (error) {
-      console.log(`   ⚠️  Error: ${error.message}`)
-    }
-    
-    // 3.3 Referral Matches
-    console.log('\n3.3 Referral Matches:')
-    try {
-      const matchesCount = await prisma.refMatch.count()
-      const uniqueCodesResult = await prisma.$queryRaw`
-        SELECT COUNT(DISTINCT "refCode")::int as count
-        FROM ref_matches
-      `
-      const uniqueCodes = uniqueCodesResult[0]?.count || 0
-      
-      const avgConfidenceResult = await prisma.$queryRaw`
-        SELECT AVG(confidence)::float as avg_confidence
-        FROM ref_matches
-      `
-      const avgConfidence = avgConfidenceResult[0]?.avg_confidence || null
-      
-      console.log(`   Total Matches:           ${formatNum(matchesCount)}`)
-      console.log(`   Unique Referral Codes:   ${formatNum(uniqueCodes)}`)
-      console.log(`   Average Confidence:      ${avgConfidence ? avgConfidence.toFixed(2) : 'N/A'}`)
-      
-      // Match methods breakdown using Prisma
-      const matches = await prisma.refMatch.findMany({
-        select: { matchedVia: true }
-      })
-      
-      const methodCounts = {}
-      matches.forEach(m => {
-        methodCounts[m.matchedVia] = (methodCounts[m.matchedVia] || 0) + 1
-      })
-      
-      if (Object.keys(methodCounts).length > 0) {
-        console.log(`\n   Match Methods:`)
-        Object.entries(methodCounts)
-          .sort((a, b) => b[1] - a[1])
-          .forEach(([method, count]) => {
-            console.log(`      - ${method}: ${formatNum(count)}`)
-          })
-      }
-    } catch (error) {
-      console.log(`   ⚠️  Error: ${error.message}`)
-    }
-    
-    // 3.4 Referral Rewards
-    console.log('\n3.4 Referral Rewards:')
-    try {
-      const rewardsTotal = await prisma.refReward.count()
-      const friendDiscounts = await prisma.refReward.count({
-        where: { type: 'FRIEND_DISCOUNT' }
-      })
-      const referrerRewards = await prisma.refReward.count({
-        where: { type: 'REFERRER_REWARD' }
-      })
-      const granted = await prisma.refReward.count({
-        where: { status: 'GRANTED' }
-      })
-      const pending = await prisma.refReward.count({
-        where: { status: 'PENDING' }
-      })
-      const redeemed = await prisma.refReward.count({
-        where: { status: 'REDEEMED' }
-      })
-      
-      // Get total granted amount
-      const grantedRewards = await prisma.refReward.findMany({
-        where: { status: 'GRANTED' },
-        select: { amount: true }
-      })
-      const totalGrantedCents = grantedRewards.reduce((sum, r) => sum + r.amount, 0)
-      
-      console.log(`   Total Rewards:           ${formatNum(rewardsTotal)}`)
-      console.log(`   Friend Discounts:        ${formatNum(friendDiscounts)}`)
-      console.log(`   Referrer Rewards:        ${formatNum(referrerRewards)}`)
-      console.log(`   Status Breakdown:`)
-      console.log(`      - Granted:  ${formatNum(granted)}`)
-      console.log(`      - Pending:  ${formatNum(pending)}`)
-      console.log(`      - Redeemed: ${formatNum(redeemed)}`)
-      console.log(`   Total Granted Amount:    $${(totalGrantedCents / 100).toFixed(2)}`)
     } catch (error) {
       console.log(`   ⚠️  Error: ${error.message}`)
     }
@@ -614,9 +506,12 @@ async function analyzeDatabase() {
     console.log('='.repeat(80))
     
     console.log('\n8.1 Processed Events:')
+    console.log('   ⚠️  Processed events table has been removed.')
+    console.log('   Idempotency is now handled by giftcard_runs table.')
     try {
-      const processedCount = await prisma.processedEvent.count()
-      console.log(`   Total Processed Events:  ${formatNum(processedCount)}`)
+      // Idempotency is now handled by giftcard_runs table
+      const processedCount = 0
+      console.log(`   Total Processed Events:  ${formatNum(processedCount)} (deprecated)`)
       
       if (processedCount > 0) {
         const sample = await prisma.processedEvent.findMany({

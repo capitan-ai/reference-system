@@ -153,33 +153,34 @@ async function checkEmailStatus() {
 
     // Check gift cards issued (should trigger emails)
     console.log('\n5️⃣ Checking Gift Cards Issued...')
+    console.log('   ⚠️  Reward tracking moved to square_existing_clients.total_rewards')
     
-    const giftCardRewards = await prisma.refReward.findMany({
-      where: {
-        status: 'GRANTED',
-        createdAt: { gte: fifteenDaysAgo }
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 20,
-      select: {
-        id: true,
-        type: true,
-        amount: true,
-        friendCustomerId: true,
-        referrerCustomerId: true,
-        createdAt: true
-      }
-    })
+    const customersWithRewards = await prisma.$queryRaw`
+      SELECT 
+        square_customer_id,
+        given_name,
+        family_name,
+        email_address,
+        total_rewards,
+        gift_card_id,
+        created_at
+      FROM square_existing_clients
+      WHERE total_rewards > 0
+        AND created_at >= ${fifteenDaysAgo}
+      ORDER BY created_at DESC
+      LIMIT 20
+    `
 
-    console.log(`   Gift cards granted: ${giftCardRewards.length}`)
+    console.log(`   Customers with rewards: ${customersWithRewards.length}`)
     
-    if (giftCardRewards.length > 0) {
-      console.log(`\n   Recent Gift Cards:`)
-      giftCardRewards.slice(0, 10).forEach((reward, idx) => {
-        console.log(`   ${idx + 1}. ${reward.createdAt.toISOString()}`)
-        console.log(`      Type: ${reward.type}`)
-        console.log(`      Amount: $${(reward.amount / 100).toFixed(2)}`)
-        console.log(`      Customer: ${reward.friendCustomerId || reward.referrerCustomerId}`)
+    if (customersWithRewards.length > 0) {
+      console.log(`\n   Recent Customers with Rewards:`)
+      customersWithRewards.slice(0, 10).forEach((customer, idx) => {
+        const name = `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || 'Unknown'
+        console.log(`   ${idx + 1}. ${name} (${customer.email_address || 'No email'})`)
+        console.log(`      Total Rewards: ${customer.total_rewards || 0}`)
+        console.log(`      Gift Card ID: ${customer.gift_card_id || 'None'}`)
+        console.log(`      Created: ${customer.created_at.toISOString()}`)
       })
     }
 

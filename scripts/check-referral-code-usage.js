@@ -2,10 +2,11 @@
 /**
  * Check if any referral codes have been used
  * Checks multiple sources:
- * - RefMatch (matched referral codes with bookings)
  * - RefClick (clicks on referral links)
  * - square_existing_clients.used_referral_code
- * - RefReward (rewards given for referrals)
+ * - square_existing_clients.total_rewards (rewards given for referrals)
+ * 
+ * Note: RefMatch and RefReward tables have been removed
  */
 
 require('dotenv').config()
@@ -15,54 +16,12 @@ async function checkReferralCodeUsage() {
   console.log('🔍 Checking Referral Code Usage\n')
   
   try {
-    // 1. Check RefMatch table (matched referral codes)
-    console.log('1️⃣ Referral Code Matches (RefMatch):')
-    const refMatches = await prisma.$queryRaw`
-      SELECT 
-        COUNT(*)::int as total,
-        COUNT(DISTINCT "refCode")::int as unique_codes,
-        COUNT(DISTINCT "customerId")::int as unique_customers,
-        MIN("matchedAt") as first_match,
-        MAX("matchedAt") as last_match
-      FROM ref_matches
-    `
+    // Note: RefMatch and RefReward tables have been removed
+    // Referral matching is now tracked via square_existing_clients.used_referral_code
+    // Rewards are tracked via square_existing_clients.total_rewards
     
-    const matchStats = refMatches[0]
-    console.log(`   Total matches: ${matchStats.total}`)
-    console.log(`   Unique codes used: ${matchStats.unique_codes}`)
-    console.log(`   Unique customers: ${matchStats.unique_customers}`)
-    
-    if (matchStats.total > 0) {
-      console.log(`   First match: ${matchStats.first_match}`)
-      console.log(`   Last match: ${matchStats.last_match}`)
-      
-      // Get recent matches
-      const recentMatches = await prisma.$queryRaw`
-        SELECT 
-          "refCode" as ref_code,
-          "customerId" as customer_id,
-          "bookingId" as booking_id,
-          "matchedVia" as matched_via,
-          "matchedAt" as matched_at
-        FROM ref_matches
-        ORDER BY "matchedAt" DESC
-        LIMIT 10
-      `
-      
-      console.log(`\n   Recent matches (last 10):`)
-      recentMatches.forEach((match, idx) => {
-        console.log(`   ${idx + 1}. Code: ${match.ref_code}`)
-        console.log(`      Booking: ${match.booking_id}`)
-        console.log(`      Customer: ${match.customer_id}`)
-        console.log(`      Matched via: ${match.matched_via}`)
-        console.log(`      Matched at: ${match.matched_at}`)
-      })
-    } else {
-      console.log('   ❌ No referral code matches found')
-    }
-    
-    // 2. Check RefClick table (clicks on referral links)
-    console.log('\n2️⃣ Referral Link Clicks (RefClick):')
+    // 1. Check RefClick table (clicks on referral links)
+    console.log('\n1️⃣ Referral Link Clicks (RefClick):')
     const refClicks = await prisma.$queryRaw`
       SELECT 
         COUNT(*)::int as total,
@@ -85,8 +44,8 @@ async function checkReferralCodeUsage() {
       console.log('   ❌ No referral link clicks found')
     }
     
-    // 3. Check square_existing_clients.used_referral_code
-    console.log('\n3️⃣ Used Referral Codes (square_existing_clients):')
+    // 2. Check square_existing_clients.used_referral_code
+    console.log('\n2️⃣ Used Referral Codes (square_existing_clients):')
     const usedCodes = await prisma.$queryRaw`
       SELECT 
         COUNT(*)::int as total,
@@ -128,70 +87,34 @@ async function checkReferralCodeUsage() {
       console.log('   ❌ No customers found with used referral codes')
     }
     
-    // 4. Check RefReward table (rewards given)
-    console.log('\n4️⃣ Referral Rewards (RefReward):')
-    const rewards = await prisma.$queryRaw`
+    // 4. Check rewards from square_existing_clients (rewards are tracked here now)
+    console.log('\n4️⃣ Referral Rewards (from square_existing_clients):')
+    const rewardsStats = await prisma.$queryRaw`
       SELECT 
-        COUNT(*)::int as total,
-        COUNT(DISTINCT "referrerCustomerId")::int as unique_referrers,
-        COUNT(DISTINCT "friendCustomerId")::int as unique_friends,
-        SUM(amount)::int as total_amount_cents,
-        MIN("createdAt") as first_reward,
-        MAX("createdAt") as last_reward
-      FROM ref_rewards
+        COUNT(*)::int as customers_with_rewards,
+        SUM(total_rewards)::int as total_rewards_count,
+        SUM(total_referrals)::int as total_referrals_count
+      FROM square_existing_clients
+      WHERE total_rewards > 0 OR total_referrals > 0
     `
     
-    const rewardStats = rewards[0]
-    console.log(`   Total rewards: ${rewardStats.total}`)
-    console.log(`   Unique referrers: ${rewardStats.unique_referrers}`)
-    console.log(`   Unique friends: ${rewardStats.unique_friends}`)
-    console.log(`   Total amount: $${((rewardStats.total_amount_cents || 0) / 100).toFixed(2)}`)
-    
-    if (rewardStats.total > 0) {
-      console.log(`   First reward: ${rewardStats.first_reward}`)
-      console.log(`   Last reward: ${rewardStats.last_reward}`)
-      
-      const recentRewards = await prisma.$queryRaw`
-        SELECT 
-          id,
-          type,
-          "referrerCustomerId" as referrer_customer_id,
-          "friendCustomerId" as friend_customer_id,
-          amount,
-          status,
-          "createdAt" as created_at
-        FROM ref_rewards
-        ORDER BY "createdAt" DESC
-        LIMIT 10
-      `
-      
-      console.log(`\n   Recent rewards (last 10):`)
-      recentRewards.forEach((reward, idx) => {
-        console.log(`   ${idx + 1}. ${reward.type}`)
-        console.log(`      Referrer: ${reward.referrer_customer_id || 'N/A'}`)
-        console.log(`      Friend: ${reward.friend_customer_id || 'N/A'}`)
-        console.log(`      Amount: $${(reward.amount / 100).toFixed(2)}`)
-        console.log(`      Status: ${reward.status}`)
-        console.log(`      Created: ${reward.created_at}`)
-      })
-    } else {
-      console.log('   ❌ No referral rewards found')
-    }
+    const rewardStats = rewardsStats[0]
+    console.log(`   Customers with rewards: ${rewardStats.customers_with_rewards || 0}`)
+    console.log(`   Total rewards given: ${rewardStats.total_rewards_count || 0}`)
+    console.log(`   Total referrals: ${rewardStats.total_referrals_count || 0}`)
     
     // 5. Summary
     console.log('\n' + '='.repeat(60))
     console.log('📊 SUMMARY')
     console.log('='.repeat(60))
     
-    const hasUsage = matchStats.total > 0 || clickStats.total > 0 || usedStats.total > 0 || rewardStats.total > 0
+    const hasUsage = clickStats.total > 0 || usedStats.total > 0
     
     if (hasUsage) {
       console.log('✅ Referral codes HAVE been used!')
       console.log(`\n   📊 Statistics:`)
-      console.log(`   - Matches: ${matchStats.total}`)
       console.log(`   - Clicks: ${clickStats.total}`)
       console.log(`   - Customers with used codes: ${usedStats.total}`)
-      console.log(`   - Rewards given: ${rewardStats.total} ($${((rewardStats.total_amount_cents || 0) / 100).toFixed(2)})`)
     } else {
       console.log('❌ NO referral codes have been used yet')
       console.log('\n   💡 This could mean:')

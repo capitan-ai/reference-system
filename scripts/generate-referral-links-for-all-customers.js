@@ -2,7 +2,7 @@
 
 /**
  * Generate referral links for all customers who don't have one yet
- * This will create RefLink records in the ref_links table for all 7000+ customers
+ * This will update square_existing_clients.referral_url and referral_code for all customers
  */
 
 require('dotenv').config()
@@ -34,7 +34,6 @@ async function generateReferralLinksForAllCustomers() {
     console.log('')
     
     // Get all customers who don't have a referral link
-    // Query square_existing_clients directly for customers without ref_links
     const allCustomers = await prisma.$queryRaw`
       SELECT 
         square_customer_id,
@@ -42,25 +41,20 @@ async function generateReferralLinksForAllCustomers() {
         family_name,
         email_address,
         phone_number,
-        referral_url
+        referral_url,
+        referral_code,
+        personal_code
       FROM square_existing_clients
       ORDER BY created_at ASC
     `
     
-    // Get all existing ref_links to find customers without them
-    const existingRefLinks = await prisma.refLink.findMany({
-      select: {
-        customerId: true
-      }
-    })
-    const customersWithRefLinksSet = new Set(existingRefLinks.map(rl => rl.customerId))
-    
+    // Filter customers without referral URLs
     const customersWithoutRefLinks = allCustomers.filter(c => 
-      !customersWithRefLinksSet.has(c.square_customer_id)
+      !c.referral_url || c.referral_url === ''
     )
     
     const totalCustomers = allCustomers.length
-    const customersWithRefLinks = customersWithRefLinksSet.size
+    const customersWithRefLinks = totalCustomers - customersWithoutRefLinks.length
     
     console.log(`📊 Total Customers: ${totalCustomers}`)
     console.log(`📊 Customers with Referral Links: ${customersWithRefLinks}`)
@@ -94,19 +88,23 @@ async function generateReferralLinksForAllCustomers() {
                               customer.email_address || 
                               'Customer'
           
-          // Generate unique referral code
-          let referralCode = generatePersonalCode(customerName, customer.square_customer_id)
+          // Use existing referral_code or personal_code, or generate new one
+          let referralCode = customer.referral_code || customer.personal_code || generatePersonalCode(customerName, customer.square_customer_id)
           let codeExists = true
           let attempts = 0
           const maxAttempts = 10
           
-          // Ensure code is unique
+          // Ensure code is unique (check against square_existing_clients)
           while (codeExists && attempts < maxAttempts) {
-            const existing = await prisma.refLink.findUnique({
-              where: { refCode: referralCode }
-            })
+            const existing = await prisma.$queryRaw`
+              SELECT square_customer_id 
+              FROM square_existing_clients
+              WHERE (referral_code = ${referralCode} OR personal_code = ${referralCode})
+              AND square_customer_id != ${customer.square_customer_id}
+              LIMIT 1
+            `
             
-            if (!existing) {
+            if (!existing || existing.length === 0) {
               codeExists = false
             } else {
               // Try with timestamp to make it unique
@@ -125,32 +123,16 @@ async function generateReferralLinksForAllCustomers() {
           // Generate referral URL using the utility function
           const referralUrl = generateReferralUrl(referralCode)
           
-          // Create referral link in database (now uses square_customer_id directly)
-          const refLink = await prisma.refLink.create({
-            data: {
-              customerId: customer.square_customer_id,
-              refCode: referralCode,
-              url: referralUrl,
-              status: 'ACTIVE'
-            }
-          })
-          
-          // Also update square_existing_clients table with the URL
-          try {
-            await prisma.$executeRaw`
-              UPDATE square_existing_clients
-              SET 
-                referral_url = ${referralUrl},
-                personal_code = COALESCE(personal_code, ${referralCode}),
-                updated_at = NOW()
-              WHERE square_customer_id = ${customer.square_customer_id}
-            `
-          } catch (error) {
-            // Log but don't fail if square_existing_clients update fails
-            if (successCount % 50 === 0) {
-              console.log(`   ⚠️  Could not update square_existing_clients for ${customer.square_customer_id}: ${error.message}`)
-            }
-          }
+          // Update square_existing_clients table with the URL and code
+          await prisma.$executeRaw`
+            UPDATE square_existing_clients
+            SET 
+              referral_url = ${referralUrl},
+              referral_code = COALESCE(referral_code, ${referralCode}),
+              personal_code = COALESCE(personal_code, ${referralCode}),
+              updated_at = NOW()
+            WHERE square_customer_id = ${customer.square_customer_id}
+          `
           
           successCount++
           
@@ -166,11 +148,7 @@ async function generateReferralLinksForAllCustomers() {
                               'Unknown'
           errors.push({ customer: customerName, error: error.message })
           
-          if (error.code === 'P2002') {
-            console.log(`   ⚠️  Duplicate code for ${customerName}, skipping...`)
-          } else {
-            console.log(`   ❌ Error for ${customerName}: ${error.message}`)
-          }
+          console.log(`   ❌ Error for ${customerName}: ${error.message}`)
         }
       }
       
@@ -191,12 +169,13 @@ async function generateReferralLinksForAllCustomers() {
     console.log('')
     
     // Verify final count
-    const finalCount = await prisma.refLink.count({
-      where: {
-        status: 'ACTIVE'
-      }
-    })
-    console.log(`📊 Total Active Referral Links in Database: ${finalCount}`)
+    const finalCountResult = await prisma.$queryRaw`
+      SELECT COUNT(*) as count
+      FROM square_existing_clients
+      WHERE referral_url IS NOT NULL AND referral_url != ''
+    `
+    const finalCount = Number(finalCountResult[0].count)
+    console.log(`📊 Total Customers with Referral URLs in Database: ${finalCount}`)
     console.log('')
     
     if (errors.length > 0 && errors.length <= 20) {
@@ -216,8 +195,8 @@ async function generateReferralLinksForAllCustomers() {
     console.log('✅ Done!')
     console.log('')
     console.log('💾 All referral URLs are stored in:')
-    console.log('   Table: ref_links')
-    console.log('   Column: url')
+    console.log('   Table: square_existing_clients')
+    console.log('   Column: referral_url')
     console.log('')
     console.log('📋 To view all referral URLs, run:')
     console.log('   node scripts/check-referral-urls-in-db.js')

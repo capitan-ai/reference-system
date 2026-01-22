@@ -27,6 +27,7 @@
     "@prisma/adapter-neon": "^5.22.0",
     "@prisma/client": "^5.22.0",
     "@sendgrid/mail": "^8.1.6",
+    "@supabase/supabase-js": "^2.91.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.3",
     "apn": "^2.0.0",

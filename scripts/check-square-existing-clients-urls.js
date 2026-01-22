@@ -89,30 +89,11 @@ async function checkUrls() {
       console.log('')
     })
 
-    // Check ref_links table for comparison
-    const refLinks = await prisma.refLink.findMany({
-      where: { status: 'ACTIVE' },
-      include: {
-        customer: {
-          select: {
-            squareCustomerId: true,
-            phoneE164: true,
-            fullName: true
-          }
-        }
-      }
-    })
-
+    // Note: ref_links table has been removed
     console.log('='.repeat(60))
-    console.log('📊 Comparison:')
+    console.log('📊 Summary:')
     console.log(`   URLs in square_existing_clients: ${customersWithUrls.length}`)
-    console.log(`   URLs in ref_links: ${refLinks.length}`)
     console.log('')
-
-    if (customersWithUrls.length < refLinks.length) {
-      console.log('⚠️  Some URLs are missing from square_existing_clients!')
-      console.log('   Run: node scripts/sync-urls-to-square-existing-clients.js')
-    }
 
   } catch (error) {
     console.error('❌ Error:', error.message)

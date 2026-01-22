@@ -4,8 +4,9 @@
  * Ensure all referral URLs are stored in square_existing_clients table
  * This will:
  * 1. Check if referral_url column exists, create it if not
- * 2. Sync all URLs from ref_links to square_existing_clients
- * 3. Generate URLs for customers who have personal_code but no URL
+ * 2. Generate URLs for customers who have personal_code but no URL
+ * 
+ * Note: ref_links table has been removed. All URLs are now stored in square_existing_clients.
  */
 
 require('dotenv').config()
@@ -55,73 +56,8 @@ async function ensureUrlsInSquareExistingClients() {
     }
     console.log('')
 
-    // Step 2: Sync URLs from ref_links table
-    console.log('📋 Step 2: Syncing URLs from ref_links table...')
-    const refLinks = await prisma.refLink.findMany({
-      where: { status: 'ACTIVE' },
-      include: {
-        customer: {
-          select: {
-            squareCustomerId: true,
-            phoneE164: true,
-            fullName: true
-          }
-        }
-      }
-    })
-
-    console.log(`   Found ${refLinks.length} referral links in ref_links table`)
-    console.log('')
-
-    let syncedCount = 0
-    let notFoundCount = 0
-
-    for (const link of refLinks) {
-      const customer = link.customer
-      
-      if (!customer?.squareCustomerId) {
-        notFoundCount++
-        continue
-      }
-
-      try {
-        // Update square_existing_clients
-        const result = await prisma.$executeRaw`
-          UPDATE square_existing_clients
-          SET 
-            referral_url = ${link.url},
-            personal_code = COALESCE(personal_code, ${link.refCode}),
-            updated_at = NOW()
-          WHERE square_customer_id = ${customer.squareCustomerId}
-        `
-
-        // Verify update
-        const check = await prisma.$queryRaw`
-          SELECT referral_url 
-          FROM square_existing_clients
-          WHERE square_customer_id = ${customer.squareCustomerId}
-        `
-
-        if (check && check.length > 0 && check[0].referral_url === link.url) {
-          syncedCount++
-          if (syncedCount <= 5) {
-            console.log(`   ✅ Synced: ${customer.squareCustomerId} → ${link.url}`)
-          }
-        }
-      } catch (error) {
-        if (notFoundCount < 5) {
-          console.log(`   ⚠️  Could not sync ${customer.squareCustomerId}: ${error.message}`)
-        }
-        notFoundCount++
-      }
-    }
-
-    console.log(`   ✅ Synced: ${syncedCount}`)
-    console.log(`   ⏭️  Skipped (not in square_existing_clients): ${notFoundCount}`)
-    console.log('')
-
-    // Step 3: Generate URLs for customers with personal_code but no URL
-    console.log('📋 Step 3: Generating URLs for customers with personal_code but no URL...')
+    // Step 2: Generate URLs for customers with personal_code but no URL
+    console.log('📋 Step 2: Generating URLs for customers with personal_code but no URL...')
     const customersWithoutUrl = await prisma.$queryRaw`
       SELECT 
         square_customer_id,
@@ -177,7 +113,6 @@ async function ensureUrlsInSquareExistingClients() {
     console.log('='.repeat(60))
     console.log('📊 Final Summary:')
     console.log(`   Total URLs in square_existing_clients: ${finalCount[0]?.count || 0}`)
-    console.log(`   Synced from ref_links: ${syncedCount}`)
     console.log(`   Generated from personal_code: ${generatedCount}`)
     console.log('')
     console.log('✅ Complete!')

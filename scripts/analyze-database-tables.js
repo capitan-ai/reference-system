@@ -3,11 +3,7 @@ const prisma = require('../lib/prisma-client')
 // All tables from schema
 const tables = [
   { name: 'customers', model: 'Customer', description: 'Основные клиенты системы' },
-  { name: 'ref_links', model: 'RefLink', description: 'Реферальные ссылки клиентов' },
   { name: 'ref_clicks', model: 'RefClick', description: 'Клики по реферальным ссылкам' },
-  { name: 'ref_matches', model: 'RefMatch', description: 'Совпадения рефералов с бронированиями' },
-  { name: 'ref_rewards', model: 'RefReward', description: 'Награды за рефералов' },
-  { name: 'processed_events', model: 'ProcessedEvent', description: 'Обработанные события' },
   { name: 'giftcard_runs', model: 'GiftCardRun', description: 'Запуски обработки подарочных карт' },
   { name: 'giftcard_jobs', model: 'GiftCardJob', description: 'Задачи обработки подарочных карт' },
   { name: 'notification_events', model: 'NotificationEvent', description: 'События уведомлений' },
@@ -147,10 +143,7 @@ async function main() {
     console.log('   Возможные причины:')
     
     // Analyze based on table name
-    if (emptyTable.name === 'processed_events') {
-      console.log('   - Таблица для отслеживания обработанных событий')
-      console.log('   - Может очищаться периодически')
-    } else if (emptyTable.name === 'analytics_dead_letter') {
+    if (emptyTable.name === 'analytics_dead_letter') {
       console.log('   - Таблица для необработанных аналитических событий')
       console.log('   - Пустота означает, что все события обрабатываются успешно')
     } else if (emptyTable.name === 'device_pass_registrations') {
@@ -170,17 +163,8 @@ async function main() {
   console.log('\n' + '='.repeat(80))
   console.log('\n🔗 АНАЛИЗ СВЯЗЕЙ МЕЖДУ ТАБЛИЦАМИ:\n')
   
-  // Check if customers exist but ref_links don't
-  const customersCount = results.find(r => r.name === 'customers')?.count || 0
-  const refLinksCount = results.find(r => r.name === 'ref_links')?.count || 0
-  
-  if (customersCount > 0 && refLinksCount === 0) {
-    console.log('⚠️  Обнаружена проблема:')
-    console.log(`   - Есть ${customersCount} клиентов, но нет реферальных ссылок`)
-    console.log('   - Возможно, нужно запустить скрипт generate-referral-links-for-all-customers.js')
-  }
-  
   // Check square_existing_clients vs customers
+  const customersCount = results.find(r => r.name === 'customers')?.count || 0
   const squareClientsCount = results.find(r => r.name === 'square_existing_clients')?.count || 0
   if (squareClientsCount > 0 && customersCount === 0) {
     console.log('⚠️  Обнаружена проблема:')
@@ -188,21 +172,11 @@ async function main() {
     console.log('   - Возможно, нужна миграция данных между таблицами')
   }
   
-  // Check if there are clicks but no matches
-  const clicksCount = results.find(r => r.name === 'ref_clicks')?.count || 0
-  const matchesCount = results.find(r => r.name === 'ref_matches')?.count || 0
-  
-  if (clicksCount > 0 && matchesCount === 0) {
-    console.log('ℹ️  Информация:')
-    console.log(`   - Есть ${clicksCount} кликов, но нет совпадений`)
-    console.log('   - Это может быть нормально, если клики не привели к бронированиям')
-  }
-  
   // Sample data from important tables
   console.log('\n' + '='.repeat(80))
   console.log('\n📝 ПРИМЕРЫ ДАННЫХ ИЗ ВАЖНЫХ ТАБЛИЦ:\n')
   
-  const importantTables = ['customers', 'square_existing_clients', 'ref_links', 'ref_matches', 'ref_rewards']
+  const importantTables = ['customers', 'square_existing_clients']
   
   for (const tableName of importantTables) {
     const tableResult = results.find(r => r.name === tableName)

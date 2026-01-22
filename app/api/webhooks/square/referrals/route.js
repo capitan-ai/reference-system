@@ -96,6 +96,33 @@ const DELIVERY_CHANNELS = {
   OWNER_FUNDED_ADJUST: 'owner_funded_adjust'
 }
 
+// ============================================================================
+// Helper: Resolve organization_id from square_merchant_id
+// ============================================================================
+async function resolveOrganizationId(squareMerchantId) {
+  if (!squareMerchantId) {
+    return null
+  }
+  
+  try {
+    const org = await prisma.$queryRaw`
+      SELECT id FROM organizations 
+      WHERE square_merchant_id = ${squareMerchantId}
+      LIMIT 1
+    `
+    
+    if (org && org.length > 0) {
+      return org[0].id
+    }
+    
+    console.warn(`⚠️ Organization not found for square_merchant_id: ${squareMerchantId}`)
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id: ${error.message}`)
+    return null
+  }
+}
+
 const REFERRAL_SMS_TEMPLATE =
   process.env.REFERRAL_SMS_TEMPLATE ||
   REFERRAL_PROGRAM_SMS_TEMPLATE
@@ -559,25 +586,35 @@ async function generateUniquePersonalCode(customerName, customerId, maxAttempts 
       const baseCode = code.slice(0, -2) // Remove last 2 chars to make room
       const uniqueCode = `${baseCode}${suffix}`
       
-      // Check if this code exists
-      const existing = await prisma.$queryRaw`
+      // Check if this code exists in referral_profiles OR square_existing_clients (backward compatibility)
+      const existingInProfiles = await prisma.referralProfile.findUnique({
+        where: { personal_code: uniqueCode },
+        select: { square_customer_id: true }
+      })
+      
+      const existingInClients = await prisma.$queryRaw`
         SELECT square_customer_id FROM square_existing_clients 
         WHERE personal_code = ${uniqueCode}
         LIMIT 1
       `
       
-      if (!existing || existing.length === 0) {
+      if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return uniqueCode
       }
     } else {
       // First attempt - check if base code exists
-      const existing = await prisma.$queryRaw`
+      const existingInProfiles = await prisma.referralProfile.findUnique({
+        where: { personal_code: code },
+        select: { square_customer_id: true }
+      })
+      
+      const existingInClients = await prisma.$queryRaw`
         SELECT square_customer_id FROM square_existing_clients 
         WHERE personal_code = ${code}
         LIMIT 1
       `
       
-      if (!existing || existing.length === 0) {
+      if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return code
       }
     }
@@ -605,7 +642,39 @@ async function findReferrerByCode(referralCode) {
     const normalizedCode = referralCode.trim().toUpperCase()
     console.log(`   🔍 Looking up referral code in database: "${normalizedCode}" (original: "${referralCode}")`)
     
-    // Try exact match first (case-insensitive)
+    // Try exact match first in referral_profiles (case-insensitive)
+    let referralProfile = await prisma.referralProfile.findFirst({
+      where: {
+        OR: [
+          { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
+          { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
+        ]
+      },
+      include: {
+        customer: {
+          select: {
+            square_customer_id: true,
+            given_name: true,
+            family_name: true,
+            email_address: true,
+            gift_card_id: true
+          }
+        }
+      }
+    })
+    
+    if (referralProfile) {
+      return {
+        square_customer_id: referralProfile.customer.square_customer_id,
+        given_name: referralProfile.customer.given_name,
+        family_name: referralProfile.customer.family_name,
+        email_address: referralProfile.customer.email_address,
+        personal_code: referralProfile.personal_code,
+        gift_card_id: referralProfile.customer.gift_card_id
+      }
+    }
+    
+    // Fallback to square_existing_clients for backward compatibility
     let referrer = await prisma.$queryRaw`
       SELECT square_customer_id, given_name, family_name, email_address, personal_code, gift_card_id
       FROM square_existing_clients 
@@ -892,6 +961,105 @@ async function completePromotionOrderPayment(orderId, amountMoney, locationId, r
   }
 }
 
+// Helper function to save gift card to database
+async function saveGiftCardToDatabase(giftCardData) {
+  try {
+    const {
+      square_customer_id,
+      square_gift_card_id,
+      gift_card_gan,
+      reward_type,
+      initial_amount_cents,
+      current_balance_cents,
+      gift_card_order_id,
+      gift_card_line_item_uid,
+      delivery_channel,
+      activation_url,
+      pass_kit_url,
+      digital_email,
+      state
+    } = giftCardData
+
+    // Upsert gift card record
+    const giftCard = await prisma.giftCard.upsert({
+      where: { square_gift_card_id },
+      update: {
+        current_balance_cents,
+        delivery_channel,
+        activation_url,
+        pass_kit_url,
+        digital_email,
+        state,
+        last_balance_check_at: new Date(),
+        updated_at: new Date()
+      },
+      create: {
+        square_customer_id,
+        square_gift_card_id,
+        gift_card_gan,
+        reward_type,
+        initial_amount_cents: initial_amount_cents || 0,
+        current_balance_cents: current_balance_cents || 0,
+        gift_card_order_id,
+        gift_card_line_item_uid,
+        delivery_channel,
+        activation_url,
+        pass_kit_url,
+        digital_email,
+        state: state || 'PENDING',
+        is_active: true
+      }
+    })
+
+    return giftCard
+  } catch (error) {
+    console.error('Error saving gift card to database:', error.message)
+    // Don't throw - this is a non-critical operation
+    return null
+  }
+}
+
+// Helper function to save gift card transaction to database
+async function saveGiftCardTransaction(transactionData) {
+  try {
+    const {
+      gift_card_id,
+      transaction_type,
+      amount_cents,
+      balance_before_cents,
+      balance_after_cents,
+      square_activity_id,
+      square_order_id,
+      square_payment_id,
+      reason,
+      context_label,
+      metadata
+    } = transactionData
+
+    const transaction = await prisma.giftCardTransaction.create({
+      data: {
+        gift_card_id,
+        transaction_type,
+        amount_cents,
+        balance_before_cents,
+        balance_after_cents,
+        square_activity_id,
+        square_order_id,
+        square_payment_id,
+        reason,
+        context_label,
+        metadata: metadata ? JSON.parse(JSON.stringify(metadata)) : null
+      }
+    })
+
+    return transaction
+  } catch (error) {
+    console.error('Error saving gift card transaction to database:', error.message)
+    // Don't throw - this is a non-critical operation
+    return null
+  }
+}
+
 // Create gift card with unique name and activate it
 async function createGiftCard(customerId, customerName, amountCents = 1000, isReferrer = false, options = {}) {
   try {
@@ -941,7 +1109,38 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     const giftCard = createResponse.result.giftCard
     const giftCardId = giftCard.id
     let giftCardGan = giftCard.gan
+    const giftCardState = giftCard.state || 'PENDING'
     console.log(`✅ Created gift card for ${customerName}: ${giftCardId}`)
+    
+    // Save CREATE transaction to database
+    try {
+      const createGiftCardRecord = await saveGiftCardToDatabase({
+        square_customer_id: customerId,
+        square_gift_card_id: giftCardId,
+        gift_card_gan,
+        reward_type: isReferrer ? 'REFERRER_REWARD' : 'FRIEND_SIGNUP_BONUS',
+        initial_amount_cents: amountCents,
+        current_balance_cents: 0,
+        state: giftCardState,
+        is_active: true
+      })
+
+      if (createGiftCardRecord) {
+        // Create CREATE transaction record
+        await saveGiftCardTransaction({
+          gift_card_id: createGiftCardRecord.id,
+          transaction_type: 'CREATE',
+          amount_cents: 0,
+          balance_before_cents: 0,
+          balance_after_cents: 0,
+          context_label: noteContext,
+          metadata: { square_response: giftCard }
+        })
+      }
+    } catch (dbError) {
+      console.error('Error saving gift card creation to database:', dbError.message)
+      // Continue even if database save fails
+    }
     
     let giftCardActivity = null
     let activityBalanceNumber = 0
@@ -1126,6 +1325,58 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
       if (passKitUrl) {
         console.log(`   PassKit URL: ${passKitUrl}`)
       }
+
+      // Update gift card record with final details
+      try {
+        const updatedGiftCard = await prisma.giftCard.updateMany({
+          where: { square_gift_card_id: giftCardId },
+          data: {
+            current_balance_cents: activityBalanceNumber,
+            activation_url: activationUrl,
+            pass_kit_url: passKitUrl,
+            digital_email: digitalEmail,
+            gift_card_gan: giftCardGan, // Update in case it changed
+            state: verifyCard.state || giftCardState,
+            last_balance_check_at: new Date(),
+            updated_at: new Date()
+          }
+        })
+
+        // Save ACTIVATE or ADJUST_INCREMENT transaction if activity occurred
+        if (giftCardActivity) {
+          const activityType = giftCardActivity.type
+          const transactionType = activityType === 'ACTIVATE' ? 'ACTIVATE' : 
+                                  activityType === 'ADJUST_INCREMENT' ? 'ADJUST_INCREMENT' : 
+                                  null
+
+          if (transactionType) {
+            const giftCardRecord = await prisma.giftCard.findUnique({
+              where: { square_gift_card_id: giftCardId }
+            })
+
+            if (giftCardRecord) {
+              await saveGiftCardTransaction({
+                gift_card_id: giftCardRecord.id,
+                transaction_type: transactionType,
+                amount_cents: amountCents,
+                balance_before_cents: 0,
+                balance_after_cents: activityBalanceNumber,
+                square_activity_id: giftCardActivity.id,
+                square_order_id: successfulOrderInfo?.orderId || null,
+                reason: noteContext.includes('Referrer') ? 'COMPLIMENTARY' : 'FRIEND_BONUS',
+                context_label: noteContext,
+                metadata: { 
+                  square_activity: giftCardActivity,
+                  activation_channel: activationChannel
+                }
+              })
+            }
+          }
+        }
+      } catch (dbError) {
+        console.error('Error updating gift card in database:', dbError.message)
+        // Continue even if database update fails
+      }
     } catch (verifyError) {
       console.error(`⚠️ Unable to verify gift card ${giftCardId}:`, verifyError.message)
     }
@@ -1207,9 +1458,13 @@ async function loadGiftCard(
 
     const giftCardGan = giftCard.gan
     const cardState = giftCard.state
+    const balanceBefore = giftCard.balanceMoney?.amount
+    const balanceBeforeCents = typeof balanceBefore === 'bigint' ? Number(balanceBefore) : (balanceBefore || 0)
+    
     let activity = null
     let resultingBalance = 0
     let deliveryChannel = null
+    let transactionType = null
 
     if (cardState === 'PENDING') {
       if (!locationId) {
@@ -1234,6 +1489,7 @@ async function loadGiftCard(
       const activateResponse = await giftCardActivitiesApi.createGiftCardActivity(activateRequest)
       activity = activateResponse.result?.giftCardActivity || null
       deliveryChannel = DELIVERY_CHANNELS.OWNER_FUNDED_ACTIVATE
+      transactionType = 'ACTIVATE'
     } else {
       const adjustRequest = {
         idempotencyKey: buildIdempotencyKey([idempotencySeed, 'adjust', giftCardId]),
@@ -1251,11 +1507,54 @@ async function loadGiftCard(
       const adjustResponse = await giftCardActivitiesApi.createGiftCardActivity(adjustRequest)
       activity = adjustResponse.result?.giftCardActivity || null
       deliveryChannel = DELIVERY_CHANNELS.OWNER_FUNDED_ADJUST
+      transactionType = 'ADJUST_INCREMENT'
     }
 
     if (activity) {
       const balanceAmount = activity.giftCardBalanceMoney?.amount
       resultingBalance = typeof balanceAmount === 'bigint' ? Number(balanceAmount) : (balanceAmount || 0)
+
+      // Save transaction to database
+      try {
+        // Find the gift card record in our database
+        const giftCardRecord = await prisma.giftCard.findUnique({
+          where: { square_gift_card_id: giftCardId }
+        })
+
+        if (giftCardRecord) {
+          // Save the transaction
+          await saveGiftCardTransaction({
+            gift_card_id: giftCardRecord.id,
+            transaction_type: transactionType,
+            amount_cents: amountCents,
+            balance_before_cents: balanceBeforeCents,
+            balance_after_cents: resultingBalance,
+            square_activity_id: activity.id,
+            reason: 'COMPLIMENTARY',
+            context_label: contextLabel,
+            metadata: {
+              square_activity: activity,
+              delivery_channel: deliveryChannel
+            }
+          })
+
+          // Update gift card record with new balance
+          await prisma.giftCard.update({
+            where: { id: giftCardRecord.id },
+            data: {
+              current_balance_cents: resultingBalance,
+              state: cardState === 'PENDING' ? 'ACTIVE' : cardState,
+              last_balance_check_at: new Date(),
+              updated_at: new Date()
+            }
+          })
+        } else {
+          console.warn(`⚠️ Gift card ${giftCardId} not found in database, skipping transaction save`)
+        }
+      } catch (dbError) {
+        console.error('Error saving gift card load transaction to database:', dbError.message)
+        // Continue even if database save fails
+      }
 
       let activationUrl = null
       let passKitUrl = null
@@ -1478,6 +1777,89 @@ async function sendReferralCodeToNewClient(
     await appendReferralNote(customerId, referralCode, referralUrl)
 
     // Update database - customer is now a referrer
+    // Create/update ReferralProfile (new normalized table)
+    try {
+      await prisma.referralProfile.upsert({
+        where: { square_customer_id: customerId },
+        update: {
+          personal_code: referralCode,
+          referral_code: referralCode, // Same as personal_code for now
+          referral_url: referralUrl,
+          activated_as_referrer: true,
+          referral_email_sent: true,
+          activated_at: new Date(),
+          updated_at: new Date()
+        },
+        create: {
+          square_customer_id: customerId,
+          personal_code: referralCode,
+          referral_code: referralCode,
+          referral_url: referralUrl,
+          activated_as_referrer: true,
+          referral_email_sent: true,
+          activated_at: new Date()
+        }
+      })
+      console.log(`✅ Created/updated ReferralProfile for customer ${customerId}`)
+    } catch (profileError) {
+      // Handle duplicate key error (race condition)
+      if (profileError.code === 'P2002' || (profileError.code === '23505' && profileError.message?.includes('personal_code'))) {
+        console.warn(`⚠️ Personal code ${referralCode} was taken, generating new one...`)
+        
+        // Retry with new code
+        let retrySuccess = false
+        for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
+          try {
+            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralUrl = generateReferralUrl(referralCode)
+            
+            await upsertCustomerCustomAttribute(customerId, REFERRAL_CODE_ATTRIBUTE_KEY, referralCode)
+            await appendReferralNote(customerId, referralCode, referralUrl)
+            
+            await prisma.referralProfile.upsert({
+              where: { square_customer_id: customerId },
+              update: {
+                personal_code: referralCode,
+                referral_code: referralCode,
+                referral_url: referralUrl,
+                activated_as_referrer: true,
+                referral_email_sent: true,
+                activated_at: new Date(),
+                updated_at: new Date()
+              },
+              create: {
+                square_customer_id: customerId,
+                personal_code: referralCode,
+                referral_code: referralCode,
+                referral_url: referralUrl,
+                activated_as_referrer: true,
+                referral_email_sent: true,
+                activated_at: new Date()
+              }
+            })
+            console.log(`✅ Retried with new unique code: ${referralCode}`)
+            retrySuccess = true
+            break
+          } catch (retryError) {
+            if ((retryError.code === 'P2002' || retryError.code === '23505') && retryError.message?.includes('personal_code')) {
+              console.warn(`⚠️ Retry attempt ${retryAttempt + 1} also failed with duplicate code, trying again...`)
+              continue
+            } else {
+              throw retryError
+            }
+          }
+        }
+        
+        if (!retrySuccess) {
+          console.error(`❌ Failed to save personal_code to ReferralProfile after 3 retry attempts`)
+        }
+      } else {
+        console.error(`❌ Error creating/updating ReferralProfile: ${profileError.message}`)
+        // Continue - non-critical error
+      }
+    }
+    
+    // Also update square_existing_clients for backward compatibility
     try {
       await prisma.$executeRaw`
         UPDATE square_existing_clients 
@@ -1622,6 +2004,22 @@ async function sendReferralCodeToNewClient(
         } else {
           console.log(`📲 Referral SMS sent to ${smsDestination}`)
           smsAnalytics.success = true
+          // Update ReferralProfile with SMS info
+          try {
+            await prisma.referralProfile.update({
+              where: { square_customer_id: customerId },
+              data: {
+                referral_sms_sent: true,
+                referral_sms_sent_at: new Date(),
+                referral_sms_sid: smsResult.sid ?? null,
+                updated_at: new Date()
+              }
+            })
+          } catch (profileError) {
+            console.warn(`⚠️ Failed to update ReferralProfile SMS info: ${profileError.message}`)
+          }
+          
+          // Also update square_existing_clients for backward compatibility
           await prisma.$executeRaw`
             UPDATE square_existing_clients
             SET referral_sms_sent = TRUE,
@@ -2148,6 +2546,37 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 console.log('⚠️ Referrer gift card email skipped – missing email address')
               }
 
+              // Create ReferralReward record for tracking
+              try {
+                // Find the gift card ID from the new gift_cards table
+                const giftCardRecord = await prisma.giftCard.findUnique({
+                  where: { square_gift_card_id: referrerGiftCard.giftCardId }
+                })
+                
+                await prisma.referralReward.create({
+                  data: {
+                    referrer_customer_id: referrer.square_customer_id,
+                    referred_customer_id: customerId,
+                    reward_amount_cents: rewardAmountCents, // 1000 cents = $10
+                    status: 'PAID',
+                    gift_card_id: giftCardRecord?.id || null,
+                    payment_id: paymentId || null,
+                    booking_id: null,
+                    reward_type: 'referrer_reward',
+                    paid_at: new Date(),
+                    metadata: {
+                      referral_code: customer.used_referral_code,
+                      source: 'payment.completed',
+                      gift_card_square_id: referrerGiftCard.giftCardId
+                    }
+                  }
+                })
+                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
+              } catch (rewardError) {
+                console.warn(`⚠️ Failed to create ReferralReward record: ${rewardError.message}`)
+                // Continue - non-critical error
+              }
+
               // Send notification to admin about referral code usage (referrer reward)
               try {
                 await sendReferralCodeUsageNotification({
@@ -2252,6 +2681,36 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 })
               } else {
                 console.log('⚠️ Referrer load email skipped – missing email address or card number')
+              }
+
+              // Create ReferralReward record for tracking
+              try {
+                const giftCardRecord = await prisma.giftCard.findUnique({
+                  where: { square_gift_card_id: referrerInfo.gift_card_id }
+                })
+                
+                await prisma.referralReward.create({
+                  data: {
+                    referrer_customer_id: referrer.square_customer_id,
+                    referred_customer_id: customerId,
+                    reward_amount_cents: rewardAmountCents,
+                    status: 'PAID',
+                    gift_card_id: giftCardRecord?.id || null,
+                    payment_id: paymentId || null,
+                    booking_id: null,
+                    reward_type: 'referrer_reward',
+                    paid_at: new Date(),
+                    metadata: {
+                      referral_code: customer.used_referral_code,
+                      source: 'payment.completed (load)',
+                      gift_card_square_id: referrerInfo.gift_card_id
+                    }
+                  }
+                })
+                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
+              } catch (rewardError) {
+                console.warn(`⚠️ Failed to create ReferralReward record: ${rewardError.message}`)
+                // Continue - non-critical error
               }
 
               // Send notification to admin about referral code usage (referrer reward - loaded)
@@ -2409,6 +2868,171 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
 }
 
 // Process booking creation (when customer actually books)
+/**
+ * Save booking to database
+ * If segment is provided, creates a booking record for that specific service
+ * For multi-service bookings, creates multiple records with unique IDs
+ */
+async function saveBookingToDatabase(bookingData, segment, customerId, merchantId = null, organizationId = null) {
+  try {
+    const baseBookingId = bookingData.id || bookingData.bookingId
+    const bookingId = segment 
+      ? `${baseBookingId}-${segment.service_variation_id || segment.serviceVariationId || 'unknown'}` // Unique ID per service
+      : baseBookingId
+    
+    const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
+    const address = bookingData.address || {}
+    
+    // Extract merchant_id from bookingData if not provided
+    const finalMerchantId = merchantId || bookingData.merchantId || bookingData.merchant_id || null
+    
+    // Resolve organization_id from merchant_id if not provided
+    let finalOrganizationId = organizationId
+    if (!finalOrganizationId && finalMerchantId) {
+      finalOrganizationId = await resolveOrganizationId(finalMerchantId)
+    }
+    
+    // If still no organization_id, try to get it from customer
+    if (!finalOrganizationId && customerId) {
+      try {
+        const customerOrg = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${customerId}
+          LIMIT 1
+        `
+        if (customerOrg && customerOrg.length > 0) {
+          finalOrganizationId = customerOrg[0].organization_id
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
+      }
+    }
+    
+    if (!finalOrganizationId) {
+      console.error(`❌ Cannot save booking: organization_id is required but could not be resolved`)
+      return
+    }
+    
+    // Resolve location_id from Square location ID to UUID
+    // Check multiple possible fields where locationId might be stored
+    const squareLocationId = 
+      bookingData.location_id || 
+      bookingData.locationId || 
+      bookingData.location?.id ||
+      bookingData.extendedProperties?.locationId ||
+      (bookingData.raw_json && (bookingData.raw_json.location_id || bookingData.raw_json.locationId))
+    
+    if (!squareLocationId) {
+      console.warn(`⚠️ Booking ${bookingId} missing location_id in all checked fields`)
+      console.warn(`   Checked fields: location_id, locationId, location.id, extendedProperties.locationId, raw_json`)
+    } else {
+      console.log(`📍 Found booking locationId: ${squareLocationId}`)
+    }
+    
+    let locationUuid = null
+    
+    if (squareLocationId) {
+      try {
+        // Ensure location exists first
+        await prisma.$executeRaw`
+          INSERT INTO locations (
+            id,
+            organization_id,
+            square_location_id,
+            name,
+            created_at,
+            updated_at
+          ) VALUES (
+            gen_random_uuid(),
+            ${finalOrganizationId}::uuid,
+            ${squareLocationId},
+            ${`Location ${squareLocationId.substring(0, 8)}...`},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT (organization_id, square_location_id) DO NOTHING
+        `
+        
+        // Get location UUID
+        const locationRecord = await prisma.$queryRaw`
+          SELECT id FROM locations 
+          WHERE square_location_id = ${squareLocationId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
+        
+        if (!locationUuid) {
+          console.error(`❌ Cannot save booking: location UUID not found for square_location_id ${squareLocationId}`)
+          return
+        }
+      } catch (err) {
+        console.error(`❌ Error resolving location: ${err.message}`)
+        return
+      }
+    } else {
+      console.warn(`⚠️ Booking ${bookingId} missing location_id, cannot save`)
+      return
+    }
+    
+    await prisma.$executeRaw`
+      INSERT INTO bookings (
+        id, organization_id, booking_id, version, customer_id, location_id, location_type, source,
+        start_at, status, all_day, transition_time_minutes,
+        creator_type, creator_customer_id, administrator_id,
+        address_line_1, locality, administrative_district_level_1, postal_code,
+        service_variation_id, service_variation_version, duration_minutes,
+        intermission_minutes, technician_id, any_team_member,
+        merchant_id, created_at, updated_at, raw_json
+      ) VALUES (
+        gen_random_uuid(),
+        ${finalOrganizationId}::uuid,
+        ${bookingId},
+        ${bookingData.version || 0},
+        ${customerId},
+        ${locationUuid}::uuid,
+        ${bookingData.location_type || bookingData.locationType || null},
+        ${bookingData.source || null},
+        ${bookingData.start_at || bookingData.startAt ? new Date(bookingData.start_at || bookingData.startAt) : new Date()}::timestamptz,
+        ${bookingData.status || 'ACCEPTED'},
+        ${bookingData.all_day || bookingData.allDay || false},
+        ${bookingData.transition_time_minutes || bookingData.transitionTimeMinutes || 0},
+        ${creatorDetails.creator_type || creatorDetails.creatorType || null},
+        ${creatorDetails.customer_id || creatorDetails.customerId || null},
+        ${creatorDetails.team_member_id || creatorDetails.teamMemberId || null},
+        ${address.address_line_1 || address.addressLine1 || null},
+        ${address.locality || null},
+        ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
+        ${address.postal_code || address.postalCode || null},
+        ${segment?.service_variation_id || segment?.serviceVariationId || null},
+        ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
+        ${segment?.duration_minutes || segment?.durationMinutes || null},
+        ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
+        ${segment?.team_member_id || segment?.teamMemberId || null},
+        ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
+        ${finalMerchantId},
+        ${bookingData.created_at || bookingData.createdAt ? new Date(bookingData.created_at || bookingData.createdAt) : new Date()}::timestamptz,
+        ${bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updatedAt || bookingData.updated_at) : new Date()}::timestamptz,
+        ${JSON.stringify(bookingData)}::jsonb
+      )
+      ON CONFLICT (organization_id, booking_id) DO UPDATE SET
+        version = EXCLUDED.version,
+        status = EXCLUDED.status,
+        merchant_id = COALESCE(EXCLUDED.merchant_id, bookings.merchant_id),
+        service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
+        service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
+        technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
+        updated_at = EXCLUDED.updated_at,
+        raw_json = EXCLUDED.raw_json
+    `
+    
+    console.log(`✅ Saved booking ${bookingId} with service ${segment?.service_variation_id || segment?.serviceVariationId || 'N/A'}`)
+  } catch (error) {
+    console.error(`❌ Error saving booking:`, error.message)
+    // Don't throw - allow referral processing to continue
+  }
+}
+
 async function processBookingCreated(bookingData, runContext = {}) {
   let bookingHadError = false
   try {
@@ -2439,6 +3063,51 @@ async function processBookingCreated(bookingData, runContext = {}) {
         payload: bookingData,
         context: { customerId }
       })
+    }
+
+    // Save booking(s) to database - split if multiple services
+    const bookingId = bookingData.id || bookingData.bookingId
+    const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+    
+    // Extract merchant_id from runContext or bookingData
+    const merchantId = runContext?.merchantId || bookingData.merchantId || bookingData.merchant_id || null
+    
+    // Resolve organization_id from merchant_id
+    let organizationId = runContext?.organizationId || null
+    if (!organizationId && merchantId) {
+      organizationId = await resolveOrganizationId(merchantId)
+    }
+    
+    // If still no organization_id, try to get it from customer
+    if (!organizationId && customerId) {
+      try {
+        const customerOrg = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${customerId}
+          LIMIT 1
+        `
+        if (customerOrg && customerOrg.length > 0) {
+          organizationId = customerOrg[0].organization_id
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
+      }
+    }
+    
+    if (!organizationId) {
+      console.error(`❌ Cannot process booking: organization_id is required but could not be resolved`)
+      return
+    }
+    
+    if (segments.length === 0) {
+      // No services, save booking as-is
+      await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
+    } else {
+      // Multiple services - create one booking per service
+      for (const segment of segments) {
+        await saveBookingToDatabase(bookingData, segment, customerId, merchantId, organizationId)
+      }
+      console.log(`✅ Saved ${segments.length} booking record(s) for booking ${bookingId}`)
     }
 
     // Check if customer exists in our database
@@ -2877,6 +3546,26 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
         if (friendGiftCard?.giftCardId) {
           // Update customer with gift card
+          // Save used_referral_code to ReferralProfile (new normalized table)
+          try {
+            await prisma.referralProfile.upsert({
+              where: { square_customer_id: customerId },
+              update: {
+                used_referral_code: referralCode,
+                updated_at: new Date()
+              },
+              create: {
+                square_customer_id: customerId,
+                used_referral_code: referralCode
+              }
+            })
+            console.log(`✅ Updated ReferralProfile with used_referral_code: ${referralCode}`)
+          } catch (profileError) {
+            console.warn(`⚠️ Failed to update ReferralProfile with used_referral_code: ${profileError.message}`)
+            // Continue - non-critical error
+          }
+          
+          // Also update square_existing_clients for backward compatibility
           await prisma.$executeRaw`
             UPDATE square_existing_clients 
             SET 
@@ -2954,6 +3643,36 @@ async function processBookingCreated(bookingData, runContext = {}) {
             }
           } else {
             console.log('⚠️ Friend gift card email skipped – missing email address')
+          }
+
+          // Create ReferralReward record for friend signup bonus
+          try {
+            const giftCardRecord = await prisma.giftCard.findUnique({
+              where: { square_gift_card_id: friendGiftCard.giftCardId }
+            })
+            
+            await prisma.referralReward.create({
+              data: {
+                referrer_customer_id: referrer.square_customer_id,
+                referred_customer_id: customerId,
+                reward_amount_cents: rewardAmountCents, // 1000 cents = $10
+                status: 'PAID',
+                gift_card_id: giftCardRecord?.id || null,
+                payment_id: null,
+                booking_id: bookingId || null,
+                reward_type: 'friend_signup_bonus',
+                paid_at: new Date(),
+                metadata: {
+                  referral_code: referralCode,
+                  source: `booking.created (${referralCodeSource || 'unknown'})`,
+                  gift_card_square_id: friendGiftCard.giftCardId
+                }
+              }
+            })
+            console.log(`✅ Created ReferralReward record for friend signup bonus`)
+          } catch (rewardError) {
+            console.warn(`⚠️ Failed to create ReferralReward record: ${rewardError.message}`)
+            // Continue - non-critical error
           }
 
           // Send notification to admin about referral code usage
@@ -3419,7 +4138,16 @@ export async function POST(request) {
           resourceId: bookingResourceId || (bookingData.customerId || bookingData.customer_id)
         })
 
-        const runContext = { correlationId }
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || bookingData.merchantId || bookingData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+        
+        const runContext = { correlationId, merchantId, organizationId }
 
         // Try to queue the job (async processing)
         const jobQueued = await enqueueGiftCardJob(prisma, {

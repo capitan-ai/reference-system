@@ -141,9 +141,10 @@ function transformPayment(payment) {
       ? new Date(getValue(payment, 'delayedUntil', 'delayed_until'))
       : null,
     
-    // Staff/Team Member
-    team_member_id: getValue(payment, 'teamMemberId', 'team_member_id') || getValue(payment, 'employeeId', 'employee_id'),
-    employee_id: getValue(payment, 'employeeId', 'employee_id'),
+    // Staff/Team Member - use administrator_id (employee_id is deprecated)
+    administrator_id: getValue(payment, 'teamMemberId', 'team_member_id') || 
+                      getValue(payment, 'employeeId', 'employee_id') ||
+                      null,
     
     // Application details
     application_details_square_product: appDetails.squareProduct || appDetails.square_product || null,

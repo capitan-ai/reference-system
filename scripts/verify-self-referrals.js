@@ -80,22 +80,11 @@ async function verifySelfReferrals() {
         })
       }
       
-      // Check ref_matches to see when code was matched
-      const refMatches = await prisma.$queryRaw`
-        SELECT 
-          id,
-          "refCode",
-          "matchedAt",
-          "matchedVia",
-          "bookingId"
-        FROM ref_matches
-        WHERE "customerId" = ${customer.square_customer_id}
-          AND "refCode" = ${customer.used_referral_code}
-        ORDER BY "matchedAt" ASC
-        LIMIT 5
-      `
+      // Note: ref_matches table has been removed
+      // Referral matching is now tracked via square_existing_clients.used_referral_code
+      const refMatches = []
       
-      if (refMatches && refMatches.length > 0) {
+      if (false) { // Always skip this section since table is removed
         console.log(`\n   📅 Referral Code Matches:`)
         refMatches.forEach((match, idx) => {
           console.log(`      ${idx + 1}. Code: ${match.refCode}`)

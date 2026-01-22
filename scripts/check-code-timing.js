@@ -40,19 +40,9 @@ async function checkCodeTiming() {
       console.log(`\n👤 ${name} (${customer.square_customer_id})`)
       console.log(`   Code: ${customer.used_referral_code}`)
       
-      // Check when the code was first used (from ref_matches or giftcard_jobs)
-      const firstMatch = await prisma.$queryRaw`
-        SELECT 
-          "matchedAt",
-          "createdAt",
-          "matchedVia",
-          "bookingId"
-        FROM ref_matches
-        WHERE "customerId" = ${customer.square_customer_id}
-          AND "refCode" = ${customer.used_referral_code}
-        ORDER BY "matchedAt" ASC
-        LIMIT 1
-      `
+      // Note: ref_matches table has been removed
+      // Referral matching is now tracked via square_existing_clients.used_referral_code
+      const firstMatch = []
       
       const firstJob = await prisma.$queryRaw`
         SELECT 
