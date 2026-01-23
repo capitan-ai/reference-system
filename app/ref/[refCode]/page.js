@@ -31,44 +31,12 @@ export default function ReferralPage() {
 
     fetchReferrerName()
 
-    // Track the referral click
-    const trackReferralClick = async () => {
-      try {
-        const clickData = {
-          refCode: refCode,
-          refSid: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          ipHash: null, // Will be hashed on server
-          userAgent: typeof window !== 'undefined' ? navigator.userAgent : '',
-          landingUrl: typeof window !== 'undefined' ? window.location.href : '',
-          utmSource: typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('utm_source') : null,
-          utmMedium: typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('utm_medium') : null,
-          utmCampaign: typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('utm_campaign') : null,
-          firstSeenAt: new Date().toISOString()
-        }
-
-        // Send click data to our API
-        await fetch('/api/track-referral-click', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(clickData)
-        })
-
-        // Store referral code in session storage and cookies
-        if (typeof window !== 'undefined') {
-          sessionStorage.setItem('referral_code', refCode)
-          localStorage.setItem('referral_code', refCode)
-          document.cookie = `referral_code=${refCode}; max-age=${30 * 24 * 60 * 60}; path=/`
-        }
-
-        console.log('Referral click tracked:', refCode)
-      } catch (error) {
-        console.error('Error tracking referral click:', error)
-      }
+    // Store referral code in session storage and cookies
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('referral_code', refCode)
+      localStorage.setItem('referral_code', refCode)
+      document.cookie = `referral_code=${refCode}; max-age=${30 * 24 * 60 * 60}; path=/`
     }
-
-    trackReferralClick()
   }, [refCode])
 
   const handleCopyCode = useCallback(async () => {
