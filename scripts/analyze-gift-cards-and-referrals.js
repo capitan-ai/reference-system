@@ -288,11 +288,12 @@ async function crossReference(giftCards, customersWithReferralCodes) {
   console.log('')
 
   // Find customers who used referral codes AND got gift cards
+  // IMPORTANT: Check ALL gift cards for these customers, not just ones created in the period
   const customersWithBoth = []
   const customersWithCodeButNoGiftCard = []
   const customersWithGiftCardButNoCode = []
 
-  // Build a map of customer IDs to gift cards
+  // Build a map of customer IDs to gift cards (from the period)
   const giftCardMap = new Map()
   giftCards.forEach(gc => {
     if (!giftCardMap.has(gc.square_customer_id)) {
@@ -307,9 +308,19 @@ async function crossReference(giftCards, customersWithReferralCodes) {
     referralCodeMap.set(customer.square_customer_id, customer)
   })
 
-  // Analyze
-  customersWithReferralCodes.forEach(customer => {
-    const giftCardsForCustomer = giftCardMap.get(customer.square_customer_id) || []
+  // For customers with referral codes, check if they have ANY gift cards (not just from the period)
+  for (const customer of customersWithReferralCodes) {
+    // First check gift cards from the period
+    let giftCardsForCustomer = giftCardMap.get(customer.square_customer_id) || []
+    
+    // If none found in period, check ALL gift cards for this customer
+    if (giftCardsForCustomer.length === 0) {
+      const allGiftCards = await prisma.giftCard.findMany({
+        where: { square_customer_id: customer.square_customer_id }
+      })
+      giftCardsForCustomer = allGiftCards
+    }
+    
     if (giftCardsForCustomer.length > 0) {
       customersWithBoth.push({
         customer,
@@ -318,7 +329,7 @@ async function crossReference(giftCards, customersWithReferralCodes) {
     } else {
       customersWithCodeButNoGiftCard.push(customer)
     }
-  })
+  }
 
   giftCards.forEach(gc => {
     if (!referralCodeMap.has(gc.square_customer_id)) {
