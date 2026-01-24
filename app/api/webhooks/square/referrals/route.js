@@ -1117,7 +1117,7 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
       const createGiftCardRecord = await saveGiftCardToDatabase({
         square_customer_id: customerId,
         square_gift_card_id: giftCardId,
-        gift_card_gan,
+        gift_card_gan: giftCardGan,
         reward_type: isReferrer ? 'REFERRER_REWARD' : 'FRIEND_SIGNUP_BONUS',
         initial_amount_cents: amountCents,
         current_balance_cents: 0,
@@ -1612,77 +1612,6 @@ async function loadGiftCard(
   }
 }
 
-// Track IP address for anti-abuse
-async function trackIpAddress(customerId, ipAddress) {
-  try {
-    if (!ipAddress) return
-
-    // Get current IP addresses
-    const currentData = await prisma.$queryRaw`
-      SELECT ip_addresses, first_ip_address, last_ip_address
-      FROM square_existing_clients 
-      WHERE square_customer_id = ${customerId}
-    `
-
-    if (currentData && currentData.length > 0) {
-      const data = currentData[0]
-      let ipAddresses = Array.isArray(data.ip_addresses) ? data.ip_addresses : []
-      
-      // Add new IP if not already tracked
-      if (Array.isArray(ipAddresses) && !ipAddresses.includes(ipAddress)) {
-        ipAddresses.push(ipAddress)
-        
-        await prisma.$executeRaw`
-          UPDATE square_existing_clients 
-          SET 
-            ip_addresses = ${ipAddresses},
-            last_ip_address = ${ipAddress}
-          WHERE square_customer_id = ${customerId}
-        `
-        
-        console.log(`📍 IP address tracked for customer ${customerId}: ${ipAddress}`)
-      }
-    } else {
-      // First time tracking IP for this customer
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET 
-          ip_addresses = ARRAY[${ipAddress}],
-          first_ip_address = ${ipAddress},
-          last_ip_address = ${ipAddress}
-        WHERE square_customer_id = ${customerId}
-      `
-      
-      console.log(`📍 First IP address tracked for customer ${customerId}: ${ipAddress}`)
-    }
-  } catch (error) {
-    console.error(`Error tracking IP address for customer ${customerId}:`, error.message)
-  }
-}
-
-// Check for suspicious IP activity
-async function checkSuspiciousActivity(customerId, ipAddress) {
-  try {
-    if (!ipAddress) return false
-
-    // Check if this IP has been used by multiple customers
-    const ipUsage = await prisma.$queryRaw`
-      SELECT COUNT(DISTINCT square_customer_id) as customer_count
-      FROM square_existing_clients 
-      WHERE ${ipAddress} = ANY(ip_addresses)
-    `
-
-    if (ipUsage && ipUsage.length > 0 && ipUsage[0].customer_count > 3) {
-      console.log(`⚠️ Suspicious IP activity detected: ${ipAddress} used by ${ipUsage[0].customer_count} customers`)
-      return true
-    }
-
-    return false
-  } catch (error) {
-    console.error(`Error checking suspicious activity for IP ${ipAddress}:`, error.message)
-    return false
-  }
-}
 
 // Send referral code email to new client (now becoming a referrer)
 async function sendReferralCodeToNewClient(
@@ -2103,14 +2032,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
       })
     }
 
-    // Get IP address from request
-    const ipAddress = request.headers.get('x-forwarded-for') || 
-                     request.headers.get('x-real-ip') || 
-                     request.connection?.remoteAddress ||
-                     'unknown'
-
     console.log(`👤 Processing customer creation: ${customerId}`)
-    console.log(`📍 IP Address: ${ipAddress}`)
     let givenName = cleanValue(
       customerData.givenName ??
       customerData.given_name ??
@@ -2148,13 +2070,6 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     console.log(`📞 Phone: ${phoneNumber || 'None'}`)
     console.log(`👤 Name: ${givenName || ''} ${familyName || ''}`)
 
-    // Check for suspicious IP activity
-    const isSuspicious = await checkSuspiciousActivity(customerId, ipAddress)
-    if (isSuspicious) {
-      console.log(`⚠️ Suspicious activity detected for customer ${customerId}, flagging for review`)
-      // Could add a flag to database for manual review
-    }
-
     // 1. Check if customer is new
     const isNew = await isNewCustomer(customerId)
     if (!isNew) {
@@ -2187,8 +2102,6 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         referral_url,
         gift_card_id,
         used_referral_code,
-        first_ip_address,
-        ip_addresses,
         referral_email_sent,
         created_at,
         updated_at
@@ -2204,8 +2117,6 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         ${referralUrl}, -- Referral URL created immediately
         NULL, -- No gift card yet (will create on booking or after first payment)
         NULL, -- No referral code stored yet (will check on booking)
-        ${ipAddress},
-        ARRAY[${ipAddress}],
         FALSE, -- No email sent yet (will send immediately if email exists)
         NOW(),
         NOW()
@@ -3135,8 +3046,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
         console.log(`📥 Fetching customer from Square:`, safeStringify(squareCustomer))
         
         // Add customer to database
-        const ipAddress = 'unknown' // No IP from Square API
-        
         const squareGivenName = cleanValue(squareCustomer.givenName)
         const squareFamilyName = cleanValue(squareCustomer.familyName)
         const squareEmail = cleanValue(squareCustomer.emailAddress)
@@ -3154,8 +3063,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
             personal_code,
             gift_card_id,
             used_referral_code,
-            first_ip_address,
-            ip_addresses,
             referral_email_sent,
             created_at,
             updated_at
@@ -3170,8 +3077,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
             NULL,
             NULL,
             NULL,
-            ${ipAddress},
-            ARRAY[${ipAddress}],
             FALSE,
             NOW(),
             NOW()
