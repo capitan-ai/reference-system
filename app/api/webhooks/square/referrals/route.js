@@ -4019,7 +4019,16 @@ export async function POST(request) {
           resourceId: customerResourceId
         })
 
-        const runContext = { correlationId }
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || customerData.merchantId || customerData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
+        const runContext = { correlationId, merchantId, organizationId }
         const requestStub = { headers: { get: () => null }, connection: null }
 
         // Try to queue the job (async processing)
@@ -4031,7 +4040,9 @@ export async function POST(request) {
           context: {
             customerId: customerResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4159,7 +4170,9 @@ export async function POST(request) {
             customerId: bookingData.customerId || bookingData.customer_id || null,
             bookingId: bookingResourceId || null,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4275,7 +4288,16 @@ export async function POST(request) {
           resourceId: paymentResourceId || customerIdFromPayment
         })
 
-        const runContext = { correlationId }
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
+        const runContext = { correlationId, merchantId, organizationId }
 
         // Try to queue the job (async processing)
         const jobQueued = await enqueueGiftCardJob(prisma, {
@@ -4287,7 +4309,9 @@ export async function POST(request) {
             customerId: customerIdFromPayment,
             paymentId: paymentResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4394,6 +4418,15 @@ export async function POST(request) {
           resourceId: paymentResourceId || customerIdFromPayment
         })
 
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
         await ensureGiftCardRun(prisma, {
           correlationId,
           triggerType: webhookData.type,
@@ -4405,7 +4438,9 @@ export async function POST(request) {
           payload: paymentData,
           context: {
             customerId: customerIdFromPayment,
-            paymentId: paymentResourceId
+            paymentId: paymentResourceId,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4418,7 +4453,9 @@ export async function POST(request) {
             customerId: customerIdFromPayment,
             paymentId: paymentResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
