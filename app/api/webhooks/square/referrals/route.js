@@ -1036,6 +1036,17 @@ async function saveGiftCardTransaction(transactionData) {
       metadata
     } = transactionData
 
+    // Check if transaction already exists (idempotency)
+    if (square_activity_id) {
+      const existing = await prisma.giftCardTransaction.findFirst({
+        where: { square_activity_id }
+      })
+      if (existing) {
+        console.log(`ℹ️ Transaction already exists for activity ${square_activity_id}, skipping`)
+        return existing
+      }
+    }
+
     const transaction = await prisma.giftCardTransaction.create({
       data: {
         gift_card_id,
@@ -1057,6 +1068,167 @@ async function saveGiftCardTransaction(transactionData) {
     console.error('Error saving gift card transaction to database:', error.message)
     // Don't throw - this is a non-critical operation
     return null
+  }
+}
+
+// Process and save REDEEM transactions when gift cards are used in payments
+async function processGiftCardRedemptions(paymentData) {
+  try {
+    const paymentId = paymentData.id || paymentData.paymentId
+    if (!paymentId) {
+      return
+    }
+
+    console.log(`🔍 Checking for gift card redemptions in payment ${paymentId}`)
+
+    // Extract gift card IDs/GANs from payment tenders
+    const giftCardGans = await extractGiftCardGansFromPayment(paymentData)
+    
+    if (giftCardGans.length === 0) {
+      console.log(`   No gift cards used in this payment`)
+      return
+    }
+
+    console.log(`   Found ${giftCardGans.length} gift card(s) used: ${giftCardGans.join(', ')}`)
+
+    const giftCardsApi = getGiftCardsApi()
+    const giftCardActivitiesApi = getGiftCardActivitiesApi()
+
+    // Process each gift card
+    for (const gan of giftCardGans) {
+      try {
+        // Find gift card in database by GAN
+        const giftCard = await prisma.giftCard.findFirst({
+          where: { gift_card_gan: gan },
+          include: {
+            transactions: {
+              where: {
+                transaction_type: 'REDEEM',
+                square_payment_id: paymentId
+              }
+            }
+          }
+        })
+
+        if (!giftCard) {
+          console.log(`   ⚠️ Gift card with GAN ${gan} not found in database, skipping`)
+          continue
+        }
+
+        // Check if REDEEM transaction already exists for this payment
+        if (giftCard.transactions && giftCard.transactions.length > 0) {
+          console.log(`   ℹ️ REDEEM transaction already exists for gift card ${giftCard.square_gift_card_id} and payment ${paymentId}`)
+          continue
+        }
+
+        // Query Square for recent REDEEM activities for this gift card
+        // Look for activities in the last 5 minutes (to catch the current payment)
+        const activitiesResponse = await giftCardActivitiesApi.listGiftCardActivities(giftCard.square_gift_card_id)
+        const activities = activitiesResponse.result?.giftCardActivities || []
+
+        // Find REDEEM activities that match this payment
+        const redeemActivities = activities.filter(activity => {
+          if (activity.type !== 'REDEEM') return false
+          
+          // Check if activity matches this payment
+          const activityPaymentId = activity.redeemActivityDetails?.paymentId
+          if (activityPaymentId === paymentId) {
+            return true
+          }
+
+          // Also check by order ID if payment has an order
+          const orderId = paymentData.order_id || paymentData.orderId
+          if (orderId && activity.redeemActivityDetails?.orderId === orderId) {
+            return true
+          }
+
+          // Check by timestamp (within last 5 minutes)
+          const activityTime = new Date(activity.createdAt)
+          const paymentTime = new Date(paymentData.created_at || paymentData.createdAt || Date.now())
+          const timeDiff = Math.abs(paymentTime - activityTime)
+          if (timeDiff < 5 * 60 * 1000) { // 5 minutes
+            return true
+          }
+
+          return false
+        })
+
+        if (redeemActivities.length === 0) {
+          console.log(`   ⚠️ No REDEEM activity found in Square for gift card ${giftCard.square_gift_card_id} matching payment ${paymentId}`)
+          continue
+        }
+
+        // Process each REDEEM activity
+        for (const redeemActivity of redeemActivities) {
+          // Check if we already saved this activity
+          const existing = await prisma.giftCardTransaction.findFirst({
+            where: { square_activity_id: redeemActivity.id }
+          })
+
+          if (existing) {
+            console.log(`   ℹ️ REDEEM transaction already exists for activity ${redeemActivity.id}`)
+            continue
+          }
+
+          // Get amount and balance from activity
+          const redeemDetails = redeemActivity.redeemActivityDetails
+          const amountMoney = redeemDetails?.amountMoney
+          const amountCents = amountMoney 
+            ? (typeof amountMoney.amount === 'bigint' ? Number(amountMoney.amount) : (amountMoney.amount || 0))
+            : 0
+
+          const balanceAfter = redeemActivity.giftCardBalanceMoney
+          const balanceAfterCents = balanceAfter
+            ? (typeof balanceAfter.amount === 'bigint' ? Number(balanceAfter.amount) : (balanceAfter.amount || 0))
+            : 0
+
+          // Calculate balance before (balance after + amount redeemed)
+          const balanceBeforeCents = balanceAfterCents + amountCents
+
+          // Save REDEEM transaction
+          await saveGiftCardTransaction({
+            gift_card_id: giftCard.id,
+            transaction_type: 'REDEEM',
+            amount_cents: -Math.abs(amountCents), // Negative for redemption
+            balance_before_cents: balanceBeforeCents,
+            balance_after_cents: balanceAfterCents,
+            square_activity_id: redeemActivity.id,
+            square_order_id: redeemDetails?.orderId || null,
+            square_payment_id: redeemDetails?.paymentId || paymentId,
+            context_label: 'Gift card used for payment',
+            metadata: {
+              square_activity: redeemActivity,
+              payment_id: paymentId,
+              payment_data: {
+                id: paymentId,
+                order_id: paymentData.order_id || paymentData.orderId,
+                created_at: paymentData.created_at || paymentData.createdAt
+              }
+            }
+          })
+
+          // Update gift card balance
+          await prisma.giftCard.update({
+            where: { id: giftCard.id },
+            data: {
+              current_balance_cents: balanceAfterCents,
+              last_balance_check_at: new Date(),
+              updated_at: new Date()
+            }
+          })
+
+          console.log(`   ✅ Saved REDEEM transaction for gift card ${giftCard.square_gift_card_id}`)
+          console.log(`      Amount: $${(Math.abs(amountCents) / 100).toFixed(2)}`)
+          console.log(`      Balance: $${(balanceBeforeCents / 100).toFixed(2)} → $${(balanceAfterCents / 100).toFixed(2)}`)
+        }
+      } catch (error) {
+        console.error(`   ❌ Error processing gift card ${gan}:`, error.message)
+        // Continue with other gift cards
+      }
+    }
+  } catch (error) {
+    console.error('Error processing gift card redemptions:', error.message)
+    // Don't throw - this is a non-critical operation
   }
 }
 
@@ -1108,16 +1280,19 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     
     const giftCard = createResponse.result.giftCard
     const giftCardId = giftCard.id
-    let giftCardGan = giftCard.gan
+    let giftCardGan = giftCard.gan || null // Ensure it's never undefined
     const giftCardState = giftCard.state || 'PENDING'
     console.log(`✅ Created gift card for ${customerName}: ${giftCardId}`)
+    if (!giftCardGan) {
+      console.log(`   ⚠️ GAN not yet assigned (card is ${giftCardState}), will be updated after activation`)
+    }
     
     // Save CREATE transaction to database
     try {
       const createGiftCardRecord = await saveGiftCardToDatabase({
         square_customer_id: customerId,
         square_gift_card_id: giftCardId,
-        gift_card_gan: giftCardGan,
+        gift_card_gan: giftCardGan, // Can be null if not yet assigned
         reward_type: isReferrer ? 'REFERRER_REWARD' : 'FRIEND_SIGNUP_BONUS',
         initial_amount_cents: amountCents,
         current_balance_cents: 0,
@@ -2256,6 +2431,9 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     if (paymentLocationId) {
       console.log(`📍 Payment attributed to location: ${paymentLocationId}`)
     }
+
+    // Process gift card redemptions (for ALL payments, not just first payment)
+    await processGiftCardRedemptions(paymentData)
 
     // 1. Check if this is a new customer's first payment
     const customerData = await prisma.$queryRaw`
@@ -4310,6 +4488,10 @@ export async function POST(request) {
     // Process payment.updated events (status changes like refunds, voids, etc.)
     if (webhookData.type === 'payment.updated') {
       const paymentData = webhookData.data.object.payment
+      
+      // Process gift card redemptions for ALL payment updates (not just first payment)
+      // This ensures we capture REDEEM transactions even if payment processing logic skips
+      await processGiftCardRedemptions(paymentData)
       
       console.log('💰 Received payment.updated event')
       
