@@ -528,6 +528,10 @@ model Booking {
   // ===== TRANSITION =====
   transition_time_minutes Int? @default(0)
 
+  // ===== NOTES =====
+  customer_note String? // Customer's note/request for the booking
+  seller_note   String? // Staff/seller note for the booking
+
   // ===== TIMESTAMPS =====
   created_at DateTime
   updated_at DateTime
@@ -543,6 +547,8 @@ model Booking {
   administrator     TeamMember?           @relation("BookingAdministrator", fields: [administrator_id], references: [id])
   service_variation ServiceVariation?     @relation(fields: [service_variation_id], references: [id])
   payments          Payment[]
+  orders            Order[]
+  order_line_items  OrderLineItem[]
 
   @@unique([organization_id, booking_id])
   @@index([organization_id])
@@ -566,6 +572,7 @@ model Order {
   order_id        String // Square order ID (external identifier)
   location_id     String? // Internal UUID FK to locations.id
   customer_id     String? // Square customer ID
+  booking_id      String? // Internal UUID FK to bookings.id
 
   // ===== ORDER FIELDS =====
   state        String? // OPEN, COMPLETED, CANCELED
@@ -576,9 +583,13 @@ model Order {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
+  // ===== RAW DATA =====
+  raw_json Json? // Immutable source of truth - full order object from Square API
+
   // Relations
   organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   location     Location?       @relation(fields: [location_id], references: [id])
+  booking      Booking?        @relation(fields: [booking_id], references: [id])
   payments     Payment[]
   line_items   OrderLineItem[]
 
@@ -586,6 +597,7 @@ model Order {
   @@index([organization_id])
   @@index([location_id])
   @@index([customer_id])
+  @@index([booking_id])
   @@index([order_id])
   @@index([state])
   @@map("orders")
@@ -602,6 +614,7 @@ model OrderLineItem {
   order_id        String // Internal UUID FK to orders.id
   location_id     String? // Square location ID (for reference)
   customer_id     String? // Square customer ID
+  booking_id      String? // Internal UUID FK to bookings.id
 
   // ===== TEAM MEMBERS =====
   technician_id    String? // Internal UUID FK to team_members.id
@@ -615,6 +628,17 @@ model OrderLineItem {
   name                 String? // Item name
   variation_name       String? // Variation name (e.g., "TOP master Anna")
   item_type            String? // ITEM, CUSTOM_AMOUNT, etc.
+  discount_name        String? // Discount name(s) applied to this line item (comma-separated if multiple)
+
+  // ===== OPTIONAL FIELDS FROM SQUARE API =====
+  metadata                Json? // Custom key-value pairs (can store booking_id if set)
+  custom_attributes       Json? // Catalog-defined custom attributes
+  fulfillments            Json? // Fulfillment details (pickup, delivery, appointment times)
+  applied_taxes           Json? // Breakdown of taxes applied to this line item
+  applied_discounts       Json? // Breakdown of discounts applied to this line item
+  applied_service_charges Json? // Breakdown of service charges applied to this line item
+  note                    String? // Special instructions or notes for this line item
+  modifiers               Json? // Add-ons or variations selected for this item
 
   // ===== MONEY AMOUNTS (all in cents) =====
   base_price_money_amount   Int? // Base price
@@ -666,9 +690,13 @@ model OrderLineItem {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
+  // ===== RAW DATA =====
+  raw_json Json? // Immutable source of truth - full line item object from Square API
+
   // Relations
   organization  Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   order         Order?       @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  booking       Booking?     @relation(fields: [booking_id], references: [id])
   technician    TeamMember?  @relation("OrderLineItemTechnician", fields: [technician_id], references: [id])
   administrator TeamMember?  @relation("OrderLineItemAdministrator", fields: [administrator_id], references: [id])
 
@@ -677,6 +705,7 @@ model OrderLineItem {
   @@index([order_id])
   @@index([location_id])
   @@index([customer_id])
+  @@index([booking_id])
   @@index([technician_id])
   @@index([administrator_id])
   @@index([uid])
@@ -1042,15 +1071,15 @@ model UserRole {
 // ============================================================================
 
 model PhoneVerification {
-  id              String   @id @default(uuid())
-  phone_number    String   // Normalized phone number
-  code            String   @db.VarChar(6) // 6-digit verification code
-  verified        Boolean  @default(false)
-  expires_at      DateTime // Code expires after 10 minutes
-  attempts        Int      @default(0) // Track verification attempts
-  verified_at     DateTime?
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @updatedAt @db.Timestamptz(6)
+  id           String    @id @default(uuid())
+  phone_number String // Normalized phone number
+  code         String    @db.VarChar(6) // 6-digit verification code
+  verified     Boolean   @default(false)
+  expires_at   DateTime // Code expires after 10 minutes
+  attempts     Int       @default(0) // Track verification attempts
+  verified_at  DateTime?
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime  @updatedAt @db.Timestamptz(6)
 
   @@index([phone_number, verified])
   @@index([expires_at])
@@ -1058,12 +1087,12 @@ model PhoneVerification {
 }
 
 model VerifiedPhoneSession {
-  id              String   @id @default(uuid())
-  phone_number    String   // Normalized phone number
-  session_token   String   @unique // Unique session token
-  expires_at      DateTime // Session expires after 30 days
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @updatedAt @db.Timestamptz(6)
+  id            String   @id @default(uuid())
+  phone_number  String // Normalized phone number
+  session_token String   @unique // Unique session token
+  expires_at    DateTime // Session expires after 30 days
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime @updatedAt @db.Timestamptz(6)
 
   @@index([phone_number])
   @@index([session_token])

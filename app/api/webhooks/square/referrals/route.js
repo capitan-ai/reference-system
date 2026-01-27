@@ -4,6 +4,48 @@ const QRCode = require('qrcode')
 const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
 const { sendReferralCodeSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
+// Import payment saving function from main webhook handler
+// Note: route.js uses ES6 exports, so we need to use dynamic import
+// Since this is a CommonJS file, we'll use a simpler approach: directly call the function
+// by requiring the module and accessing the export
+let savePaymentToDatabase = null
+async function getSavePaymentToDatabase() {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:12',message:'getSavePaymentToDatabase called',data:{hasCached:!!savePaymentToDatabase},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+  // #endregion
+  if (!savePaymentToDatabase) {
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:15',message:'importing savePaymentToDatabase',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+      // #endregion
+      // Use dynamic import which works in both CommonJS and ES modules
+      const mainWebhookRoute = await import('../route.js')
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:17',message:'import completed',data:{hasModule:!!mainWebhookRoute,exports:Object.keys(mainWebhookRoute||{}),hasSavePayment:!!mainWebhookRoute?.savePaymentToDatabase},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+      // #endregion
+      savePaymentToDatabase = mainWebhookRoute.savePaymentToDatabase
+      if (!savePaymentToDatabase) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:19',message:'savePaymentToDatabase not found in exports',data:{exports:Object.keys(mainWebhookRoute||{})},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+        // #endregion
+        console.error('❌ savePaymentToDatabase not found in imported module')
+        console.error('   Available exports:', Object.keys(mainWebhookRoute || {}))
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:22',message:'savePaymentToDatabase imported successfully',data:{type:typeof savePaymentToDatabase},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
+      }
+    } catch (importError) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:24',message:'import error',data:{error:importError.message,stack:importError.stack?.substring(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
+      // #endregion
+      console.error(`❌ Error importing savePaymentToDatabase: ${importError.message}`)
+      console.error('   Stack:', importError.stack)
+      return null
+    }
+  }
+  return savePaymentToDatabase
+}
 const {
   buildCorrelationId,
   buildStageKey,
@@ -3072,6 +3114,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         address_line_1, locality, administrative_district_level_1, postal_code,
         service_variation_id, service_variation_version, duration_minutes,
         intermission_minutes, technician_id, any_team_member,
+        customer_note, seller_note,
         merchant_id, created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(),
@@ -3099,6 +3142,8 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
         ${segment?.team_member_id || segment?.teamMemberId || null},
         ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
+        ${bookingData.customer_note || bookingData.customerNote || null},
+        ${bookingData.seller_note || bookingData.sellerNote || null},
         ${finalMerchantId},
         ${bookingData.created_at || bookingData.createdAt ? new Date(bookingData.created_at || bookingData.createdAt) : new Date()}::timestamptz,
         ${bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updatedAt || bookingData.updated_at) : new Date()}::timestamptz,
@@ -3111,6 +3156,8 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
         service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
         technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
+        customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
+        seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
         updated_at = EXCLUDED.updated_at,
         raw_json = EXCLUDED.raw_json
     `
@@ -3119,6 +3166,215 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
   } catch (error) {
     console.error(`❌ Error saving booking:`, error.message)
     // Don't throw - allow referral processing to continue
+  }
+}
+
+/**
+ * Process booking.updated webhook event
+ * Updates existing booking with new data from Square
+ */
+async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt = null) {
+  try {
+    const baseBookingId = bookingData.id || bookingData.bookingId
+    if (!baseBookingId) {
+      console.error('❌ booking.updated: Missing booking ID')
+      return
+    }
+
+    console.log(`📅 Processing booking.updated for booking: ${baseBookingId}`)
+
+    // Extract data from webhook payload
+    const customerId = bookingData.customer_id || bookingData.customerId || null
+    const squareLocationId = bookingData.location_id || bookingData.locationId || null
+    const status = bookingData.status || null
+    const customerNote = bookingData.customer_note || bookingData.customerNote || null
+    const sellerNote = bookingData.seller_note || bookingData.sellerNote || null
+    const version = bookingData.version || null
+    const updatedAt = bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updated_at || bookingData.updatedAt) : new Date()
+    const appointmentSegments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+
+    // Find existing booking(s) - there may be multiple records for multi-service bookings
+    const existingBookings = await prisma.$queryRaw`
+      SELECT id, organization_id, booking_id, service_variation_id, technician_id, administrator_id
+      FROM bookings
+      WHERE booking_id LIKE ${`${baseBookingId}%`}
+      ORDER BY created_at ASC
+    `
+
+    if (!existingBookings || existingBookings.length === 0) {
+      console.warn(`⚠️ booking.updated: Booking ${baseBookingId} not found in database`)
+      console.warn(`   This might be a booking that was created before webhook handling was implemented`)
+      console.warn(`   Consider running backfill script to sync missing bookings`)
+      return
+    }
+
+    console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
+
+    // Update each booking record (for multi-service bookings)
+    for (const existingBooking of existingBookings) {
+      const organizationId = existingBooking.organization_id
+      const bookingUuid = existingBooking.id
+
+      // Resolve location UUID if location_id changed
+      let locationUuid = null
+      if (squareLocationId) {
+        const locationRecord = await prisma.$queryRaw`
+          SELECT id FROM locations 
+          WHERE square_location_id = ${squareLocationId}
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
+      }
+
+      // Process appointment segments to update service-specific fields
+      let serviceVariationId = existingBooking.service_variation_id
+      let technicianId = existingBooking.technician_id
+      let administratorId = existingBooking.administrator_id
+      let durationMinutes = null
+      let serviceVariationVersion = null
+
+      // If this booking has a specific service_variation_id, try to match it with segments
+      if (existingBooking.service_variation_id && appointmentSegments.length > 0) {
+        // Find matching segment by service variation
+        const squareServiceVariationId = await prisma.$queryRaw`
+          SELECT square_variation_id FROM service_variation
+          WHERE id = ${existingBooking.service_variation_id}::uuid
+          LIMIT 1
+        `
+        
+        if (squareServiceVariationId && squareServiceVariationId.length > 0) {
+          const svId = squareServiceVariationId[0].square_variation_id
+          const matchingSegment = appointmentSegments.find(seg => 
+            (seg.service_variation_id || seg.serviceVariationId) === svId
+          )
+          
+          if (matchingSegment) {
+            // Update from matching segment
+            const squareTeamMemberId = matchingSegment.team_member_id || matchingSegment.teamMemberId
+            if (squareTeamMemberId) {
+              const teamMemberRecord = await prisma.$queryRaw`
+                SELECT id FROM team_members
+                WHERE square_team_member_id = ${squareTeamMemberId}
+                  AND organization_id = ${organizationId}::uuid
+                LIMIT 1
+              `
+              technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
+            }
+            
+            durationMinutes = matchingSegment.duration_minutes || matchingSegment.durationMinutes || null
+            serviceVariationVersion = matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion 
+              ? BigInt(matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion)
+              : null
+          }
+        }
+      } else if (appointmentSegments.length > 0) {
+        // No service_variation_id yet, use first segment
+        const firstSegment = appointmentSegments[0]
+        const squareServiceVariationId = firstSegment.service_variation_id || firstSegment.serviceVariationId
+        if (squareServiceVariationId) {
+          const svRecord = await prisma.$queryRaw`
+            SELECT id FROM service_variation
+            WHERE square_variation_id = ${squareServiceVariationId}
+              AND organization_id = ${organizationId}::uuid
+            LIMIT 1
+          `
+          serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+        }
+        
+        const squareTeamMemberId = firstSegment.team_member_id || firstSegment.teamMemberId
+        if (squareTeamMemberId) {
+          const teamMemberRecord = await prisma.$queryRaw`
+            SELECT id FROM team_members
+            WHERE square_team_member_id = ${squareTeamMemberId}
+              AND organization_id = ${organizationId}::uuid
+            LIMIT 1
+          `
+          technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
+        }
+        
+        durationMinutes = firstSegment.duration_minutes || firstSegment.durationMinutes || null
+        serviceVariationVersion = firstSegment.service_variation_version || firstSegment.serviceVariationVersion
+          ? BigInt(firstSegment.service_variation_version || firstSegment.serviceVariationVersion)
+          : null
+      }
+
+      // Build update query
+      const updateFields = []
+      const updateValues = []
+      
+      if (status) {
+        updateFields.push('status = $' + (updateValues.length + 1))
+        updateValues.push(status)
+      }
+      
+      if (customerNote !== null) {
+        updateFields.push('customer_note = $' + (updateValues.length + 1))
+        updateValues.push(customerNote)
+      }
+      
+      if (sellerNote !== null) {
+        updateFields.push('seller_note = $' + (updateValues.length + 1))
+        updateValues.push(sellerNote)
+      }
+      
+      if (version !== null) {
+        updateFields.push('version = $' + (updateValues.length + 1))
+        updateValues.push(version)
+      }
+      
+      if (locationUuid) {
+        updateFields.push('location_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(locationUuid)
+      }
+      
+      if (serviceVariationId) {
+        updateFields.push('service_variation_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(serviceVariationId)
+      }
+      
+      if (technicianId) {
+        updateFields.push('technician_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(technicianId)
+      }
+      
+      if (durationMinutes !== null) {
+        updateFields.push('duration_minutes = $' + (updateValues.length + 1))
+        updateValues.push(durationMinutes)
+      }
+      
+      if (serviceVariationVersion !== null) {
+        updateFields.push('service_variation_version = $' + (updateValues.length + 1))
+        updateValues.push(serviceVariationVersion.toString())
+      }
+      
+      // Always update updated_at and raw_json
+      updateFields.push('updated_at = $' + (updateValues.length + 1) + '::timestamptz')
+      updateValues.push(updatedAt)
+      
+      updateFields.push('raw_json = $' + (updateValues.length + 1) + '::jsonb')
+      updateValues.push(JSON.stringify(bookingData))
+
+      if (updateFields.length > 0) {
+        const updateQuery = `
+          UPDATE bookings
+          SET ${updateFields.join(', ')}
+          WHERE id = $${updateValues.length + 1}::uuid
+        `
+        updateValues.push(bookingUuid)
+        
+        await prisma.$executeRawUnsafe(updateQuery, ...updateValues)
+        console.log(`✅ Updated booking ${bookingUuid} (${baseBookingId})`)
+      } else {
+        console.log(`ℹ️ No fields to update for booking ${bookingUuid}`)
+      }
+    }
+
+    console.log(`✅ Successfully processed booking.updated for ${baseBookingId}`)
+  } catch (error) {
+    console.error(`❌ Error processing booking.updated:`, error.message)
+    console.error(`   Stack:`, error.stack)
+    throw error // Re-throw so webhook returns 500 and Square retries
   }
 }
 
@@ -4358,6 +4614,97 @@ export async function POST(request) {
     if (webhookData.type === 'payment.created') {
       const paymentData = webhookData.data.object.payment
       
+      // Debug: Log payment data structure to verify location_id is present
+      if (paymentData) {
+        console.log(`🔍 Payment.created webhook - checking location_id:`)
+        console.log(`   Payment ID: ${paymentData.id || paymentData.paymentId || 'unknown'}`)
+        console.log(`   location_id (snake_case): ${paymentData.location_id || 'MISSING'}`)
+        console.log(`   locationId (camelCase): ${paymentData.locationId || 'MISSING'}`)
+        console.log(`   order_id: ${paymentData.order_id || paymentData.orderId || 'MISSING'}`)
+      }
+      
+      // CRITICAL: Save payment to database first (before gift card processing)
+      // This ensures payments are stored even if gift card processing fails
+      if (paymentData) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4414',message:'payment.created webhook - starting save',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown',hasLocationId:!!(paymentData.location_id||paymentData.locationId),locationId:paymentData.location_id||paymentData.locationId||'missing',orderId:paymentData.order_id||paymentData.orderId||'missing'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        let paymentSaveSuccess = false
+        try {
+          console.log(`💾 Attempting to save payment ${paymentData.id || paymentData.paymentId || 'unknown'} to database...`)
+          const savePayment = await getSavePaymentToDatabase()
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4418',message:'savePayment function retrieved (payment.created)',data:{hasFunction:!!savePayment,isFunction:typeof savePayment==='function',type:typeof savePayment},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          if (savePayment && typeof savePayment === 'function') {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4420',message:'calling savePayment function (payment.created)',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+            await savePayment(paymentData, webhookData.type, webhookData.event_id, webhookData.created_at)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4422',message:'savePayment completed successfully (payment.created)',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
+            console.log('✅ Payment saved to database')
+            paymentSaveSuccess = true
+          } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4424',message:'savePayment function not available (payment.created)',data:{hasFunction:!!savePayment,type:typeof savePayment,value:String(savePayment).substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
+            console.error('❌ savePaymentToDatabase function not available or not a function')
+            console.error(`   Type: ${typeof savePayment}, Value: ${savePayment}`)
+          }
+        } catch (paymentSaveError) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4428',message:'payment save error (payment.created)',data:{error:paymentSaveError.message,stack:paymentSaveError.stack?.substring(0,500),paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+          // #endregion
+          console.error(`❌ Error saving payment to database: ${paymentSaveError.message}`)
+          console.error('   Stack:', paymentSaveError.stack)
+          // Don't throw - we'll enqueue a job as fallback
+        }
+        
+        // FALLBACK: If immediate save failed, enqueue a payment_save job for cron to process
+        if (!paymentSaveSuccess) {
+          console.warn('⚠️ Immediate payment save failed, enqueueing payment_save job as fallback...')
+          try {
+            const paymentResourceId = paymentData.id || paymentData.paymentId
+            const customerIdFromPayment = paymentData.customerId || paymentData.customer_id || null
+            const correlationId = buildCorrelationId({
+              triggerType: webhookData.type,
+              eventId: webhookData.event_id,
+              resourceId: paymentResourceId || customerIdFromPayment || 'payment-save-fallback'
+            })
+            
+            // Extract merchant_id for context
+            const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+            let organizationId = null
+            if (merchantId) {
+              organizationId = await resolveOrganizationId(merchantId)
+            }
+            
+            await enqueueGiftCardJob(prisma, {
+              correlationId,
+              triggerType: webhookData.type,
+              stage: 'payment_save', // New stage for payment saving
+              payload: paymentData,
+              context: {
+                squareEventId: webhookData.event_id,
+                squareEventType: webhookData.type,
+                squareCreatedAt: webhookData.created_at,
+                merchantId,
+                organizationId,
+                paymentId: paymentResourceId,
+                customerId: customerIdFromPayment,
+                fallback: true // Mark as fallback job
+              }
+            })
+            console.log('✅ Payment save job enqueued as fallback')
+          } catch (enqueueError) {
+            console.error(`❌ Failed to enqueue payment save job: ${enqueueError.message}`)
+            // Still continue with gift card processing
+          }
+        }
+      }
+      
       console.log('💰 Received payment.created event')
       console.log('   Payment data:', safeStringify(paymentData))
       
@@ -4487,7 +4834,123 @@ export async function POST(request) {
 
     // Process payment.updated events (status changes like refunds, voids, etc.)
     if (webhookData.type === 'payment.updated') {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4579',message:'payment.updated handler entered',data:{hasWebhookData:!!webhookData,hasData:!!webhookData?.data,hasObject:!!webhookData?.data?.object,hasPayment:!!webhookData?.data?.object?.payment},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'})}).catch(()=>{});
+      // #endregion
       const paymentData = webhookData.data.object.payment
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4581',message:'paymentData extracted',data:{hasPaymentData:!!paymentData,paymentId:paymentData?.id||paymentData?.paymentId||'null',locationId:paymentData?.location_id||paymentData?.locationId||'null'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'})}).catch(()=>{});
+      // #endregion
+      
+      // Debug: Log payment data structure to verify location_id is present
+      if (paymentData) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4585',message:'paymentData exists - entering check block',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'R'})}).catch(()=>{});
+        // #endregion
+        console.log(`🔍 Payment.updated webhook - checking location_id:`)
+        console.log(`   Payment ID: ${paymentData.id || paymentData.paymentId || 'unknown'}`)
+        console.log(`   location_id (snake_case): ${paymentData.location_id || 'MISSING'}`)
+        console.log(`   locationId (camelCase): ${paymentData.locationId || 'MISSING'}`)
+        console.log(`   order_id: ${paymentData.order_id || paymentData.orderId || 'MISSING'}`)
+        console.log(`   merchant_id: ${paymentData.merchant_id || paymentData.merchantId || 'MISSING'}`)
+        
+        // According to Square docs, payment.updated should include location_id
+        // If it's missing, this might indicate a data issue or API version difference
+        if (!paymentData.location_id && !paymentData.locationId) {
+          console.warn(`⚠️ WARNING: Payment.updated webhook missing location_id (should be present per Square API docs)`)
+          console.warn(`   Payment object keys:`, Object.keys(paymentData).join(', '))
+        }
+      }
+      
+      // CRITICAL: Save payment to database first (before gift card processing)
+      // This ensures payments are stored even if gift card processing fails
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4599',message:'before payment save check',data:{hasPaymentData:!!paymentData,paymentDataType:typeof paymentData,paymentId:paymentData?.id||paymentData?.paymentId||'null'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'U'})}).catch(()=>{});
+      // #endregion
+      if (paymentData) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4601',message:'paymentData exists - entering save block',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'T'})}).catch(()=>{});
+        // #endregion
+        let paymentSaveSuccess = false
+        try {
+          console.log(`💾 Attempting to save payment ${paymentData.id || paymentData.paymentId || 'unknown'} to database...`)
+          const savePayment = await getSavePaymentToDatabase()
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4605',message:'savePayment function retrieved (payment.updated)',data:{hasFunction:!!savePayment,isFunction:typeof savePayment==='function',type:typeof savePayment},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          if (savePayment && typeof savePayment === 'function') {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4607',message:'calling savePayment function (payment.updated)',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+            await savePayment(paymentData, webhookData.type, webhookData.event_id, webhookData.created_at)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4609',message:'savePayment completed successfully (payment.updated)',data:{paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
+            console.log('✅ Payment saved to database')
+            paymentSaveSuccess = true
+          } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4611',message:'savePayment function not available (payment.updated)',data:{hasFunction:!!savePayment,type:typeof savePayment,value:String(savePayment).substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
+            console.error('❌ savePaymentToDatabase function not available or not a function')
+            console.error(`   Type: ${typeof savePayment}, Value: ${savePayment}`)
+          }
+        } catch (paymentSaveError) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4615',message:'payment save error (payment.updated)',data:{error:paymentSaveError.message,stack:paymentSaveError.stack?.substring(0,500),paymentId:paymentData.id||paymentData.paymentId||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+          // #endregion
+          console.error(`❌ Error saving payment to database: ${paymentSaveError.message}`)
+          console.error('   Stack:', paymentSaveError.stack)
+          // Don't throw - we'll enqueue a job as fallback
+        }
+        
+        // FALLBACK: If immediate save failed, enqueue a payment_save job for cron to process
+        if (!paymentSaveSuccess) {
+          console.warn('⚠️ Immediate payment save failed, enqueueing payment_save job as fallback...')
+          try {
+            const paymentResourceId = paymentData.id || paymentData.paymentId
+            const customerIdFromPayment = paymentData.customerId || paymentData.customer_id || null
+            const correlationId = buildCorrelationId({
+              triggerType: webhookData.type,
+              eventId: webhookData.event_id,
+              resourceId: paymentResourceId || customerIdFromPayment || 'payment-save-fallback'
+            })
+            
+            // Extract merchant_id for context
+            const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+            let organizationId = null
+            if (merchantId) {
+              organizationId = await resolveOrganizationId(merchantId)
+            }
+            
+            await enqueueGiftCardJob(prisma, {
+              correlationId,
+              triggerType: webhookData.type,
+              stage: 'payment_save', // New stage for payment saving
+              payload: paymentData,
+              context: {
+                squareEventId: webhookData.event_id,
+                squareEventType: webhookData.type,
+                squareCreatedAt: webhookData.created_at,
+                merchantId,
+                organizationId,
+                paymentId: paymentResourceId,
+                customerId: customerIdFromPayment,
+                fallback: true // Mark as fallback job
+              }
+            })
+            console.log('✅ Payment save job enqueued as fallback')
+          } catch (enqueueError) {
+            console.error(`❌ Failed to enqueue payment save job: ${enqueueError.message}`)
+            // Still continue with gift card processing
+          }
+        }
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4620',message:'paymentData is null - skipping save',data:{hasWebhookData:!!webhookData,webhookDataKeys:webhookData?Object.keys(webhookData).join(','):'null'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'V'})}).catch(()=>{});
+        // #endregion
+        console.warn('⚠️ payment.updated webhook: paymentData is null, cannot save payment')
+      }
       
       // Process gift card redemptions for ALL payment updates (not just first payment)
       // This ensures we capture REDEEM transactions even if payment processing logic skips
@@ -4601,6 +5064,9 @@ export async function POST(request) {
     )
   }
 }
+
+// Export processBookingUpdated for use in main webhook route
+export { processBookingUpdated }
 
 // Handle GET requests for webhook verification
 export async function GET(request) {
