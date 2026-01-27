@@ -8,8 +8,8 @@ function getSquareEnvironmentName() {
   return squareEnv.getSquareEnvironmentName()
 }
 
-// Get Square Orders API
-function getOrdersApi() {
+// Get Square APIs
+function getSquareApis() {
   // Use dynamic require so bundlers don't evaluate Square SDK at build-time
   // eslint-disable-next-line global-require
   const squareModule = require('square')
@@ -37,7 +37,134 @@ function getOrdersApi() {
     environment: resolvedEnvironment,
   })
 
-  return squareClient.ordersApi
+  return {
+    ordersApi: squareClient.ordersApi,
+    locationsApi: squareClient.locationsApi,
+  }
+}
+
+// Get Square Orders API (backward compatibility)
+function getOrdersApi() {
+  return getSquareApis().ordersApi
+}
+
+// Get Square Locations API
+function getLocationsApi() {
+  return getSquareApis().locationsApi
+}
+
+// Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
+async function resolveOrganizationIdFromLocationId(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    // STEP 1: Fast database lookup (most common case)
+    const location = await prisma.$queryRaw`
+      SELECT organization_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (location && location.length > 0) {
+      const loc = location[0]
+      
+      // If we have organization_id, return it immediately (fastest path)
+      if (loc.organization_id) {
+        return loc.organization_id
+      }
+      
+      // If we have merchant_id but no organization_id, resolve it
+      if (loc.square_merchant_id) {
+        const org = await prisma.$queryRaw`
+          SELECT id FROM organizations 
+          WHERE square_merchant_id = ${loc.square_merchant_id}
+          LIMIT 1
+        `
+        if (org && org.length > 0) {
+          const orgId = org[0].id
+          // Update location with organization_id for future use
+          await prisma.$executeRaw`
+            UPDATE locations
+            SET organization_id = ${orgId}::uuid,
+                updated_at = NOW()
+            WHERE square_location_id = ${squareLocationId}
+          `
+          return orgId
+        }
+      }
+    }
+    
+    // STEP 2: Location not in DB or missing merchant_id - fetch from Square API
+    console.log(`📍 Location ${squareLocationId} not in database or missing merchant_id, fetching from Square API...`)
+    try {
+      const locationsApi = getLocationsApi()
+      const response = await locationsApi.retrieveLocation(squareLocationId)
+      const location = response.result?.location
+      
+      if (!location) {
+        console.warn(`⚠️ Location ${squareLocationId} not found in Square API`)
+        return null
+      }
+      
+      const merchantId = location.merchant_id || null
+      
+      if (!merchantId) {
+        console.warn(`⚠️ Location ${squareLocationId} missing merchant_id in Square API response`)
+        return null
+      }
+      
+      // Resolve organization_id from merchant_id
+      const org = await prisma.$queryRaw`
+        SELECT id FROM organizations 
+        WHERE square_merchant_id = ${merchantId}
+        LIMIT 1
+      `
+      
+      if (org && org.length > 0) {
+        const orgId = org[0].id
+        
+        // Update or create location with merchant_id and organization_id
+        await prisma.$executeRaw`
+          INSERT INTO locations (
+            id,
+            organization_id,
+            square_location_id,
+            square_merchant_id,
+            name,
+            created_at,
+            updated_at
+          ) VALUES (
+            gen_random_uuid(),
+            ${orgId}::uuid,
+            ${squareLocationId},
+            ${merchantId},
+            ${location.name || `Location ${squareLocationId.substring(0, 8)}...`},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT (organization_id, square_location_id) DO UPDATE SET
+            square_merchant_id = COALESCE(EXCLUDED.square_merchant_id, locations.square_merchant_id),
+            organization_id = COALESCE(EXCLUDED.organization_id, locations.organization_id),
+            updated_at = NOW()
+        `
+        
+        return orgId
+      }
+    } catch (apiError) {
+      console.error(`❌ Error fetching location from Square API: ${apiError.message}`)
+      if (apiError.errors) {
+        console.error(`   Square API errors:`, JSON.stringify(apiError.errors, null, 2))
+      }
+    }
+    
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id from location_id: ${error.message}`)
+    return null
+  }
 }
 
 function verifySquareSignature(payload, signature, webhookSecret) {
@@ -111,13 +238,22 @@ export async function POST(request) {
     } else if (eventData.type === 'booking.updated') {
       console.log('📅 Booking updated event received')
       const bookingData = eventData.data?.object?.booking
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:238',message:'booking.updated webhook received',data:{hasBookingData:!!bookingData,bookingId:bookingData?.id||bookingData?.bookingId||'missing',version:bookingData?.version||'missing',status:bookingData?.status||'missing',eventId:eventData.event_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       if (bookingData) {
         try {
           // Import processBookingUpdated from referrals route
           const referralsRoute = await import('./referrals/route.js')
           if (referralsRoute.processBookingUpdated) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:245',message:'calling processBookingUpdated',data:{bookingId:bookingData.id||bookingData.bookingId,version:bookingData.version,status:bookingData.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             await referralsRoute.processBookingUpdated(bookingData, eventData.event_id, eventData.created_at)
             console.log(`✅ Booking updated webhook processed successfully`)
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:247',message:'processBookingUpdated completed',data:{bookingId:bookingData.id||bookingData.bookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
           } else {
             console.error(`❌ processBookingUpdated not found in referrals route`)
             throw new Error('processBookingUpdated function not available')
@@ -125,11 +261,17 @@ export async function POST(request) {
         } catch (bookingError) {
           console.error(`❌ Error processing booking.updated webhook:`, bookingError.message)
           console.error(`   Stack:`, bookingError.stack)
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:253',message:'booking.updated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:bookingError.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
           // Re-throw to return 500 so Square will retry
           throw bookingError
         }
       } else {
         console.warn(`⚠️ Booking updated webhook received but booking data is missing`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:259',message:'booking data missing',data:{eventType:eventData.type,hasData:!!eventData.data,hasObject:!!eventData.data?.object},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
       }
     } else if (eventData.type === 'payment.created' || eventData.type === 'payment.updated') {
       console.log(`💳 Payment ${eventData.type === 'payment.created' ? 'created' : 'updated'} event received`)
@@ -276,9 +418,20 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:227',message:'payment webhook - extracted data',data:{paymentId,orderId,customerId,locationId:locationId?.substring(0,16)||'missing',merchantId:merchantId?.substring(0,16)||'missing',locationFields},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
     // #endregion
 
-    // Resolve organization_id from merchant_id
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = null
-    if (merchantId) {
+    
+    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    if (locationId) {
+      console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+      organizationId = await resolveOrganizationIdFromLocationId(locationId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+      }
+    }
+    
+    // STEP 2: Fallback to merchant_id (if location lookup failed)
+    if (!organizationId && merchantId) {
       try {
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
@@ -287,6 +440,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         `
         if (org && org.length > 0) {
           organizationId = org[0].id
+          console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
         }
       } catch (err) {
         console.warn(`⚠️ Could not resolve organization_id from merchant_id: ${err.message}`)
@@ -374,21 +528,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       // #endregion
     }
 
-    // If still no organization_id, try to get it from location
-    if (!organizationId && locationId) {
-      try {
-        const loc = await prisma.$queryRaw`
-          SELECT organization_id FROM locations 
-          WHERE square_location_id = ${locationId}
-          LIMIT 1
-        `
-        if (loc && loc.length > 0) {
-          organizationId = loc[0].organization_id
-        }
-      } catch (err) {
-        console.warn(`⚠️ Could not resolve organization_id from location: ${err.message}`)
-      }
-    }
+    // Location lookup already done above (STEP 1), skip duplicate lookup
 
     // If still no organization_id, try to get it from order
     if (!organizationId && orderId) {
@@ -458,16 +598,17 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // Ensure customer exists if provided
     if (customerId) {
       try {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:585',message:'customer upsert - before insert',data:{customerId,organizationId,attemptingToSetId:'gen_random_uuid()'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         await prisma.$executeRaw`
           INSERT INTO square_existing_clients (
-            id,
             organization_id,
             square_customer_id,
             got_signup_bonus,
             created_at,
             updated_at
           ) VALUES (
-            gen_random_uuid(),
             ${organizationId}::uuid,
             ${customerId},
             false,
@@ -476,9 +617,15 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           )
           ON CONFLICT (organization_id, square_customer_id) DO NOTHING
         `
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:603',message:'customer upsert - after insert',data:{customerId,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
       } catch (err) {
         // Customer might already exist
         console.warn(`⚠️ Customer upsert warning: ${err.message}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:606',message:'customer upsert - error',data:{customerId,error:err.message,errorCode:err.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
       }
     }
 
@@ -493,28 +640,44 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           LIMIT 1
         `
         const locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-
-        await prisma.$executeRaw`
-          INSERT INTO orders (
-            id,
-            organization_id,
-            order_id,
-            location_id,
-            created_at,
-            updated_at
-          ) VALUES (
-            gen_random_uuid(),
-            ${organizationId}::uuid,
-            ${orderId},
-            ${locationUuid}::uuid,
-            NOW(),
-            NOW()
-          )
-          ON CONFLICT (organization_id, order_id) DO NOTHING
-        `
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:620',message:'order upsert - before insert',data:{orderId,locationId,squareLocationId:locationId,locationUuid,hasLocationUuid:!!locationUuid,locationRecordCount:locationRecord?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        // ✅ FIX: Only insert order if locationUuid exists (required foreign key)
+        if (locationUuid) {
+          await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              created_at,
+              updated_at
+            ) VALUES (
+              gen_random_uuid(),
+              ${organizationId}::uuid,
+              ${orderId},
+              ${locationUuid}::uuid,
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (organization_id, order_id) DO NOTHING
+          `
+        } else {
+          console.warn(`⚠️ Cannot insert order ${orderId}: locationUuid is null (location ${locationId} not found)`)
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:640',message:'order upsert - skipped due to null locationUuid',data:{orderId,locationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+        }
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:639',message:'order upsert - after insert',data:{orderId,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
       } catch (err) {
         // Order might already exist
         console.warn(`⚠️ Order upsert warning: ${err.message}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:642',message:'order upsert - error',data:{orderId,error:err.message,errorCode:err.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
       }
     }
 
@@ -587,8 +750,12 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     }
 
     // Build payment record (exactly matching schema and backfill script)
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:714',message:'payment record - before build',data:{paymentId,hasPaymentIdField:false,idValue:paymentId,idType:'Square ID string'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     const paymentRecord = {
-      id: paymentId,
+      // id is auto-generated UUID, do not set it
+      payment_id: paymentId, // ✅ FIX: Square payment ID (external identifier)
       organization_id: organizationId, // ✅ ADDED: Required field
       square_event_id: squareEventId,
       event_type: eventType,
@@ -611,7 +778,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       approved_money_currency: approvedMoney.currency || 'USD',
       
       // Status
-      status: paymentData.status || null,
+      status: paymentData.status || 'UNKNOWN', // Required field, cannot be null
       source_type: getValue(paymentData, 'sourceType', 'source_type'),
       delay_action: getValue(paymentData, 'delayAction', 'delay_action'),
       delay_duration: getValue(paymentData, 'delayDuration', 'delay_duration'),
@@ -690,21 +857,100 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       // Version
       version: paymentData.versionToken ? 1 : (paymentData.version || 0),
     }
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:817',message:'payment record - after build',data:{paymentId,hasPaymentIdField:!paymentRecord.payment_id,idValue:paymentRecord.id,whereClause:'id: paymentId'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
 
     // Upsert payment
-    await prisma.payment.upsert({
-      where: { id: paymentId },
-      update: paymentRecord,
-      create: paymentRecord,
-    })
+    // ✅ FIX: Use raw SQL for composite unique constraint upsert (more reliable than Prisma's findUnique + update/create)
+    // Validate required fields before attempting database operation
+    if (!paymentId) {
+      throw new Error(`Cannot save payment: paymentId is required but missing`)
+    }
+    if (!organizationId) {
+      throw new Error(`Cannot save payment: organizationId is required but missing`)
+    }
+    if (!paymentRecord.payment_id) {
+      throw new Error(`Cannot save payment: paymentRecord.payment_id is required but missing. paymentId: ${paymentId}`)
+    }
+    // #region agent log
+    const beforeLog = {location:'route.js:850',message:'payment upsert - before',data:{paymentId,organizationId,hasPaymentId:!!paymentRecord.payment_id,paymentIdValue:paymentRecord.payment_id,usingRawQuery:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'};
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(beforeLog)}).catch(()=>{});
+    console.log('[DEBUG] Payment upsert before:', JSON.stringify(beforeLog));
+    // #endregion
+    
+    // First, try to find existing payment
+    const existingPayment = await prisma.$queryRaw`
+      SELECT id FROM payments
+      WHERE organization_id = ${organizationId}::uuid
+        AND payment_id = ${paymentId}
+      LIMIT 1
+    `
+    
+    let payment
+    try {
+      if (existingPayment && existingPayment.length > 0) {
+        // Update existing payment
+        const paymentUuid = existingPayment[0].id
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:865',message:'payment upsert - updating existing',data:{paymentId,paymentUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        console.log(`[DEBUG] Updating payment ${paymentId} with UUID ${paymentUuid}`)
+        payment = await prisma.payment.update({
+          where: { id: paymentUuid },
+          data: paymentRecord,
+        })
+      } else {
+        // Create new payment
+        // #region agent log
+        const createLogData = {location:'route.js:872',message:'payment upsert - creating new',data:{paymentId,hasPaymentId:!!paymentRecord.payment_id,paymentIdValue:paymentRecord.payment_id,paymentRecordKeys:Object.keys(paymentRecord)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'};
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(createLogData)}).catch(()=>{});
+        console.log('[DEBUG] Creating payment:', JSON.stringify(createLogData));
+        // #endregion
+        console.log(`[DEBUG] Payment record keys:`, Object.keys(paymentRecord))
+        console.log(`[DEBUG] Payment record payment_id:`, paymentRecord.payment_id)
+        // Double-check payment_id is set before creating
+        if (!paymentRecord.payment_id) {
+          throw new Error(`Cannot create payment: paymentRecord.payment_id is missing. paymentId: ${paymentId}, paymentRecord keys: ${Object.keys(paymentRecord).join(', ')}`)
+        }
+        // Ensure payment_id is explicitly set (defensive programming)
+        const createData = {
+          ...paymentRecord,
+          payment_id: paymentRecord.payment_id || paymentId, // Explicitly ensure it's set
+        }
+        console.log(`[DEBUG] Creating payment with payment_id:`, createData.payment_id)
+        payment = await prisma.payment.create({
+          data: createData,
+        })
+      }
+    } catch (paymentError) {
+      // #region agent log
+      const errorLogData = {location:'route.js:882',message:'payment upsert - error',data:{paymentId,error:paymentError.message,errorCode:paymentError.code,errorName:paymentError.name,paymentRecordKeys:Object.keys(paymentRecord),hasPaymentId:!!paymentRecord.payment_id,paymentIdValue:paymentRecord.payment_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'};
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(errorLogData)}).catch(()=>{});
+      console.error('[DEBUG ERROR]', JSON.stringify(errorLogData));
+      console.error('[DEBUG ERROR] Full error:', paymentError);
+      // #endregion
+      throw paymentError
+    }
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:824',message:'payment upsert - after',data:{paymentId,paymentUuid:payment.id,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
 
     // Handle tenders (extract from payment data)
     const tenders = paymentData.tenders || paymentData.tender || []
     
     // Delete existing tenders and recreate (to handle updates)
+    // ✅ FIX: Use payment UUID (internal id), not Square payment ID
+    const paymentUuid = payment.id
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:830',message:'tender delete - before',data:{paymentId,paymentUuid,whereClause:'payment_id: paymentUuid (UUID)',tenderCount:tenders.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
     await prisma.paymentTender.deleteMany({
-      where: { payment_id: paymentId }
+      where: { payment_id: paymentUuid } // ✅ FIX: Use UUID, not Square ID
     })
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:832',message:'tender delete - after',data:{paymentId,paymentUuid,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
 
     // Create tenders if they exist
     if (Array.isArray(tenders) && tenders.length > 0) {
@@ -719,7 +965,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
 
         return {
           id: `${paymentId}-${tender.id || index}-${Date.now()}`,
-          payment_id: paymentId,
+          payment_id: paymentUuid, // ✅ FIX: Use UUID, not Square ID
           tender_id: tender.id || null,
           type: tender.type || null,
           amount_money_amount: tenderAmountMoney.amount || 0,
@@ -791,10 +1037,15 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         ...tender,
         organization_id: organizationId // ✅ ADDED: Required field
       }))
-
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:920',message:'tender create - before',data:{paymentId,paymentUuid,tenderCount:tenderRecordsWithOrg.length,firstTenderPaymentId:tenderRecordsWithOrg[0]?.payment_id,paymentIdType:typeof tenderRecordsWithOrg[0]?.payment_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       await prisma.paymentTender.createMany({
         data: tenderRecordsWithOrg
       })
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:922',message:'tender create - after',data:{paymentId,paymentUuid,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
     }
 
     console.log(`✅ Payment ${paymentId} saved to database (${eventType}) with organization_id: ${organizationId}`)
@@ -831,7 +1082,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       console.error('Stack:', error.stack.split('\n').slice(0, 3).join('\n'))
     }
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:729',message:'payment save error caught',data:{error:error.message,paymentId:paymentData?.id,errorCode:error.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:954',message:'payment save error caught',data:{error:error.message,paymentId:paymentData?.id,errorCode:error.code,errorName:error.name,fullError:error.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
     // Don't throw - allow webhook to continue processing
     // BUT: This might be hiding errors! Consider re-throwing for critical errors
@@ -1318,9 +1569,20 @@ async function processOrderWebhook(webhookData, eventType) {
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:locationId?.substring(0,16)||'missing',orderLocationId:orderLocationId?.substring(0,16)||'missing',finalLocationId:finalLocationId?.substring(0,16)||'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
 
-    // Resolve organization_id from merchant_id
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = null
-    if (merchantId) {
+    
+    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    if (finalLocationId) {
+      console.log(`📍 Resolving organization_id from location_id: ${finalLocationId}`)
+      organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from location: ${organizationId.substring(0, 8)}...`)
+      }
+    }
+    
+    // STEP 2: Fallback to merchant_id (if location lookup failed)
+    if (!organizationId && merchantId) {
       try {
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
@@ -1337,44 +1599,11 @@ async function processOrderWebhook(webhookData, eventType) {
         console.error(`❌ Error resolving organization_id from merchant_id: ${err.message}`)
         console.error(`   Stack: ${err.stack}`)
       }
-    } else {
+    } else if (!organizationId && !merchantId) {
       console.warn(`⚠️ Order ${orderId} missing merchant_id`)
     }
 
-    // If still no organization_id, try to get it from location
-    if (!organizationId && finalLocationId) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:830',message:'Attempting location-based org_id resolution',data:{orderId,finalLocationId,merchantId:merchantId||'missing'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      try {
-        const loc = await prisma.$queryRaw`
-          SELECT organization_id FROM locations 
-          WHERE square_location_id = ${finalLocationId}
-          LIMIT 1
-        `
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:836',message:'Location query result',data:{orderId,finalLocationId,resultCount:loc?.length||0,hasOrgId:!!(loc?.[0]?.organization_id),orgId:loc?.[0]?.organization_id?.substring(0,8)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-        if (loc && loc.length > 0) {
-          organizationId = loc[0].organization_id
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:839',message:'Successfully resolved org_id from location',data:{orderId,finalLocationId,organizationId:organizationId?.substring(0,8)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
-          console.log(`✅ Resolved organization_id from location: ${organizationId.substring(0, 8)}...`)
-        } else {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:841',message:'Location not found in DB',data:{orderId,finalLocationId,searchedValue:finalLocationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          console.warn(`⚠️ No location found for square_location_id: ${finalLocationId?.substring(0, 16)}...`)
-        }
-      } catch (err) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:844',message:'Error in location query',data:{orderId,finalLocationId,error:err.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
-        console.error(`❌ Error resolving organization_id from location: ${err.message}`)
-        console.error(`   Stack: ${err.stack}`)
-      }
-    }
+    // Location lookup already done above (STEP 1), no need to duplicate
 
     // If still no organization_id, try to get it from existing orders (fallback)
     if (!organizationId && orderId) {
