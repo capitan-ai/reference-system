@@ -335,8 +335,43 @@ export async function POST(request) {
       }
     } else {
       console.log('ℹ️ Unhandled event type:', eventData.type)
-      // For unhandled events, still return 200 to acknowledge receipt
-      // They can be added to the queue later if needed
+      
+      // Enqueue unhandled events for processing via webhook-jobs cron
+      // These include: customer.created, gift_card.*, refund.*, team_member.created
+      const queueableEventTypes = [
+        'customer.created',
+        'gift_card.activity.created',
+        'gift_card.activity.updated',
+        'gift_card.customer_linked',
+        'gift_card.updated',
+        'refund.created',
+        'refund.updated',
+        'team_member.created'
+      ]
+      
+      if (queueableEventTypes.includes(eventData.type)) {
+        try {
+          // eslint-disable-next-line global-require
+          const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
+          // eslint-disable-next-line global-require
+          const { PrismaClient } = require('@prisma/client')
+          const queuePrisma = new PrismaClient()
+          
+          await enqueueWebhookJob(queuePrisma, {
+            eventType: eventData.type,
+            eventId: eventData.event_id,
+            eventCreatedAt: eventData.created_at,
+            payload: eventData.data || {}
+          })
+          
+          console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) for async processing`)
+          
+          await queuePrisma.$disconnect()
+        } catch (enqueueError) {
+          console.error(`❌ Failed to enqueue ${eventData.type}:`, enqueueError.message)
+          // Don't fail the webhook - just log the error
+        }
+      }
     }
 
     return new Response(JSON.stringify({ 
