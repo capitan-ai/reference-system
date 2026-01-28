@@ -7,6 +7,9 @@
 import { getUserFromRequest, isSuperAdmin } from '../../../../lib/auth/check-access'
 import { prisma } from '../../../../lib/prisma-client'
 
+// Force dynamic rendering since we use request.headers
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     // Get user from token

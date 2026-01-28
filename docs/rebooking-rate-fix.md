@@ -74,3 +74,5 @@ const rebookingRate = Math.max(...data.map(d => d.rebooking_rate))
 ✅ **Consistent:** Same rate for all days with bookings  
 ⚠️ **Note:** Days without bookings show 0% (expected behavior)
 
+
+

@@ -108,3 +108,5 @@ Before proceeding with a backfill, you need to:
 If bookings are found in Square Dashboard but not in the API, this would indicate a Square API limitation or data retention policy that needs to be addressed with Square support.
 
 
+
+

@@ -22,6 +22,10 @@
     {
       "path": "/api/cron/giftcard-jobs",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/webhook-jobs",
+      "schedule": "* * * * *"
     }
   ],
   "headers": [

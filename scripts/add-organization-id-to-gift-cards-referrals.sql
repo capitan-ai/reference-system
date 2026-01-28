@@ -186,3 +186,5 @@ AND ccu.table_name = 'organizations'
 AND tc.table_name IN ('gift_cards', 'referral_profiles', 'referral_rewards')
 ORDER BY tc.table_name;
 
+
+

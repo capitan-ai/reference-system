@@ -1,0 +1,26 @@
+[
+  {
+    "bookingId": "m0lud7huzzev37",
+    "customerId": "NXTKAVY8PXM3R6G1EE5GAWFC8W",
+    "status": "ACCEPTED",
+    "startAt": "2026-01-03T23:00:00Z",
+    "createdAt": "2025-12-27T23:47:39Z",
+    "segmentCount": 1
+  },
+  {
+    "bookingId": "be1lzixhdrs1j2",
+    "customerId": "NXTKAVY8PXM3R6G1EE5GAWFC8W",
+    "status": "ACCEPTED",
+    "startAt": "2026-01-17T21:30:00Z",
+    "createdAt": "2026-01-16T06:26:54Z",
+    "segmentCount": 1
+  },
+  {
+    "bookingId": "86pyh6yai1wqvn",
+    "customerId": "NXTKAVY8PXM3R6G1EE5GAWFC8W",
+    "status": "ACCEPTED",
+    "startAt": "2026-01-19T23:40:00Z",
+    "createdAt": "2026-01-17T23:08:02Z",
+    "segmentCount": 1
+  }
+]

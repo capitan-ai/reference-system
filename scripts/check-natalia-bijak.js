@@ -204,3 +204,5 @@ async function checkNataliaBijak() {
 checkNataliaBijak()
 
 
+
+

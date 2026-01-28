@@ -23,3 +23,5 @@ FROM information_schema.columns
 WHERE (table_name = 'locations' AND column_name = 'id')
    OR (table_name = 'team_members' AND column_name = 'id');
 
+
+

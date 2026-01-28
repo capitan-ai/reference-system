@@ -166,3 +166,5 @@ organizations (1) ──< (many) organization_users (many) >── (1) auth.user
 organizations (1) ──< (many) locations
 ```
 
+
+

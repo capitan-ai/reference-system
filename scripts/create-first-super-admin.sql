@@ -43,3 +43,5 @@ FROM organization_users ou
 LEFT JOIN auth.users u ON ou.user_id = u.id
 WHERE ou.role = 'super_admin';
 
+
+

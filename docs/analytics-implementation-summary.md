@@ -125,3 +125,5 @@ psql $DATABASE_URL -f prisma/migrations/20260121150001_add_analytics_materialize
 - **Performance:** Use monitoring script to check query times
 - **Issues:** Check SQL migration files for view definitions
 
+
+

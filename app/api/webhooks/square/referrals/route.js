@@ -120,6 +120,7 @@ function getSquareApis() {
     customerCustomAttributesApi: squareClient.customerCustomAttributesApi,
     ordersApi: squareClient.ordersApi,
     paymentsApi: squareClient.paymentsApi,
+    locationsApi: squareClient.locationsApi,
   }
   return squareApisCache
 }
@@ -130,6 +131,7 @@ const getGiftCardActivitiesApi = () => getSquareApis().giftCardActivitiesApi
 const getCustomerCustomAttributesApi = () => getSquareApis().customerCustomAttributesApi
 const getOrdersApi = () => getSquareApis().ordersApi
 const getPaymentsApi = () => getSquareApis().paymentsApi
+const getLocationsApi = () => getSquareApis().locationsApi
 const getWebhooksHelper = () => getSquareApis().WebhooksHelper
 
 const DELIVERY_CHANNELS = {
@@ -161,6 +163,152 @@ async function resolveOrganizationId(squareMerchantId) {
     return null
   } catch (error) {
     console.error(`❌ Error resolving organization_id: ${error.message}`)
+    return null
+  }
+}
+
+// Helper: Fetch location from Square API and update merchant_id in database
+// ============================================================================
+async function fetchAndUpdateLocationFromSquare(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    const locationsApi = getLocationsApi()
+    const response = await locationsApi.retrieveLocation(squareLocationId)
+    const location = response.result?.location
+    
+    if (!location) {
+      console.warn(`⚠️ Location ${squareLocationId} not found in Square API`)
+      return null
+    }
+    
+    // Square API returns merchantId (camelCase), not merchant_id
+    const merchantId = location.merchantId || location.merchant_id || null
+    
+    if (!merchantId) {
+      console.warn(`⚠️ Location ${squareLocationId} missing merchant_id in Square API response`)
+      return null
+    }
+    
+    // Update location in database with merchant_id
+    // First, try to find existing location by square_location_id (without organization_id)
+    const existingLocation = await prisma.$queryRaw`
+      SELECT id, organization_id, square_location_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (existingLocation && existingLocation.length > 0) {
+      const loc = existingLocation[0]
+      
+      // Update merchant_id if it's missing or different
+      if (loc.square_merchant_id !== merchantId) {
+        await prisma.$executeRaw`
+          UPDATE locations
+          SET square_merchant_id = ${merchantId},
+              updated_at = NOW()
+          WHERE id = ${loc.id}::uuid
+        `
+        console.log(`✅ Updated location ${squareLocationId} with merchant_id: ${merchantId}`)
+      }
+      
+      return {
+        locationId: loc.id,
+        organizationId: loc.organization_id,
+        squareLocationId: squareLocationId,
+        merchantId: merchantId,
+        name: location.name || `Location ${squareLocationId.substring(0, 8)}...`,
+        address: location.address || null
+      }
+    } else {
+      // Location doesn't exist in DB yet - we'll need organization_id to create it
+      // But we can return the merchant_id so caller can resolve organization_id
+      console.log(`ℹ️ Location ${squareLocationId} not in database yet, but fetched merchant_id: ${merchantId}`)
+      return {
+        locationId: null,
+        organizationId: null,
+        squareLocationId: squareLocationId,
+        merchantId: merchantId,
+        name: location.name || `Location ${squareLocationId.substring(0, 8)}...`,
+        address: location.address || null
+      }
+    }
+  } catch (error) {
+    console.error(`❌ Error fetching location from Square API: ${error.message}`)
+    if (error.errors) {
+      console.error(`   Square API errors:`, JSON.stringify(error.errors, null, 2))
+    }
+    return null
+  }
+}
+
+// Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
+// ============================================================================
+async function resolveOrganizationIdFromLocationId(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    // STEP 1: Fast database lookup (most common case)
+    const location = await prisma.$queryRaw`
+      SELECT organization_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (location && location.length > 0) {
+      const loc = location[0]
+      
+      // If we have organization_id, return it immediately (fastest path)
+      if (loc.organization_id) {
+        return loc.organization_id
+      }
+      
+      // If we have merchant_id but no organization_id, resolve it
+      if (loc.square_merchant_id) {
+        const orgId = await resolveOrganizationId(loc.square_merchant_id)
+        if (orgId) {
+          // Update location with organization_id for future use
+          await prisma.$executeRaw`
+            UPDATE locations
+            SET organization_id = ${orgId}::uuid,
+                updated_at = NOW()
+            WHERE square_location_id = ${squareLocationId}
+          `
+          return orgId
+        }
+      }
+    }
+    
+    // STEP 2: Location not in DB or missing merchant_id - fetch from Square API
+    console.log(`📍 Location ${squareLocationId} not in database or missing merchant_id, fetching from Square API...`)
+    const locationData = await fetchAndUpdateLocationFromSquare(squareLocationId)
+    
+    if (locationData && locationData.merchantId) {
+      // Resolve organization_id from merchant_id
+      const orgId = await resolveOrganizationId(locationData.merchantId)
+      
+      if (orgId && locationData.locationId) {
+        // Update location with organization_id
+        await prisma.$executeRaw`
+          UPDATE locations
+          SET organization_id = ${orgId}::uuid,
+              updated_at = NOW()
+          WHERE id = ${locationData.locationId}::uuid
+        `
+      }
+      
+      return orgId
+    }
+    
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id from location_id: ${error.message}`)
     return null
   }
 }
@@ -3017,13 +3165,36 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     // Extract merchant_id from bookingData if not provided
     const finalMerchantId = merchantId || bookingData.merchantId || bookingData.merchant_id || null
     
-    // Resolve organization_id from merchant_id if not provided
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let finalOrganizationId = organizationId
-    if (!finalOrganizationId && finalMerchantId) {
-      finalOrganizationId = await resolveOrganizationId(finalMerchantId)
+    
+    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    if (!finalOrganizationId) {
+      const squareLocationId = 
+        bookingData.location_id || 
+        bookingData.locationId || 
+        bookingData.location?.id ||
+        bookingData.extendedProperties?.locationId ||
+        (bookingData.raw_json && (bookingData.raw_json.location_id || bookingData.raw_json.locationId))
+      
+      if (squareLocationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+        finalOrganizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        if (finalOrganizationId) {
+          console.log(`✅ Resolved organization_id from location: ${finalOrganizationId}`)
+        }
+      }
     }
     
-    // If still no organization_id, try to get it from customer
+    // STEP 2: Fallback to merchant_id (if location lookup failed)
+    if (!finalOrganizationId && finalMerchantId) {
+      finalOrganizationId = await resolveOrganizationId(finalMerchantId)
+      if (finalOrganizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${finalOrganizationId}`)
+      }
+    }
+    
+    // STEP 3: Fallback to customer (if both location and merchant failed)
     if (!finalOrganizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -3033,6 +3204,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         `
         if (customerOrg && customerOrg.length > 0) {
           finalOrganizationId = customerOrg[0].organization_id
+          console.log(`✅ Resolved organization_id from customer: ${finalOrganizationId}`)
         }
       } catch (error) {
         console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
@@ -3041,6 +3213,11 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     
     if (!finalOrganizationId) {
       console.error(`❌ Cannot save booking: organization_id is required but could not be resolved`)
+      console.error(`   Booking ID: ${bookingId}`)
+      console.error(`   Customer ID: ${customerId || 'missing'}`)
+      console.error(`   Merchant ID: ${finalMerchantId || 'missing'}`)
+      console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+      console.error(`   Attempted: merchant_id lookup, customer lookup, location_id lookup (with Square API)`)
       return
     }
     
@@ -3064,24 +3241,47 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     
     if (squareLocationId) {
       try {
-        // Ensure location exists first
+        // Fetch location from Square API to get merchant_id and other details
+        const locationData = await fetchAndUpdateLocationFromSquare(squareLocationId)
+        const locationMerchantId = locationData?.merchantId || null
+        const locationName = locationData?.name || `Location ${squareLocationId.substring(0, 8)}...`
+        const locationAddress = locationData?.address || null
+        
+        // Ensure location exists first (with merchant_id if available)
         await prisma.$executeRaw`
           INSERT INTO locations (
             id,
             organization_id,
             square_location_id,
+            square_merchant_id,
             name,
+            address_line_1,
+            locality,
+            administrative_district_level_1,
+            postal_code,
             created_at,
             updated_at
           ) VALUES (
             gen_random_uuid(),
             ${finalOrganizationId}::uuid,
             ${squareLocationId},
-            ${`Location ${squareLocationId.substring(0, 8)}...`},
+            ${locationMerchantId},
+            ${locationName},
+            ${locationAddress?.address_line_1 || locationAddress?.addressLine1 || null},
+            ${locationAddress?.locality || null},
+            ${locationAddress?.administrative_district_level_1 || locationAddress?.administrativeDistrictLevel1 || null},
+            ${locationAddress?.postal_code || locationAddress?.postalCode || null},
             NOW(),
             NOW()
           )
-          ON CONFLICT (organization_id, square_location_id) DO NOTHING
+          ON CONFLICT (organization_id, square_location_id) DO UPDATE SET
+            square_merchant_id = COALESCE(EXCLUDED.square_merchant_id, locations.square_merchant_id),
+            name = COALESCE(EXCLUDED.name, locations.name),
+            address_line_1 = COALESCE(EXCLUDED.address_line_1, locations.address_line_1),
+            locality = COALESCE(EXCLUDED.locality, locations.locality),
+            administrative_district_level_1 = COALESCE(EXCLUDED.administrative_district_level_1, locations.administrative_district_level_1),
+            postal_code = COALESCE(EXCLUDED.postal_code, locations.postal_code),
+            updated_at = NOW()
         `
         
         // Get location UUID
@@ -3104,6 +3304,48 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     } else {
       console.warn(`⚠️ Booking ${bookingId} missing location_id, cannot save`)
       return
+    }
+    
+    // Resolve service_variation_id from Square ID to internal UUID
+    let serviceVariationUuid = null
+    const squareServiceVariationId = segment?.service_variation_id || segment?.serviceVariationId
+    if (squareServiceVariationId && finalOrganizationId) {
+      try {
+        const svRecord = await prisma.$queryRaw`
+          SELECT uuid::text as id FROM service_variation
+          WHERE square_variation_id = ${squareServiceVariationId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        serviceVariationUuid = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+        if (serviceVariationUuid) {
+          console.log(`✅ Resolved service variation ${squareServiceVariationId} to UUID ${serviceVariationUuid}`)
+        } else {
+          console.warn(`⚠️ Service variation ${squareServiceVariationId} not found in database`)
+        }
+      } catch (error) {
+        console.error(`❌ Error resolving service variation: ${error.message}`)
+      }
+    }
+    
+    // Resolve technician_id from Square ID to internal UUID
+    let technicianUuid = null
+    const squareTeamMemberId = segment?.team_member_id || segment?.teamMemberId
+    if (squareTeamMemberId && finalOrganizationId) {
+      try {
+        const tmRecord = await prisma.$queryRaw`
+          SELECT id::text as id FROM team_members
+          WHERE square_team_member_id = ${squareTeamMemberId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        technicianUuid = tmRecord && tmRecord.length > 0 ? tmRecord[0].id : null
+        if (technicianUuid) {
+          console.log(`✅ Resolved team member ${squareTeamMemberId} to UUID ${technicianUuid}`)
+        }
+      } catch (error) {
+        console.error(`❌ Error resolving team member: ${error.message}`)
+      }
     }
     
     await prisma.$executeRaw`
@@ -3136,11 +3378,11 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${address.locality || null},
         ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
         ${address.postal_code || address.postalCode || null},
-        ${segment?.service_variation_id || segment?.serviceVariationId || null},
+        ${serviceVariationUuid || null},
         ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
         ${segment?.duration_minutes || segment?.durationMinutes || null},
         ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
-        ${segment?.team_member_id || segment?.teamMemberId || null},
+        ${technicianUuid || null},
         ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
         ${bookingData.customer_note || bookingData.customerNote || null},
         ${bookingData.seller_note || bookingData.sellerNote || null},
@@ -3153,9 +3395,9 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         version = EXCLUDED.version,
         status = EXCLUDED.status,
         merchant_id = COALESCE(EXCLUDED.merchant_id, bookings.merchant_id),
-        service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
-        service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
-        technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
+        service_variation_id = EXCLUDED.service_variation_id,
+        service_variation_version = EXCLUDED.service_variation_version,
+        technician_id = EXCLUDED.technician_id,
         customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
         seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
         updated_at = EXCLUDED.updated_at,
@@ -3175,13 +3417,23 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
  */
 async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt = null) {
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3418',message:'processBookingUpdated called',data:{hasBookingData:!!bookingData,bookingId:bookingData?.id||bookingData?.bookingId||'missing',eventId:eventId||'missing'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
     const baseBookingId = bookingData.id || bookingData.bookingId
     if (!baseBookingId) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3422',message:'missing booking ID',data:{bookingDataKeys:bookingData?Object.keys(bookingData).join(','):'no-data'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
       console.error('❌ booking.updated: Missing booking ID')
       return
     }
 
     console.log(`📅 Processing booking.updated for booking: ${baseBookingId}`)
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3426',message:'processing booking updated',data:{baseBookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
 
     // Extract data from webhook payload
     const customerId = bookingData.customer_id || bookingData.customerId || null
@@ -3204,16 +3456,100 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
     if (!existingBookings || existingBookings.length === 0) {
       console.warn(`⚠️ booking.updated: Booking ${baseBookingId} not found in database`)
       console.warn(`   This might be a booking that was created before webhook handling was implemented`)
-      console.warn(`   Consider running backfill script to sync missing bookings`)
+      console.warn(`   OR the booking.created webhook was missed/failed`)
+      console.log(`   Creating booking from booking.updated webhook data...`)
+      
+      // Create booking if it doesn't exist (fallback for missed booking.created webhooks)
+      const customerId = bookingData.customer_id || bookingData.customerId || 
+                        bookingData.creator_details?.customer_id || 
+                        bookingData.creatorDetails?.customerId || null
+      
+      if (!customerId) {
+        console.error(`❌ Cannot create booking: customer_id is missing from booking data`)
+        return
+      }
+      
+      // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
+      let organizationId = null
+      
+      // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+      const squareLocationId = bookingData.location_id || bookingData.locationId
+      if (squareLocationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        if (organizationId) {
+          console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+        }
+      }
+      
+      // STEP 2: Fallback to merchant_id (if location lookup failed)
+      if (!organizationId) {
+        const merchantId = bookingData.merchant_id || bookingData.merchantId || null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+          if (organizationId) {
+            console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+          }
+        }
+      }
+      
+      // STEP 3: Fallback to customer (if both location and merchant failed)
+      if (!organizationId && customerId) {
+        try {
+          const customerOrg = await prisma.$queryRaw`
+            SELECT organization_id FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId}
+            LIMIT 1
+          `
+          if (customerOrg && customerOrg.length > 0) {
+            organizationId = customerOrg[0].organization_id
+            console.log(`✅ Resolved organization_id from customer: ${organizationId}`)
+          }
+        } catch (error) {
+          console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
+        }
+      }
+      
+      if (!organizationId) {
+        console.error(`❌ Cannot create booking: organization_id is required but could not be resolved`)
+        console.error(`   Booking ID: ${baseBookingId}`)
+        console.error(`   Customer ID: ${customerId || 'missing'}`)
+        console.error(`   Merchant ID: ${merchantId || 'missing'}`)
+        console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+        console.error(`   Attempted: customer lookup, merchant_id lookup, location_id lookup (with Square API)`)
+        return
+      }
+      
+      // Save booking using the same logic as processBookingCreated
+      const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+      
+      if (segments.length === 0) {
+        // No services, save booking as-is
+        await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
+      } else {
+        // Multiple services - create one booking per service
+        for (const segment of segments) {
+          await saveBookingToDatabase(bookingData, segment, customerId, merchantId, organizationId)
+        }
+        console.log(`✅ Created ${segments.length} booking record(s) from booking.updated webhook`)
+      }
+      
+      console.log(`✅ Successfully created booking ${baseBookingId} from booking.updated webhook`)
       return
     }
 
     console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3541',message:'found existing bookings',data:{baseBookingId,count:existingBookings.length,bookingIds:existingBookings.map(b=>b.booking_id).join(','),versions:existingBookings.map(b=>b.version).join(','),statuses:existingBookings.map(b=>b.status).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
 
     // Update each booking record (for multi-service bookings)
     for (const existingBooking of existingBookings) {
       const organizationId = existingBooking.organization_id
       const bookingUuid = existingBooking.id
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3545',message:'processing existing booking update',data:{bookingUuid,existingVersion:existingBooking.version,existingStatus:existingBooking.status,newVersion:version,newStatus:status,newUpdatedAt:updatedAt?.toISOString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
 
       // Resolve location UUID if location_id changed
       let locationUuid = null
@@ -3234,69 +3570,62 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       let durationMinutes = null
       let serviceVariationVersion = null
 
-      // If this booking has a specific service_variation_id, try to match it with segments
-      if (existingBooking.service_variation_id && appointmentSegments.length > 0) {
-        // Find matching segment by service variation
-        const squareServiceVariationId = await prisma.$queryRaw`
-          SELECT square_variation_id FROM service_variation
-          WHERE id = ${existingBooking.service_variation_id}::uuid
-          LIMIT 1
-        `
+      // Process appointment segments to resolve Square IDs to UUIDs
+      if (appointmentSegments.length > 0) {
+        // Try to match existing booking's service variation with segments
+        let matchingSegment = null
         
-        if (squareServiceVariationId && squareServiceVariationId.length > 0) {
-          const svId = squareServiceVariationId[0].square_variation_id
-          const matchingSegment = appointmentSegments.find(seg => 
-            (seg.service_variation_id || seg.serviceVariationId) === svId
-          )
+        if (existingBooking.service_variation_id) {
+          // Find the Square ID for the existing service variation
+          const squareServiceVariationId = await prisma.$queryRaw`
+            SELECT square_variation_id FROM service_variation
+            WHERE uuid = ${existingBooking.service_variation_id}::uuid
+            LIMIT 1
+          `
           
-          if (matchingSegment) {
-            // Update from matching segment
-            const squareTeamMemberId = matchingSegment.team_member_id || matchingSegment.teamMemberId
-            if (squareTeamMemberId) {
-              const teamMemberRecord = await prisma.$queryRaw`
-                SELECT id FROM team_members
-                WHERE square_team_member_id = ${squareTeamMemberId}
-                  AND organization_id = ${organizationId}::uuid
-                LIMIT 1
-              `
-              technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
-            }
-            
-            durationMinutes = matchingSegment.duration_minutes || matchingSegment.durationMinutes || null
-            serviceVariationVersion = matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion 
-              ? BigInt(matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion)
-              : null
+          if (squareServiceVariationId && squareServiceVariationId.length > 0) {
+            const svId = squareServiceVariationId[0].square_variation_id
+            matchingSegment = appointmentSegments.find(seg => 
+              (seg.service_variation_id || seg.serviceVariationId) === svId
+            )
           }
         }
-      } else if (appointmentSegments.length > 0) {
-        // No service_variation_id yet, use first segment
-        const firstSegment = appointmentSegments[0]
-        const squareServiceVariationId = firstSegment.service_variation_id || firstSegment.serviceVariationId
-        if (squareServiceVariationId) {
-          const svRecord = await prisma.$queryRaw`
-            SELECT id FROM service_variation
-            WHERE square_variation_id = ${squareServiceVariationId}
-              AND organization_id = ${organizationId}::uuid
-            LIMIT 1
-          `
-          serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+        
+        // If no match found, use first segment
+        if (!matchingSegment && appointmentSegments.length > 0) {
+          matchingSegment = appointmentSegments[0]
         }
         
-        const squareTeamMemberId = firstSegment.team_member_id || firstSegment.teamMemberId
-        if (squareTeamMemberId) {
-          const teamMemberRecord = await prisma.$queryRaw`
-            SELECT id FROM team_members
-            WHERE square_team_member_id = ${squareTeamMemberId}
-              AND organization_id = ${organizationId}::uuid
-            LIMIT 1
-          `
-          technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
+        if (matchingSegment) {
+          // Resolve service variation Square ID to UUID
+          const squareServiceVariationId = matchingSegment.service_variation_id || matchingSegment.serviceVariationId
+          if (squareServiceVariationId) {
+            const svRecord = await prisma.$queryRaw`
+              SELECT uuid::text as id FROM service_variation
+              WHERE square_variation_id = ${squareServiceVariationId}
+                AND organization_id = ${organizationId}::uuid
+              LIMIT 1
+            `
+            serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+          }
+          
+          // Resolve team member Square ID to UUID
+          const squareTeamMemberId = matchingSegment.team_member_id || matchingSegment.teamMemberId
+          if (squareTeamMemberId) {
+            const teamMemberRecord = await prisma.$queryRaw`
+              SELECT id::text as id FROM team_members
+              WHERE square_team_member_id = ${squareTeamMemberId}
+                AND organization_id = ${organizationId}::uuid
+              LIMIT 1
+            `
+            technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
+          }
+          
+          durationMinutes = matchingSegment.duration_minutes || matchingSegment.durationMinutes || null
+          serviceVariationVersion = matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion
+            ? BigInt(matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion)
+            : null
         }
-        
-        durationMinutes = firstSegment.duration_minutes || firstSegment.durationMinutes || null
-        serviceVariationVersion = firstSegment.service_variation_version || firstSegment.serviceVariationVersion
-          ? BigInt(firstSegment.service_variation_version || firstSegment.serviceVariationVersion)
-          : null
       }
 
       // Build update query
@@ -3346,6 +3675,14 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       if (serviceVariationVersion !== null) {
         updateFields.push('service_variation_version = $' + (updateValues.length + 1))
         updateValues.push(serviceVariationVersion.toString())
+      } else if (appointmentSegments.length > 0) {
+        // If version is null but we have segments, try to get it from raw_json
+        const firstSegment = appointmentSegments[0]
+        const rawVersion = firstSegment.serviceVariationVersion || firstSegment.service_variation_version
+        if (rawVersion) {
+          updateFields.push('service_variation_version = $' + (updateValues.length + 1))
+          updateValues.push(BigInt(rawVersion).toString())
+        }
       }
       
       // Always update updated_at and raw_json
@@ -3355,6 +3692,10 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       updateFields.push('raw_json = $' + (updateValues.length + 1) + '::jsonb')
       updateValues.push(JSON.stringify(bookingData))
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3682',message:'preparing update query',data:{bookingUuid,updateFieldsCount:updateFields.length,updateFields:updateFields.join(','),hasVersion:version!==null,versionValue:version,hasStatus:status!==null,statusValue:status,updatedAtValue:updatedAt?.toISOString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
+
       if (updateFields.length > 0) {
         const updateQuery = `
           UPDATE bookings
@@ -3363,10 +3704,20 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         `
         updateValues.push(bookingUuid)
         
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3690',message:'executing update query',data:{bookingUuid,queryPreview:updateQuery.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+        // #endregion
+        
         await prisma.$executeRawUnsafe(updateQuery, ...updateValues)
         console.log(`✅ Updated booking ${bookingUuid} (${baseBookingId})`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3697',message:'update query completed',data:{bookingUuid,baseBookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+        // #endregion
       } else {
         console.log(`ℹ️ No fields to update for booking ${bookingUuid}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3700',message:'no fields to update',data:{bookingUuid,version,status,updatedAt:updatedAt?.toISOString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+        // #endregion
       }
     }
 
@@ -3417,13 +3768,30 @@ async function processBookingCreated(bookingData, runContext = {}) {
     // Extract merchant_id from runContext or bookingData
     const merchantId = runContext?.merchantId || bookingData.merchantId || bookingData.merchant_id || null
     
-    // Resolve organization_id from merchant_id
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = runContext?.organizationId || null
-    if (!organizationId && merchantId) {
-      organizationId = await resolveOrganizationId(merchantId)
+    
+    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    if (!organizationId) {
+      const squareLocationId = bookingData.location_id || bookingData.locationId
+      if (squareLocationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        if (organizationId) {
+          console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+        }
+      }
     }
     
-    // If still no organization_id, try to get it from customer
+    // STEP 2: Fallback to merchant_id (if location lookup failed)
+    if (!organizationId && merchantId) {
+      organizationId = await resolveOrganizationId(merchantId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+      }
+    }
+    
+    // STEP 3: Fallback to customer (if both location and merchant failed)
     if (!organizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -3433,6 +3801,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
         `
         if (customerOrg && customerOrg.length > 0) {
           organizationId = customerOrg[0].organization_id
+          console.log(`✅ Resolved organization_id from customer: ${organizationId}`)
         }
       } catch (error) {
         console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
@@ -3440,8 +3809,13 @@ async function processBookingCreated(bookingData, runContext = {}) {
     }
     
     if (!organizationId) {
-      console.error(`❌ Cannot process booking: organization_id is required but could not be resolved`)
-      return
+      console.error(`❌ CRITICAL: Cannot process booking: organization_id is required but could not be resolved`)
+      console.error(`   Booking ID: ${bookingId}`)
+      console.error(`   Customer ID: ${customerId}`)
+      console.error(`   Merchant ID: ${merchantId || 'missing'}`)
+      console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+      console.error(`   Attempted: merchant_id lookup, customer lookup, location_id lookup (with Square API)`)
+      throw new Error(`Cannot process booking: organization_id is required but could not be resolved. Booking ID: ${bookingId}, Customer ID: ${customerId}, Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
     }
     
     if (segments.length === 0) {
@@ -4345,6 +4719,10 @@ export async function POST(request) {
     const webhookData = JSON.parse(body)
     console.log('📡 Received Square webhook:', webhookData.type)
     console.log('📦 Full webhook data:', safeStringify(webhookData))
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4689',message:'webhook parsed',data:{type:webhookData?.type,hasData:!!webhookData?.data,hasObject:!!webhookData?.data?.object,hasBooking:!!webhookData?.data?.object?.booking,eventId:webhookData?.event_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
 
     // Process customer.created events (new customer detected)
     if (webhookData.type === 'customer.created') {
@@ -4607,6 +4985,71 @@ export async function POST(request) {
           squareEventId: webhookData.event_id,
           bookingId: bookingData?.id ?? null
         })
+      }
+    }
+
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4955',message:'checking webhook type',data:{webhookType:webhookData?.type,isBookingUpdated:webhookData?.type==='booking.updated',typeComparison:JSON.stringify({actual:webhookData?.type,expected:'booking.updated'})},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
+
+    // Process booking.updated events (when booking is modified)
+    if (webhookData.type === 'booking.updated') {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4958',message:'booking.updated handler entered',data:{hasWebhookData:!!webhookData,hasData:!!webhookData?.data,hasObject:!!webhookData?.data?.object,hasBooking:!!webhookData?.data?.object?.booking,eventId:webhookData?.event_id,dataKeys:webhookData?.data?Object.keys(webhookData.data).join(','):'no-data',objectKeys:webhookData?.data?.object?Object.keys(webhookData.data.object).join(','):'no-object'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      
+      const bookingData = webhookData.data?.object?.booking || webhookData.data?.booking
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4960',message:'bookingData extracted',data:{hasBookingData:!!bookingData,bookingId:bookingData?.id||bookingData?.bookingId||'missing',customerId:bookingData?.customer_id||bookingData?.customerId||'missing',status:bookingData?.status||'missing'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      
+      console.log('📅 Processing booking.updated event')
+      console.log('   Booking ID:', bookingData?.id || bookingData?.bookingId || 'missing')
+      console.log('   Status:', bookingData?.status || 'missing')
+      
+      if (bookingData) {
+        try {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4968',message:'calling processBookingUpdated',data:{bookingId:bookingData?.id||bookingData?.bookingId,eventId:webhookData?.event_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          
+          await processBookingUpdated(bookingData, webhookData.event_id, webhookData.created_at)
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4972',message:'processBookingUpdated completed',data:{bookingId:bookingData?.id||bookingData?.bookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          
+          console.log('✅ Booking updated webhook processed successfully')
+          
+          return Response.json({
+            success: true,
+            processed: true,
+            bookingId: bookingData.id || bookingData.bookingId
+          }, { status: 200 })
+        } catch (bookingError) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4982',message:'processBookingUpdated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:bookingError.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          
+          console.error(`❌ Error processing booking.updated webhook:`, bookingError.message)
+          console.error(`   Stack:`, bookingError.stack)
+          // Re-throw to return 500 so Square will retry
+          throw bookingError
+        }
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4990',message:'booking.updated missing booking data',data:{hasData:!!webhookData?.data,hasObject:!!webhookData?.data?.object,webhookKeys:Object.keys(webhookData||{}).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        
+        console.warn(`⚠️ Booking updated webhook received but booking data is missing`)
+        console.warn(`   Tried: webhookData.data?.object?.booking, webhookData.data?.booking`)
+        console.warn(`   webhookData.data keys:`, webhookData.data ? Object.keys(webhookData.data).join(', ') : 'N/A')
+        
+        return Response.json({
+          success: false,
+          error: 'Booking data missing from webhook'
+        }, { status: 400 })
       }
     }
 
@@ -5037,6 +5480,10 @@ export async function POST(request) {
     }
 
     // For other event types, just acknowledge receipt
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:5462',message:'default return for unhandled event',data:{webhookType:webhookData?.type,isBookingUpdated:webhookData?.type==='booking.updated'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+    // #endregion
+    
     return Response.json({
       success: true,
       message: 'Webhook received',

@@ -138,3 +138,5 @@ Authorization: Bearer <super_admin_token>
 - Проверьте, что запись создана: `SELECT * FROM organization_users WHERE role = 'super_admin'`
 - Проверьте, что используется правильный user_id из Supabase Auth
 
+
+

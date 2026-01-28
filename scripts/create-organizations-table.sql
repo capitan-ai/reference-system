@@ -82,3 +82,5 @@ SELECT
 FROM payments
 WHERE merchant_id IS NOT NULL;
 
+
+

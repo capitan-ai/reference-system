@@ -99,3 +99,5 @@ FROM service_variation sv
 LEFT JOIN organizations o ON sv.organization_id = o.id
 GROUP BY sv.organization_id, o.square_merchant_id;
 
+
+

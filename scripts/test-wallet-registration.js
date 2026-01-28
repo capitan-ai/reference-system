@@ -155,3 +155,5 @@ async function testRegistration(serialNumber) {
 const serialNumber = process.argv[2] || '1234567890123456'
 testRegistration(serialNumber)
 
+
+

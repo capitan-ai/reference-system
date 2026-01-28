@@ -502,3 +502,5 @@ FULL OUTER JOIN square_existing_clients sec ON c.square_customer_id = sec.square
 
 
 
+
+

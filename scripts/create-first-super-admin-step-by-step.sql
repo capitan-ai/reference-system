@@ -37,3 +37,5 @@ WHERE ou.role = 'super_admin';
 
 -- Если вы видите вашу запись - super admin создан успешно! ✅
 
+
+

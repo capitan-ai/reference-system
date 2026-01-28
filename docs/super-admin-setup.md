@@ -171,3 +171,5 @@ export async function GET(request, { params }) {
 - Other roles → `organization_id` MUST be NOT NULL
 - Only one super_admin record per user (enforced by unique index)
 
+
+

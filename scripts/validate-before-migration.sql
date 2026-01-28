@@ -75,3 +75,5 @@ SELECT
     COUNT(*) FILTER (WHERE id IS NULL)
 FROM payments;
 
+
+

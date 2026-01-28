@@ -3,7 +3,7 @@ import prisma from '../../../../lib/prisma-client'
 
 // Import square-env using dynamic require inside function to avoid webpack static analysis
 function getSquareEnvironmentName() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  // eslint-disable-next-line global-require
   const squareEnv = require('../../../../lib/utils/square-env')
   return squareEnv.getSquareEnvironmentName()
 }
@@ -335,6 +335,8 @@ export async function POST(request) {
       }
     } else {
       console.log('ℹ️ Unhandled event type:', eventData.type)
+      // For unhandled events, still return 200 to acknowledge receipt
+      // They can be added to the queue later if needed
     }
 
     return new Response(JSON.stringify({ 
@@ -350,6 +352,30 @@ export async function POST(request) {
     console.error('   Error message:', error?.message)
     if (error?.stack) {
       console.error('   Stack trace:', error.stack.split('\n').slice(0, 5).join('\n'))
+    }
+    
+    // Enqueue failed webhook for retry via cron
+    if (eventData?.type && eventData?.event_id) {
+      try {
+        const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
+        const { PrismaClient } = require('@prisma/client')
+        const prisma = new PrismaClient()
+        
+        await enqueueWebhookJob(prisma, {
+          eventType: eventData.type,
+          eventId: eventData.event_id,
+          eventCreatedAt: eventData.created_at,
+          payload: eventData.data || {},
+          error: error.message || String(error)
+        })
+        
+        console.log(`📦 Enqueued failed webhook ${eventData.type} (${eventData.event_id}) for retry`)
+        
+        await prisma.$disconnect()
+      } catch (enqueueError) {
+        console.error(`❌ Failed to enqueue webhook job:`, enqueueError.message)
+        // Continue to return 500 so Square retries
+      }
     }
     
     // Return 500 so Square will retry the webhook

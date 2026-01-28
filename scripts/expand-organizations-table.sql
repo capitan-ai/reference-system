@@ -24,3 +24,5 @@ SET
   is_active = COALESCE(is_active, true)
 WHERE name IS NULL OR slug IS NULL;
 
+
+
