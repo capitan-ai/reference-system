@@ -40,6 +40,7 @@ function getSquareApis() {
   return {
     ordersApi: squareClient.ordersApi,
     locationsApi: squareClient.locationsApi,
+    bookingsApi: squareClient.bookingsApi,
   }
 }
 
@@ -51,6 +52,222 @@ function getOrdersApi() {
 // Get Square Locations API
 function getLocationsApi() {
   return getSquareApis().locationsApi
+}
+
+// Get Square Bookings API
+function getBookingsApi() {
+  return getSquareApis().bookingsApi
+}
+
+/**
+ * Derive booking_id from Square API
+ * 
+ * This function:
+ * 1. Calls Square Orders API to get full order with line_items
+ * 2. Calls Square Bookings API (listBookings) with customerId, locationId, date range
+ * 3. Matches bookings by service_variation_id overlap
+ * 4. Filters by time: booking.start_at <= order.created_at (service finished before payment)
+ * 5. Selects the closest match by time proximity
+ * 
+ * @param {string} squareOrderId - Square order ID
+ * @returns {Promise<{bookingId: string|null, confidence: string, source: string}>}
+ */
+async function deriveBookingFromSquareApi(squareOrderId) {
+  console.log(`🔍 [DERIVE-BOOKING] Starting Square API-based booking derivation for order ${squareOrderId}`)
+  
+  try {
+    // Step 1: Get full order from Square API
+    const ordersApi = getOrdersApi()
+    const orderResponse = await ordersApi.retrieveOrder(squareOrderId)
+    const order = orderResponse.result?.order
+    
+    if (!order) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} not found in Square API`)
+      return { bookingId: null, confidence: 'none', source: 'order_not_found' }
+    }
+    
+    const customerId = order.customerId
+    const locationId = order.locationId
+    const orderCreatedAt = order.createdAt ? new Date(order.createdAt) : new Date()
+    const lineItems = order.lineItems || []
+    
+    console.log(`📋 [DERIVE-BOOKING] Order details:`)
+    console.log(`   Customer ID: ${customerId}`)
+    console.log(`   Location ID: ${locationId}`)
+    console.log(`   Order Created: ${orderCreatedAt.toISOString()}`)
+    console.log(`   Line Items: ${lineItems.length}`)
+    
+    if (!customerId) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no customer_id`)
+      return { bookingId: null, confidence: 'none', source: 'no_customer_id' }
+    }
+    
+    if (!locationId) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no location_id`)
+      return { bookingId: null, confidence: 'none', source: 'no_location_id' }
+    }
+    
+    // Extract service_variation_ids (catalog_object_id) from line items
+    const serviceVariationIds = lineItems
+      .map(li => li.catalogObjectId)
+      .filter(id => id && id.startsWith && !id.startsWith('CUSTOM_AMOUNT'))
+    
+    console.log(`   Service Variation IDs: ${serviceVariationIds.join(', ') || 'none'}`)
+    
+    if (serviceVariationIds.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no service variation IDs`)
+      return { bookingId: null, confidence: 'none', source: 'no_service_variations' }
+    }
+    
+    // Step 2: Get bookings from Square API
+    // Time window: Start of order day to order time (booking happened before payment)
+    const startOfDay = new Date(orderCreatedAt)
+    startOfDay.setHours(0, 0, 0, 0)
+    
+    // End of day + 4 hours buffer (in case of late payment)
+    const endOfWindow = new Date(orderCreatedAt)
+    endOfWindow.setHours(23, 59, 59, 999)
+    
+    console.log(`📅 [DERIVE-BOOKING] Searching bookings:`)
+    console.log(`   Start: ${startOfDay.toISOString()}`)
+    console.log(`   End: ${endOfWindow.toISOString()}`)
+    
+    const bookingsApi = getBookingsApi()
+    let allBookings = []
+    let cursor = null
+    let pageCount = 0
+    const maxPages = 5 // Safety limit
+    
+    do {
+      try {
+        // Square SDK listBookings signature (positional parameters):
+        // listBookings(limit?, cursor?, customerId?, teamMemberId?, locationId?, startAt?, endAt?)
+        const response = await bookingsApi.listBookings(
+          100, // limit
+          cursor || undefined,
+          customerId, // filter by customer
+          undefined, // teamMemberId
+          locationId, // filter by location
+          startOfDay.toISOString(), // start_at_min
+          endOfWindow.toISOString() // start_at_max
+        )
+        
+        const bookings = response.result?.bookings || []
+        allBookings = allBookings.concat(bookings)
+        cursor = response.result?.cursor
+        pageCount++
+        
+        console.log(`   Page ${pageCount}: Found ${bookings.length} bookings (total: ${allBookings.length})`)
+      } catch (apiError) {
+        console.error(`❌ [DERIVE-BOOKING] Square Bookings API error:`, apiError.message)
+        break
+      }
+    } while (cursor && pageCount < maxPages)
+    
+    console.log(`📚 [DERIVE-BOOKING] Total bookings found: ${allBookings.length}`)
+    
+    if (allBookings.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] No bookings found for customer ${customerId} on ${startOfDay.toDateString()}`)
+      return { bookingId: null, confidence: 'none', source: 'no_bookings_found' }
+    }
+    
+    // Step 3: Match bookings by service_variation_id and time
+    const matchedBookings = []
+    
+    for (const booking of allBookings) {
+      const bookingId = booking.id
+      const appointmentSegments = booking.appointmentSegments || []
+      const bookingStartAt = booking.startAt ? new Date(booking.startAt) : null
+      
+      // Get end time (last segment end or calculate from duration)
+      let bookingEndAt = null
+      if (appointmentSegments.length > 0) {
+        const lastSegment = appointmentSegments[appointmentSegments.length - 1]
+        // Duration is in minutes
+        const durationMinutes = lastSegment.durationMinutes || 60
+        if (bookingStartAt) {
+          bookingEndAt = new Date(bookingStartAt.getTime() + durationMinutes * 60 * 1000)
+        }
+      }
+      
+      // Check service_variation_id overlap
+      const bookingServiceIds = appointmentSegments
+        .map(seg => seg.serviceVariationId)
+        .filter(Boolean)
+      
+      const hasServiceOverlap = serviceVariationIds.some(svcId => 
+        bookingServiceIds.includes(svcId)
+      )
+      
+      if (!hasServiceOverlap) {
+        continue // Skip bookings with no matching services
+      }
+      
+      // Check time window: booking ended before or around order time
+      // Allow 4 hours after booking end for payment
+      const maxPaymentDelay = 4 * 60 * 60 * 1000 // 4 hours in ms
+      const latestPaymentTime = bookingEndAt 
+        ? new Date(bookingEndAt.getTime() + maxPaymentDelay)
+        : null
+      
+      // Booking should have started before order was created
+      if (bookingStartAt && bookingStartAt > orderCreatedAt) {
+        continue // Booking is in the future relative to order
+      }
+      
+      // Order should be within 4 hours after booking ended
+      if (latestPaymentTime && orderCreatedAt > latestPaymentTime) {
+        continue // Order too late after booking
+      }
+      
+      // Calculate time difference (for selecting closest match)
+      const timeDiff = bookingEndAt 
+        ? Math.abs(orderCreatedAt.getTime() - bookingEndAt.getTime())
+        : Infinity
+      
+      matchedBookings.push({
+        bookingId,
+        bookingStartAt,
+        bookingEndAt,
+        timeDiff,
+        serviceIds: bookingServiceIds
+      })
+      
+      console.log(`   ✅ Match: Booking ${bookingId}`)
+      console.log(`      Start: ${bookingStartAt?.toISOString()}`)
+      console.log(`      End: ${bookingEndAt?.toISOString()}`)
+      console.log(`      Services: ${bookingServiceIds.join(', ')}`)
+      console.log(`      Time diff: ${Math.round(timeDiff / 60000)} minutes`)
+    }
+    
+    if (matchedBookings.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] No matching bookings found for order ${squareOrderId}`)
+      return { bookingId: null, confidence: 'none', source: 'no_matching_bookings' }
+    }
+    
+    // Step 4: Select the closest match
+    matchedBookings.sort((a, b) => a.timeDiff - b.timeDiff)
+    const bestMatch = matchedBookings[0]
+    
+    const confidence = matchedBookings.length === 1 ? 'high' : 'medium'
+    
+    console.log(`🎯 [DERIVE-BOOKING] Best match: ${bestMatch.bookingId}`)
+    console.log(`   Confidence: ${confidence} (${matchedBookings.length} candidates)`)
+    console.log(`   Time diff: ${Math.round(bestMatch.timeDiff / 60000)} minutes`)
+    
+    return {
+      bookingId: bestMatch.bookingId,
+      confidence,
+      source: 'derived_via_square_api'
+    }
+    
+  } catch (error) {
+    console.error(`❌ [DERIVE-BOOKING] Error deriving booking for order ${squareOrderId}:`, error.message)
+    if (error.stack) {
+      console.error(`   Stack:`, error.stack.split('\n').slice(0, 3).join('\n'))
+    }
+    return { bookingId: null, confidence: 'none', source: 'error' }
+  }
 }
 
 // Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
@@ -1178,7 +1395,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     
     if (!orderRecord || orderRecord.length === 0) {
       console.log(`ℹ️ Order ${orderId} not found in database yet (might arrive later)`)
-      return null
+      return { bookingId: null, source: 'order_not_in_db', confidence: 'none' }
     }
     
     const orderUuid = orderRecord[0].id
@@ -1386,6 +1603,92 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
       }
     }
     
+    // Method 4: Square API fallback - call Square Bookings API to find booking
+    // This catches bookings that weren't in our database (missed webhooks, historical bookings)
+    let bookingLinkSource = 'derived_via_database'
+    let bookingLinkConfidence = 'high'
+    
+    if (!bookingId && orderId) {
+      console.log(`🔄 [RECONCILE] Database matching failed, trying Square API for order ${orderId}`)
+      
+      const squareResult = await deriveBookingFromSquareApi(orderId)
+      
+      if (squareResult.bookingId) {
+        // Square API returned a booking, but it's a Square booking ID (not our UUID)
+        // We need to find or create the booking in our database
+        
+        // First, check if this booking already exists in our database
+        const existingBooking = await prisma.$queryRaw`
+          SELECT id FROM bookings 
+          WHERE booking_id = ${squareResult.bookingId}
+          LIMIT 1
+        `
+        
+        if (existingBooking && existingBooking.length > 0) {
+          bookingId = existingBooking[0].id
+          console.log(`✅ [RECONCILE] Found existing booking in DB: ${bookingId}`)
+        } else {
+          // Booking not in our database - try to fetch and save it
+          console.log(`📥 [RECONCILE] Booking ${squareResult.bookingId} not in DB, fetching from Square...`)
+          try {
+            const bookingsApi = getBookingsApi()
+            const bookingResponse = await bookingsApi.retrieveBooking(squareResult.bookingId)
+            const squareBooking = bookingResponse.result?.booking
+            
+            if (squareBooking) {
+              // Save booking to database
+              const newBookingId = squareBooking.id
+              const bookingCustomerId = squareBooking.customerId
+              const bookingLocationId = squareBooking.locationId
+              const bookingStatus = squareBooking.status
+              const bookingVersion = squareBooking.version
+              const bookingStartAt = squareBooking.startAt ? new Date(squareBooking.startAt) : null
+              
+              // Get organization_id from location
+              let bookingOrgId = organizationId
+              if (!bookingOrgId && bookingLocationId) {
+                bookingOrgId = await resolveOrganizationIdFromLocationId(bookingLocationId)
+              }
+              
+              await prisma.$executeRaw`
+                INSERT INTO bookings (
+                  organization_id, booking_id, customer_id, location_id, status, version,
+                  start_at, created_at, updated_at, raw_json
+                ) VALUES (
+                  ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationId}, 
+                  ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
+                  NOW(), NOW(), ${JSON.stringify(squareBooking)}::jsonb
+                )
+                ON CONFLICT (organization_id, booking_id) DO UPDATE SET
+                  status = EXCLUDED.status,
+                  version = EXCLUDED.version,
+                  updated_at = NOW(),
+                  raw_json = EXCLUDED.raw_json
+                RETURNING id
+              `
+              
+              // Get the UUID of the inserted/updated booking
+              const insertedBooking = await prisma.$queryRaw`
+                SELECT id FROM bookings WHERE booking_id = ${newBookingId} LIMIT 1
+              `
+              if (insertedBooking && insertedBooking.length > 0) {
+                bookingId = insertedBooking[0].id
+                console.log(`✅ [RECONCILE] Saved and linked booking: ${bookingId}`)
+              }
+            }
+          } catch (fetchError) {
+            console.error(`❌ [RECONCILE] Error fetching booking from Square:`, fetchError.message)
+          }
+        }
+        
+        bookingLinkSource = squareResult.source
+        bookingLinkConfidence = squareResult.confidence
+      } else {
+        console.log(`ℹ️ [RECONCILE] Square API also found no matching booking for order ${orderId}`)
+        console.log(`   Reason: ${squareResult.source}`)
+      }
+    }
+    
     // Update orders table if booking found
     if (bookingId) {
       await prisma.$executeRaw`
@@ -1427,12 +1730,18 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
         WHERE order_id = ${orderUuid}::uuid
           AND booking_id IS NULL
       `
+      
+      console.log(`📊 [RECONCILE] Booking link complete:`)
+      console.log(`   Order: ${orderId}`)
+      console.log(`   Booking: ${bookingId}`)
+      console.log(`   Source: ${bookingLinkSource}`)
+      console.log(`   Confidence: ${bookingLinkConfidence}`)
     }
     
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:910',message:'reconcileBookingLinks exit',data:{orderId,bookingId,success:!!bookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:910',message:'reconcileBookingLinks exit',data:{orderId,bookingId,success:!!bookingId,source:bookingLinkSource,confidence:bookingLinkConfidence},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
-    return bookingId
+    return { bookingId, source: bookingLinkSource, confidence: bookingLinkConfidence }
   } catch (error) {
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:913',message:'reconcileBookingLinks error',data:{orderId,error:error.message,code:error.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
@@ -1441,7 +1750,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     if (error.stack) {
       console.error('Stack:', error.stack.split('\n').slice(0, 5).join('\n'))
     }
-    return null
+    return { bookingId: null, source: 'error', confidence: 'none' }
   }
 }
 
