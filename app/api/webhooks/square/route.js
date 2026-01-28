@@ -1370,16 +1370,11 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
 /**
  * Reconcile booking_id across payments, orders, and order_line_items
  * Called by payment and order webhooks to ensure eventual consistency
- * Uses 4 methods in priority order:
- * 1. Get booking_id from payments (most reliable)
- * 2. Match by Customer + Location + Service Variation + Time
- * 3. Fallback: Match by Customer + Location + Time
- * 4. If payment has booking_id, copy to order
+ * Uses 2 methods in priority order:
+ * 1. PRIMARY: Square API (deriveBookingFromSquareApi)
+ * 2. FALLBACK: Database match by Customer + Location + Time
  */
 async function reconcileBookingLinks(orderId, paymentId = null) {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:690',message:'reconcileBookingLinks entry',data:{orderId,paymentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   try {
     // Get order UUID and details
     const orderRecord = await prisma.$queryRaw`
@@ -1388,10 +1383,6 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
       WHERE order_id = ${orderId}
       LIMIT 1
     `
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:697',message:'orderRecord query result',data:{found:!!orderRecord,recordCount:orderRecord?.length,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     
     if (!orderRecord || orderRecord.length === 0) {
       console.log(`ℹ️ Order ${orderId} not found in database yet (might arrive later)`)
@@ -1405,219 +1396,21 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     const orderCreatedAt = orderRecord[0].created_at
     const existingBookingId = orderRecord[0].booking_id
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:710',message:'order data extracted',data:{orderUuid,organizationId,customerId,locationId,locationIdType:locationId?.length<36?'square_id':'uuid',orderCreatedAt,existingBookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    
     // If order already has booking_id, we can still update payments and line items
     let bookingId = existingBookingId
+    let bookingLinkSource = existingBookingId ? 'existing' : null
+    let bookingLinkConfidence = existingBookingId ? 'high' : null
     
-    // Method 1: Try to get booking_id from payments (most reliable)
-    if (!bookingId) {
-      if (paymentId) {
-        const paymentBooking = await prisma.$queryRaw`
-          SELECT booking_id FROM payments
-          WHERE id = ${paymentId}
-            AND booking_id IS NOT NULL
-          LIMIT 1
-        `
-        if (paymentBooking && paymentBooking.length > 0) {
-          bookingId = paymentBooking[0].booking_id
-          console.log(`✅ Found booking_id from payment: ${bookingId}`)
-        }
-      }
-      
-      // If no payment booking_id, try to find payment with booking_id for this order
-      if (!bookingId) {
-        const paymentWithBooking = await prisma.$queryRaw`
-          SELECT booking_id FROM payments
-          WHERE order_id = ${orderUuid}::uuid
-            AND booking_id IS NOT NULL
-          LIMIT 1
-        `
-        if (paymentWithBooking && paymentWithBooking.length > 0) {
-          bookingId = paymentWithBooking[0].booking_id
-          console.log(`✅ Found booking_id from payment for order: ${bookingId}`)
-        }
-      }
-    }
-    
-    // Method 2: Match by Customer + Location + Service Variation + Time
-    if (!bookingId && customerId && locationId) {
-      // Get service_variation_id from order line items
-      const lineItems = await prisma.$queryRaw`
-        SELECT DISTINCT service_variation_id
-        FROM order_line_items
-        WHERE order_id = ${orderUuid}::uuid
-          AND service_variation_id IS NOT NULL
-        LIMIT 5
-      `
-      
-      if (lineItems && lineItems.length > 0) {
-        // Time window: 7 days before order, 1 day after
-        const startWindow = new Date(orderCreatedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
-        const endWindow = new Date(orderCreatedAt.getTime() + 1 * 24 * 60 * 60 * 1000)
-        
-        // Determine if location is UUID or square_location_id
-        let squareLocationId = null
-        let locationUuid = null
-        if (locationId && locationId.length < 36) {
-          // It's a square_location_id
-          squareLocationId = locationId
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:764',message:'location lookup by square_id',data:{squareLocationId,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          const loc = await prisma.$queryRaw`
-            SELECT id FROM locations 
-            WHERE square_location_id = ${locationId}
-              AND organization_id = ${organizationId}::uuid
-            LIMIT 1
-          `
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:773',message:'location lookup result',data:{found:!!loc,locationCount:loc?.length,locationUuid:loc?.[0]?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          if (loc && loc.length > 0) {
-            locationUuid = loc[0].id
-          }
-        } else {
-          // It's a UUID
-          locationUuid = locationId
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:778',message:'location lookup by uuid',data:{locationUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          const loc = await prisma.$queryRaw`
-            SELECT square_location_id FROM locations 
-            WHERE id = ${locationId}::uuid
-            LIMIT 1
-          `
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:784',message:'location lookup result',data:{found:!!loc,locationCount:loc?.length,squareLocationId:loc?.[0]?.square_location_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          if (loc && loc.length > 0) {
-            squareLocationId = loc[0].square_location_id
-          }
-        }
-        
-        for (const lineItem of lineItems) {
-          let matchingBookings = null
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:789',message:'attempting service variation match',data:{serviceVariationId:lineItem.service_variation_id,customerId,squareLocationId,locationUuid,startWindow:startWindow.toISOString(),endWindow:endWindow.toISOString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          
-          if (squareLocationId) {
-            try {
-              matchingBookings = await prisma.$queryRaw`
-                SELECT b.id, b.start_at
-                FROM bookings b
-                INNER JOIN locations l ON l.id::text = b.location_id::text
-                INNER JOIN service_variation sv ON sv.uuid = b.service_variation_id
-                WHERE b.customer_id = ${customerId}
-                  AND l.square_location_id = ${squareLocationId}
-                  AND sv.square_variation_id = ${lineItem.service_variation_id}
-                  AND b.start_at >= ${startWindow}::timestamp
-                  AND b.start_at <= ${endWindow}::timestamp
-                ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
-                LIMIT 1
-              `
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:803',message:'service variation match result (square_id)',data:{matchCount:matchingBookings?.length,bookingId:matchingBookings?.[0]?.id,error:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-              // #endregion
-            } catch (sqlError) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:805',message:'service variation match SQL error (square_id)',data:{error:sqlError.message,code:sqlError.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-              // #endregion
-              throw sqlError
-            }
-          } else if (locationUuid) {
-            try {
-              matchingBookings = await prisma.$queryRaw`
-                SELECT b.id, b.start_at
-                FROM bookings b
-                INNER JOIN service_variation sv ON sv.uuid = b.service_variation_id
-                WHERE b.customer_id = ${customerId}
-                  AND b.location_id::text = ${locationUuid}::text
-                  AND sv.square_variation_id = ${lineItem.service_variation_id}
-                  AND b.start_at >= ${startWindow}::timestamp
-                  AND b.start_at <= ${endWindow}::timestamp
-                ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
-                LIMIT 1
-              `
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:818',message:'service variation match result (uuid)',data:{matchCount:matchingBookings?.length,bookingId:matchingBookings?.[0]?.id,error:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-              // #endregion
-            } catch (sqlError) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:820',message:'service variation match SQL error (uuid)',data:{error:sqlError.message,code:sqlError.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-              // #endregion
-              throw sqlError
-            }
-          }
-          
-          if (matchingBookings && matchingBookings.length > 0) {
-            bookingId = matchingBookings[0].id
-            console.log(`✅ Matched booking by service variation: ${bookingId}`)
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:825',message:'match found',data:{bookingId,serviceVariationId:lineItem.service_variation_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
-            break
-          }
-        }
-        
-        // Method 3: Fallback to Customer + Location + Time (if no service match)
-        if (!bookingId) {
-          const startWindow = new Date(orderCreatedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
-          const endWindow = new Date(orderCreatedAt.getTime() + 1 * 24 * 60 * 60 * 1000)
-          
-          let fallbackBookings = null
-          if (squareLocationId) {
-            fallbackBookings = await prisma.$queryRaw`
-              SELECT b.id, b.start_at
-              FROM bookings b
-              INNER JOIN locations l ON l.id::text = b.location_id::text
-              WHERE b.customer_id = ${customerId}
-                AND l.square_location_id = ${squareLocationId}
-                AND b.start_at >= ${startWindow}::timestamp
-                AND b.start_at <= ${endWindow}::timestamp
-              ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
-              LIMIT 1
-            `
-          } else if (locationUuid) {
-            fallbackBookings = await prisma.$queryRaw`
-              SELECT b.id, b.start_at
-              FROM bookings b
-              WHERE b.customer_id = ${customerId}
-                AND b.location_id::text = ${locationUuid}::text
-                AND b.start_at >= ${startWindow}::timestamp
-                AND b.start_at <= ${endWindow}::timestamp
-              ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
-              LIMIT 1
-            `
-          }
-          
-          if (fallbackBookings && fallbackBookings.length > 0) {
-            bookingId = fallbackBookings[0].id
-            console.log(`✅ Matched booking by customer+location+time: ${bookingId}`)
-          }
-        }
-      }
-    }
-    
-    // Method 4: Square API fallback - call Square Bookings API to find booking
-    // This catches bookings that weren't in our database (missed webhooks, historical bookings)
-    let bookingLinkSource = 'derived_via_database'
-    let bookingLinkConfidence = 'high'
-    
+    // ============================================================
+    // PRIMARY METHOD: Square API
+    // ============================================================
     if (!bookingId && orderId) {
-      console.log(`🔄 [RECONCILE] Database matching failed, trying Square API for order ${orderId}`)
+      console.log(`🔄 [RECONCILE] Trying Square API for order ${orderId}...`)
       
       const squareResult = await deriveBookingFromSquareApi(orderId)
       
       if (squareResult.bookingId) {
-        // Square API returned a booking, but it's a Square booking ID (not our UUID)
-        // We need to find or create the booking in our database
-        
-        // First, check if this booking already exists in our database
+        // Square API returned a booking ID - find or create in our database
         const existingBooking = await prisma.$queryRaw`
           SELECT id FROM bookings 
           WHERE booking_id = ${squareResult.bookingId}
@@ -1628,7 +1421,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
           bookingId = existingBooking[0].id
           console.log(`✅ [RECONCILE] Found existing booking in DB: ${bookingId}`)
         } else {
-          // Booking not in our database - try to fetch and save it
+          // Booking not in database - fetch and save it
           console.log(`📥 [RECONCILE] Booking ${squareResult.bookingId} not in DB, fetching from Square...`)
           try {
             const bookingsApi = getBookingsApi()
@@ -1636,7 +1429,6 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
             const squareBooking = bookingResponse.result?.booking
             
             if (squareBooking) {
-              // Save booking to database
               const newBookingId = squareBooking.id
               const bookingCustomerId = squareBooking.customerId
               const bookingLocationId = squareBooking.locationId
@@ -1644,7 +1436,6 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
               const bookingVersion = squareBooking.version
               const bookingStartAt = squareBooking.startAt ? new Date(squareBooking.startAt) : null
               
-              // Get organization_id from location
               let bookingOrgId = organizationId
               if (!bookingOrgId && bookingLocationId) {
                 bookingOrgId = await resolveOrganizationIdFromLocationId(bookingLocationId)
@@ -1667,7 +1458,6 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
                 RETURNING id
               `
               
-              // Get the UUID of the inserted/updated booking
               const insertedBooking = await prisma.$queryRaw`
                 SELECT id FROM bookings WHERE booking_id = ${newBookingId} LIMIT 1
               `
@@ -1684,8 +1474,85 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
         bookingLinkSource = squareResult.source
         bookingLinkConfidence = squareResult.confidence
       } else {
-        console.log(`ℹ️ [RECONCILE] Square API also found no matching booking for order ${orderId}`)
-        console.log(`   Reason: ${squareResult.source}`)
+        console.log(`ℹ️ [RECONCILE] Square API found no booking. Reason: ${squareResult.source}`)
+      }
+    }
+    
+    // ============================================================
+    // FALLBACK METHOD: Database Customer + Location + Time
+    // ============================================================
+    if (!bookingId && customerId && locationId) {
+      console.log(`🔄 [RECONCILE] Square API failed, trying database fallback...`)
+      
+      // Time window: 7 days before order, 1 day after
+      const startWindow = new Date(orderCreatedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
+      const endWindow = new Date(orderCreatedAt.getTime() + 1 * 24 * 60 * 60 * 1000)
+      
+      // Determine if location is UUID or square_location_id
+      let squareLocationId = null
+      let locationUuid = null
+      
+      if (locationId && locationId.length < 36) {
+        // It's a square_location_id
+        squareLocationId = locationId
+        const loc = await prisma.$queryRaw`
+          SELECT id FROM locations 
+          WHERE square_location_id = ${locationId}
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        if (loc && loc.length > 0) {
+          locationUuid = loc[0].id
+        }
+      } else {
+        // It's a UUID
+        locationUuid = locationId
+        const loc = await prisma.$queryRaw`
+          SELECT square_location_id FROM locations 
+          WHERE id = ${locationId}::uuid
+          LIMIT 1
+        `
+        if (loc && loc.length > 0) {
+          squareLocationId = loc[0].square_location_id
+        }
+      }
+      
+      // Find booking by customer + location + time
+      let fallbackBookings = null
+      if (squareLocationId) {
+        fallbackBookings = await prisma.$queryRaw`
+          SELECT b.id, b.start_at
+          FROM bookings b
+          INNER JOIN locations l ON l.id::text = b.location_id::text
+          WHERE b.customer_id = ${customerId}
+            AND l.square_location_id = ${squareLocationId}
+            AND b.start_at >= ${startWindow}::timestamp
+            AND b.start_at <= ${endWindow}::timestamp
+          ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
+          LIMIT 1
+        `
+      } else if (locationUuid) {
+        fallbackBookings = await prisma.$queryRaw`
+          SELECT b.id, b.start_at
+          FROM bookings b
+          WHERE b.customer_id = ${customerId}
+            AND b.location_id::text = ${locationUuid}::text
+            AND b.start_at >= ${startWindow}::timestamp
+            AND b.start_at <= ${endWindow}::timestamp
+          ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
+          LIMIT 1
+        `
+      }
+      
+      if (fallbackBookings && fallbackBookings.length > 0) {
+        bookingId = fallbackBookings[0].id
+        bookingLinkSource = 'database_fallback'
+        bookingLinkConfidence = 'medium'
+        console.log(`✅ [RECONCILE] Matched booking by customer+location+time: ${bookingId}`)
+      } else {
+        console.log(`ℹ️ [RECONCILE] Database fallback also found no booking`)
+        bookingLinkSource = 'no_match'
+        bookingLinkConfidence = 'none'
       }
     }
     
