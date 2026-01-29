@@ -1027,6 +1027,30 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       }
     }
 
+    // Look up team member UUID from Square team_member_id
+    // The administrator_id field expects an internal UUID, not Square's team_member_id
+    const squareTeamMemberId = getValue(paymentData, 'teamMemberId', 'team_member_id') || 
+                               getValue(paymentData, 'employeeId', 'employee_id') || null
+    let administratorUuid = null
+    if (squareTeamMemberId && organizationId) {
+      try {
+        const teamMember = await prisma.$queryRaw`
+          SELECT id FROM team_members 
+          WHERE square_team_member_id = ${squareTeamMemberId}
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        if (teamMember && teamMember.length > 0) {
+          administratorUuid = teamMember[0].id
+          console.log(`✅ Resolved administrator UUID from team_member_id ${squareTeamMemberId}: ${administratorUuid}`)
+        } else {
+          console.log(`ℹ️ Team member ${squareTeamMemberId} not found in database (will save payment without administrator_id)`)
+        }
+      } catch (teamMemberErr) {
+        console.warn(`⚠️ Could not look up team member UUID: ${teamMemberErr.message}`)
+      }
+    }
+
     // Build payment record (exactly matching schema and backfill script)
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:714',message:'payment record - before build',data:{paymentId,hasPaymentIdField:false,idValue:paymentId,idType:'Square ID string'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
@@ -1064,10 +1088,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         ? new Date(getValue(paymentData, 'delayedUntil', 'delayed_until'))
         : null,
       
-      // Staff/Team Member
-      administrator_id: getValue(paymentData, 'teamMemberId', 'team_member_id') || 
-                        getValue(paymentData, 'employeeId', 'employee_id') ||
-                        null,
+      // Staff/Team Member - use resolved UUID (looked up above from team_members table)
+      administrator_id: administratorUuid,
       
       // Application details
       application_details_square_product: appDetails.squareProduct || appDetails.square_product || null,
