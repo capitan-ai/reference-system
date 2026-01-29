@@ -710,6 +710,21 @@ model OrderLineItem {
   order_total_card_surcharge_money_amount   Int?
   order_total_card_surcharge_money_currency String? @default("USD")
 
+  // ===== RECIPIENT/CUSTOMER FIELDS (from fulfillment) =====
+  recipient_name                             String? // Display name from fulfillment
+  recipient_email                            String? // Email from fulfillment
+  recipient_phone                            String? // Phone from fulfillment
+  shipping_address_line_1                    String? // Street address
+  shipping_address_line_2                    String? // Apt, suite, etc.
+  shipping_locality                          String? // City
+  shipping_administrative_district_level_1   String? // State/Province
+  shipping_postal_code                       String? // ZIP/Postal code
+  shipping_country                           String? // Country code (US, etc.)
+
+  // ===== FULFILLMENT INFO =====
+  fulfillment_type  String? // SHIPMENT, PICKUP, DELIVERY
+  fulfillment_state String? // PROPOSED, RESERVED, PREPARED, COMPLETED, CANCELED, FAILED
+
   // ===== TIMESTAMPS =====
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
