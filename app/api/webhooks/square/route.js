@@ -912,7 +912,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       try {
         // Get location UUID from square_location_id
         const locationRecord = await prisma.$queryRaw`
-          SELECT id FROM locations 
+          SELECT id::text as id FROM locations 
           WHERE square_location_id = ${locationId}
             AND organization_id = ${organizationId}::uuid
           LIMIT 1
@@ -983,7 +983,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
 
     // Get location UUID from square_location_id
     const locationRecord = await prisma.$queryRaw`
-      SELECT id FROM locations 
+      SELECT id::text as id FROM locations 
       WHERE square_location_id = ${locationId}
         AND organization_id = ${organizationId}::uuid
       LIMIT 1
@@ -1518,7 +1518,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
         // It's a square_location_id
         squareLocationId = locationId
         const loc = await prisma.$queryRaw`
-          SELECT id FROM locations 
+          SELECT id::text as id FROM locations 
           WHERE square_location_id = ${locationId}
             AND organization_id = ${organizationId}::uuid
           LIMIT 1
@@ -1963,7 +1963,7 @@ async function processOrderWebhook(webhookData, eventType) {
     if (finalLocationId) {
       try {
         const locationRecord = await prisma.$queryRaw`
-          SELECT id FROM locations 
+          SELECT id::text as id FROM locations 
           WHERE square_location_id = ${finalLocationId}
             AND organization_id = ${organizationId}::uuid
           LIMIT 1
