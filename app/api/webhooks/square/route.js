@@ -1844,21 +1844,13 @@ async function processOrderWebhook(webhookData, eventType) {
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:locationId?.substring(0,16)||'missing',orderLocationId:orderLocationId?.substring(0,16)||'missing',finalLocationId:finalLocationId?.substring(0,16)||'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
 
-    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
+    // Resolve organization_id - For order.created/updated, merchant_id is ALWAYS present
+    // STEP 1: Resolve organization_id from merchant_id FIRST (source of truth from Square)
     let organizationId = null
     
-    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
-    if (finalLocationId) {
-      console.log(`📍 Resolving organization_id from location_id: ${finalLocationId}`)
-      organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
-      if (organizationId) {
-        console.log(`✅ Resolved organization_id from location: ${organizationId.substring(0, 8)}...`)
-      }
-    }
-    
-    // STEP 2: Fallback to merchant_id (if location lookup failed)
-    if (!organizationId && merchantId) {
+    if (merchantId) {
       try {
+        console.log(`📍 Resolving organization_id from merchant_id: ${merchantId}`)
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
           WHERE square_merchant_id = ${merchantId}
@@ -1874,8 +1866,17 @@ async function processOrderWebhook(webhookData, eventType) {
         console.error(`❌ Error resolving organization_id from merchant_id: ${err.message}`)
         console.error(`   Stack: ${err.stack}`)
       }
-    } else if (!organizationId && !merchantId) {
-      console.warn(`⚠️ Order ${orderId} missing merchant_id`)
+    } else {
+      console.warn(`⚠️ Order ${orderId} missing merchant_id - this should not happen for order.created/updated webhooks`)
+    }
+    
+    // STEP 2: Fallback to location_id (if merchant_id lookup failed)
+    if (!organizationId && finalLocationId) {
+      console.log(`📍 Fallback: Resolving organization_id from location_id: ${finalLocationId}`)
+      organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from location (fallback): ${organizationId.substring(0, 8)}...`)
+      }
     }
 
     // Location lookup already done above (STEP 1), no need to duplicate
@@ -1969,69 +1970,211 @@ async function processOrderWebhook(webhookData, eventType) {
     let locationUuid = null
     if (finalLocationId) {
       try {
-        const locationRecord = await prisma.$queryRaw`
-          SELECT id::text as id FROM locations 
+        console.log(`🔍 Looking up location: square_location_id=${finalLocationId}, organization_id=${organizationId}`)
+        
+        // STEP 1: Try to find location by square_location_id AND organization_id
+        let locationRecord = await prisma.$queryRaw`
+          SELECT id::text as id, organization_id::text as organization_id FROM locations 
           WHERE square_location_id = ${finalLocationId}
             AND organization_id = ${organizationId}::uuid
           LIMIT 1
         `
+        console.log(`🔍 Query result: ${locationRecord?.length || 0} rows found`)
+        if (locationRecord && locationRecord.length > 0) {
+          console.log(`   Found location: id=${locationRecord[0].id}, organization_id=${locationRecord[0].organization_id}`)
+        }
         locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
         
-        // If location doesn't exist, create it
+        // STEP 2: If not found, try to find by square_location_id only (in case organization_id is NULL or different)
         if (!locationUuid) {
-          const newLocation = await prisma.location.create({
-            data: {
-              organization_id: organizationId,
-              square_location_id: finalLocationId,
-              name: `Location ${finalLocationId.substring(0, 8)}...`
+          console.log(`🔍 Location not found with organization_id filter, trying without organization_id filter...`)
+          locationRecord = await prisma.$queryRaw`
+            SELECT id::text as id, organization_id::text as organization_id FROM locations 
+            WHERE square_location_id = ${finalLocationId}
+            LIMIT 1
+          `
+          console.log(`🔍 Fallback query result: ${locationRecord?.length || 0} rows found`)
+          
+          if (locationRecord && locationRecord.length > 0) {
+            const existingLocation = locationRecord[0]
+            const existingOrgId = existingLocation.organization_id ? String(existingLocation.organization_id).trim().toLowerCase() : null
+            const expectedOrgId = organizationId ? String(organizationId).trim().toLowerCase() : null
+            
+            console.log(`   Found location (without org filter): id=${existingLocation.id}`)
+            console.log(`   Existing organization_id: ${existingOrgId || 'NULL'}`)
+            console.log(`   Expected organization_id: ${expectedOrgId || 'NULL'}`)
+            
+            locationUuid = existingLocation.id
+            
+            // If found but organization_id is NULL or different, update it
+            // Normalize both UUIDs (trim, lowercase) for comparison
+            const needsUpdate = !existingOrgId || existingOrgId !== expectedOrgId
+            
+            if (needsUpdate) {
+              console.log(`📍 Updating location ${locationUuid}`)
+              console.log(`   Changing organization_id from: ${existingOrgId || 'NULL'}`)
+              console.log(`   To: ${expectedOrgId || 'NULL'}`)
+              await prisma.$executeRaw`
+                UPDATE locations 
+                SET organization_id = ${organizationId}::uuid,
+                    updated_at = NOW()
+                WHERE id = ${locationUuid}::uuid
+              `
+              console.log(`✅ Updated location with correct organization_id`)
+            } else {
+              console.log(`✅ Location found with matching organization_id (normalized comparison)`)
             }
-          })
-          locationUuid = newLocation.id
+          } else {
+            console.log(`⚠️ Location not found even without organization_id filter`)
+          }
+        }
+        
+        // STEP 3: If still not found, try to create it
+        if (!locationUuid) {
+          try {
+            const newLocation = await prisma.location.create({
+              data: {
+                organization_id: organizationId,
+                square_location_id: finalLocationId,
+                name: `Location ${finalLocationId.substring(0, 8)}...`
+              }
+            })
+            locationUuid = newLocation.id
+            console.log(`✅ Created new location ${locationUuid} for square_location_id ${finalLocationId}`)
+          } catch (createErr) {
+            // If creation fails due to unique constraint (race condition), retry lookup
+            if (createErr.code === 'P2002' || createErr.message?.includes('unique') || createErr.message?.includes('duplicate')) {
+              console.log(`⚠️ Location creation failed (likely race condition), retrying lookup...`)
+              const retryRecord = await prisma.$queryRaw`
+                SELECT id::text as id FROM locations 
+                WHERE square_location_id = ${finalLocationId}
+                  AND organization_id = ${organizationId}::uuid
+                LIMIT 1
+              `
+              locationUuid = retryRecord && retryRecord.length > 0 ? retryRecord[0].id : null
+              
+              if (!locationUuid) {
+                // Last resort: find by square_location_id only
+                const fallbackRecord = await prisma.$queryRaw`
+                  SELECT id::text as id FROM locations 
+                  WHERE square_location_id = ${finalLocationId}
+                  LIMIT 1
+                `
+                locationUuid = fallbackRecord && fallbackRecord.length > 0 ? fallbackRecord[0].id : null
+              }
+            } else {
+              throw createErr // Re-throw if it's a different error
+            }
+          }
+        }
+        
+        if (locationUuid) {
+          console.log(`✅ Resolved location UUID: ${locationUuid} for square_location_id: ${finalLocationId}`)
+        } else {
+          console.warn(`⚠️ Could not resolve location UUID for square_location_id: ${finalLocationId}`)
         }
       } catch (err) {
-        console.warn(`⚠️ Could not get/create location: ${err.message}`)
+        console.error(`❌ Error getting/creating location: ${err.message}`)
+        console.error(`   Stack: ${err.stack}`)
+        // Don't set locationUuid to null here - let it remain null so order can be saved without location_id
       }
     }
 
     // 1. Save/update the order in the orders table
     let orderUuid = null
     let orderSaveError = null
+    
+    // Validate locationUuid - must be null or a valid UUID string
+    if (locationUuid && typeof locationUuid !== 'string') {
+      console.warn(`⚠️ Invalid locationUuid type: ${typeof locationUuid}, setting to null`)
+      locationUuid = null
+    }
+    if (locationUuid && locationUuid.trim() === '') {
+      console.warn(`⚠️ Empty locationUuid string, setting to null`)
+      locationUuid = null
+    }
+    
+    // Log location UUID before inserting order
+    console.log(`📦 Preparing to save order ${orderId}`)
+    console.log(`   locationUuid: ${locationUuid || 'NULL'} (type: ${typeof locationUuid})`)
+    console.log(`   organizationId: ${organizationId}`)
+    
     try {
-      await prisma.$executeRaw`
-        INSERT INTO orders (
-          id,
-          organization_id,
-          order_id,
-          location_id,
-          customer_id,
-          state,
-          version,
-          reference_id,
-          created_at,
-          updated_at,
-          raw_json
-        ) VALUES (
-          gen_random_uuid(),
-          ${organizationId}::uuid,
-          ${orderId},
-          ${locationUuid}::uuid,
-          ${customerId},
-          ${orderState || order.state || null},
-          ${order.version ? Number(order.version) : null},
-          ${order.reference_id || null},
-          ${order.created_at ? new Date(order.created_at) : new Date()},
-          ${order.updated_at ? new Date(order.updated_at) : new Date()},
-          ${safeStringify(order)}::jsonb
-        )
-        ON CONFLICT (organization_id, order_id) DO UPDATE SET
-          location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
-          customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-          state = COALESCE(EXCLUDED.state, orders.state),
-          version = COALESCE(EXCLUDED.version, orders.version),
-          reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-          updated_at = EXCLUDED.updated_at,
-          raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-      `
+      // Build SQL with conditional location_id handling
+      // Use template literal approach but handle NULL properly
+      if (locationUuid) {
+        await prisma.$executeRaw`
+          INSERT INTO orders (
+            id,
+            organization_id,
+            order_id,
+            location_id,
+            customer_id,
+            state,
+            version,
+            reference_id,
+            created_at,
+            updated_at,
+            raw_json
+          ) VALUES (
+            gen_random_uuid(),
+            ${organizationId}::uuid,
+            ${orderId},
+            ${locationUuid}::uuid,
+            ${customerId},
+            ${orderState || order.state || null},
+            ${order.version ? Number(order.version) : null},
+            ${order.reference_id || null},
+            ${order.created_at ? new Date(order.created_at) : new Date()},
+            ${order.updated_at ? new Date(order.updated_at) : new Date()},
+            ${safeStringify(order)}::jsonb
+          )
+          ON CONFLICT (organization_id, order_id) DO UPDATE SET
+            location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
+            customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+            state = COALESCE(EXCLUDED.state, orders.state),
+            version = COALESCE(EXCLUDED.version, orders.version),
+            reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+            updated_at = EXCLUDED.updated_at,
+            raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+        `
+      } else {
+        await prisma.$executeRaw`
+          INSERT INTO orders (
+            id,
+            organization_id,
+            order_id,
+            location_id,
+            customer_id,
+            state,
+            version,
+            reference_id,
+            created_at,
+            updated_at,
+            raw_json
+          ) VALUES (
+            gen_random_uuid(),
+            ${organizationId}::uuid,
+            ${orderId},
+            NULL,
+            ${customerId},
+            ${orderState || order.state || null},
+            ${order.version ? Number(order.version) : null},
+            ${order.reference_id || null},
+            ${order.created_at ? new Date(order.created_at) : new Date()},
+            ${order.updated_at ? new Date(order.updated_at) : new Date()},
+            ${safeStringify(order)}::jsonb
+          )
+          ON CONFLICT (organization_id, order_id) DO UPDATE SET
+            location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
+            customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+            state = COALESCE(EXCLUDED.state, orders.state),
+            version = COALESCE(EXCLUDED.version, orders.version),
+            reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+            updated_at = EXCLUDED.updated_at,
+            raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+        `
+      }
       console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
     } catch (orderError) {
       orderSaveError = orderError
@@ -2061,41 +2204,79 @@ async function processOrderWebhook(webhookData, eventType) {
       // Last resort: try to create order with explicit UUID
       try {
         const newOrderUuid = crypto.randomUUID()
-        await prisma.$executeRaw`
-          INSERT INTO orders (
-            id,
-            organization_id,
-            order_id,
-            location_id,
-            customer_id,
-            state,
-            version,
-            reference_id,
-            created_at,
-            updated_at,
-            raw_json
-          ) VALUES (
-            ${newOrderUuid}::uuid,
-            ${organizationId}::uuid,
-            ${orderId},
-            ${locationUuid}::uuid,
-            ${customerId},
-            ${orderState || order.state || null},
-            ${order.version ? Number(order.version) : null},
-            ${order.reference_id || null},
-            ${order.created_at ? new Date(order.created_at) : new Date()},
-            ${order.updated_at ? new Date(order.updated_at) : new Date()},
-            ${safeStringify(order)}::jsonb
-          )
-          ON CONFLICT (organization_id, order_id) DO UPDATE SET
-            location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
-            customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-            state = COALESCE(EXCLUDED.state, orders.state),
-            version = COALESCE(EXCLUDED.version, orders.version),
-            reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-            updated_at = EXCLUDED.updated_at,
-            raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-        `
+        if (locationUuid) {
+          await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              customer_id,
+              state,
+              version,
+              reference_id,
+              created_at,
+              updated_at,
+              raw_json
+            ) VALUES (
+              ${newOrderUuid}::uuid,
+              ${organizationId}::uuid,
+              ${orderId},
+              ${locationUuid}::uuid,
+              ${customerId},
+              ${orderState || order.state || null},
+              ${order.version ? Number(order.version) : null},
+              ${order.reference_id || null},
+              ${order.created_at ? new Date(order.created_at) : new Date()},
+              ${order.updated_at ? new Date(order.updated_at) : new Date()},
+              ${safeStringify(order)}::jsonb
+            )
+            ON CONFLICT (organization_id, order_id) DO UPDATE SET
+              location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
+              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+              state = COALESCE(EXCLUDED.state, orders.state),
+              version = COALESCE(EXCLUDED.version, orders.version),
+              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              updated_at = EXCLUDED.updated_at,
+              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+          `
+        } else {
+          await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              customer_id,
+              state,
+              version,
+              reference_id,
+              created_at,
+              updated_at,
+              raw_json
+            ) VALUES (
+              ${newOrderUuid}::uuid,
+              ${organizationId}::uuid,
+              ${orderId},
+              NULL,
+              ${customerId},
+              ${orderState || order.state || null},
+              ${order.version ? Number(order.version) : null},
+              ${order.reference_id || null},
+              ${order.created_at ? new Date(order.created_at) : new Date()},
+              ${order.updated_at ? new Date(order.updated_at) : new Date()},
+              ${safeStringify(order)}::jsonb
+            )
+            ON CONFLICT (organization_id, order_id) DO UPDATE SET
+              location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
+              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+              state = COALESCE(EXCLUDED.state, orders.state),
+              version = COALESCE(EXCLUDED.version, orders.version),
+              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              updated_at = EXCLUDED.updated_at,
+              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+          `
+        }
         orderUuid = newOrderUuid
         console.log(`✅ Successfully created order with UUID: ${orderUuid}`)
       } catch (retryError) {
