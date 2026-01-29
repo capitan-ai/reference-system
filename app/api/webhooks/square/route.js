@@ -2361,3 +2361,6 @@ async function processOrderWebhook(webhookData, eventType) {
     throw error
   }
 }
+
+// Export processOrderWebhook for use in referrals route
+export { processOrderWebhook }

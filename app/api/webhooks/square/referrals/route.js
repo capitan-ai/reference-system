@@ -9,6 +9,25 @@ const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-
 // Since this is a CommonJS file, we'll use a simpler approach: directly call the function
 // by requiring the module and accessing the export
 let savePaymentToDatabase = null
+let processOrderWebhook = null
+
+async function getProcessOrderWebhook() {
+  if (!processOrderWebhook) {
+    try {
+      const mainWebhookRoute = await import('../route.js')
+      processOrderWebhook = mainWebhookRoute.processOrderWebhook
+      if (!processOrderWebhook) {
+        console.error('❌ processOrderWebhook not found in imported module')
+        console.error('   Available exports:', Object.keys(mainWebhookRoute || {}))
+      }
+    } catch (importError) {
+      console.error(`❌ Error importing processOrderWebhook: ${importError.message}`)
+      return null
+    }
+  }
+  return processOrderWebhook
+}
+
 async function getSavePaymentToDatabase() {
   // #region agent log
   fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:12',message:'getSavePaymentToDatabase called',data:{hasCached:!!savePaymentToDatabase},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
@@ -5516,6 +5535,40 @@ export async function POST(request) {
           correlationId,
           paymentId: paymentResourceId
         }, { status: 202 })
+      }
+    }
+
+    // Process order.created and order.updated events
+    if (webhookData.type === 'order.created' || webhookData.type === 'order.updated') {
+      console.log(`📦 Order ${webhookData.type === 'order.created' ? 'created' : 'updated'} event received`)
+      try {
+        const processOrder = await getProcessOrderWebhook()
+        if (processOrder) {
+          await processOrder(webhookData.data, webhookData.type)
+          console.log(`✅ Order webhook processed successfully`)
+          return Response.json({
+            success: true,
+            message: `Order ${webhookData.type} processed`,
+            eventType: webhookData.type
+          })
+        } else {
+          console.error('❌ processOrderWebhook function not available')
+          return Response.json({
+            success: false,
+            message: 'Order processing unavailable',
+            eventType: webhookData.type
+          }, { status: 500 })
+        }
+      } catch (orderError) {
+        console.error(`❌ Error processing order webhook:`, orderError.message)
+        console.error('Stack:', orderError.stack)
+        // Return 200 to acknowledge receipt but log the error
+        return Response.json({
+          success: false,
+          message: `Order processing error: ${orderError.message}`,
+          eventType: webhookData.type,
+          acknowledged: true
+        })
       }
     }
 
