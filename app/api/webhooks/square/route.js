@@ -1,6 +1,13 @@
 import crypto from 'crypto'
 import prisma from '../../../../lib/prisma-client'
 
+// Helper to safely stringify objects with BigInt values
+function safeStringify(value) {
+  return JSON.stringify(value, (_key, val) => 
+    typeof val === 'bigint' ? val.toString() : val
+  )
+}
+
 // Import square-env using dynamic require inside function to avoid webpack static analysis
 function getSquareEnvironmentName() {
   // eslint-disable-next-line global-require
@@ -2014,7 +2021,7 @@ async function processOrderWebhook(webhookData, eventType) {
           ${order.reference_id || null},
           ${order.created_at ? new Date(order.created_at) : new Date()},
           ${order.updated_at ? new Date(order.updated_at) : new Date()},
-          ${JSON.stringify(order)}::jsonb
+          ${safeStringify(order)}::jsonb
         )
         ON CONFLICT (organization_id, order_id) DO UPDATE SET
           location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
@@ -2078,7 +2085,7 @@ async function processOrderWebhook(webhookData, eventType) {
             ${order.reference_id || null},
             ${order.created_at ? new Date(order.created_at) : new Date()},
             ${order.updated_at ? new Date(order.updated_at) : new Date()},
-            ${JSON.stringify(order)}::jsonb
+            ${safeStringify(order)}::jsonb
           )
           ON CONFLICT (organization_id, order_id) DO UPDATE SET
             location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
