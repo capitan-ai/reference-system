@@ -2094,6 +2094,27 @@ async function processOrderWebhook(webhookData, eventType) {
       locationUuid = null
     }
     
+    // Verify location exists in database before using it (prevent foreign key constraint violations)
+    if (locationUuid) {
+      try {
+        const locationVerify = await prisma.$queryRaw`
+          SELECT id FROM locations 
+          WHERE id = ${locationUuid}::uuid
+          LIMIT 1
+        `
+        if (!locationVerify || locationVerify.length === 0) {
+          console.warn(`⚠️ Location UUID ${locationUuid} does not exist in database, setting to null`)
+          locationUuid = null
+        } else {
+          console.log(`✅ Verified location UUID ${locationUuid} exists in database`)
+        }
+      } catch (verifyError) {
+        console.error(`❌ Error verifying location UUID: ${verifyError.message}`)
+        console.warn(`⚠️ Setting locationUuid to null due to verification error`)
+        locationUuid = null
+      }
+    }
+    
     // Log location UUID before inserting order
     console.log(`📦 Preparing to save order ${orderId}`)
     console.log(`   locationUuid: ${locationUuid || 'NULL'} (type: ${typeof locationUuid})`)
@@ -2180,6 +2201,52 @@ async function processOrderWebhook(webhookData, eventType) {
       orderSaveError = orderError
       console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
       console.error(`   Stack:`, orderError.stack)
+      
+      // If foreign key constraint error on location_id, retry without location_id
+      if (orderError.code === '23503' && orderError.message?.includes('location_id_fkey') && locationUuid) {
+        console.warn(`⚠️ Foreign key constraint violation on location_id, retrying without location_id...`)
+        try {
+          await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              customer_id,
+              state,
+              version,
+              reference_id,
+              created_at,
+              updated_at,
+              raw_json
+            ) VALUES (
+              gen_random_uuid(),
+              ${organizationId}::uuid,
+              ${orderId},
+              NULL,
+              ${customerId},
+              ${orderState || order.state || null},
+              ${order.version ? Number(order.version) : null},
+              ${order.reference_id || null},
+              ${order.created_at ? new Date(order.created_at) : new Date()},
+              ${order.updated_at ? new Date(order.updated_at) : new Date()},
+              ${safeStringify(order)}::jsonb
+            )
+            ON CONFLICT (organization_id, order_id) DO UPDATE SET
+              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+              state = COALESCE(EXCLUDED.state, orders.state),
+              version = COALESCE(EXCLUDED.version, orders.version),
+              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              updated_at = EXCLUDED.updated_at,
+              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+          `
+          console.log(`✅ Saved order ${orderId} without location_id (retry after FK constraint error)`)
+          orderSaveError = null // Clear error since retry succeeded
+        } catch (retryError) {
+          console.error(`❌ Retry without location_id also failed:`, retryError.message)
+          // Continue processing - try to get existing order UUID
+        }
+      }
       // Continue processing - try to get existing order UUID
     }
 
@@ -2205,41 +2272,84 @@ async function processOrderWebhook(webhookData, eventType) {
       try {
         const newOrderUuid = crypto.randomUUID()
         if (locationUuid) {
-          await prisma.$executeRaw`
-            INSERT INTO orders (
-              id,
-              organization_id,
-              order_id,
-              location_id,
-              customer_id,
-              state,
-              version,
-              reference_id,
-              created_at,
-              updated_at,
-              raw_json
-            ) VALUES (
-              ${newOrderUuid}::uuid,
-              ${organizationId}::uuid,
-              ${orderId},
-              ${locationUuid}::uuid,
-              ${customerId},
-              ${orderState || order.state || null},
-              ${order.version ? Number(order.version) : null},
-              ${order.reference_id || null},
-              ${order.created_at ? new Date(order.created_at) : new Date()},
-              ${order.updated_at ? new Date(order.updated_at) : new Date()},
-              ${safeStringify(order)}::jsonb
-            )
-            ON CONFLICT (organization_id, order_id) DO UPDATE SET
-              location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
-              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-              state = COALESCE(EXCLUDED.state, orders.state),
-              version = COALESCE(EXCLUDED.version, orders.version),
-              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-              updated_at = EXCLUDED.updated_at,
-              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-          `
+          try {
+            await prisma.$executeRaw`
+              INSERT INTO orders (
+                id,
+                organization_id,
+                order_id,
+                location_id,
+                customer_id,
+                state,
+                version,
+                reference_id,
+                created_at,
+                updated_at,
+                raw_json
+              ) VALUES (
+                ${newOrderUuid}::uuid,
+                ${organizationId}::uuid,
+                ${orderId},
+                ${locationUuid}::uuid,
+                ${customerId},
+                ${orderState || order.state || null},
+                ${order.version ? Number(order.version) : null},
+                ${order.reference_id || null},
+                ${order.created_at ? new Date(order.created_at) : new Date()},
+                ${order.updated_at ? new Date(order.updated_at) : new Date()},
+                ${safeStringify(order)}::jsonb
+              )
+              ON CONFLICT (organization_id, order_id) DO UPDATE SET
+                location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
+                customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+                state = COALESCE(EXCLUDED.state, orders.state),
+                version = COALESCE(EXCLUDED.version, orders.version),
+                reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+                updated_at = EXCLUDED.updated_at,
+                raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+            `
+          } catch (fkError) {
+            // If foreign key constraint error, retry without location_id
+            if (fkError.code === '23503' && fkError.message?.includes('location_id_fkey')) {
+              console.warn(`⚠️ Foreign key constraint violation on location_id in retry, using NULL instead...`)
+              await prisma.$executeRaw`
+                INSERT INTO orders (
+                  id,
+                  organization_id,
+                  order_id,
+                  location_id,
+                  customer_id,
+                  state,
+                  version,
+                  reference_id,
+                  created_at,
+                  updated_at,
+                  raw_json
+                ) VALUES (
+                  ${newOrderUuid}::uuid,
+                  ${organizationId}::uuid,
+                  ${orderId},
+                  NULL,
+                  ${customerId},
+                  ${orderState || order.state || null},
+                  ${order.version ? Number(order.version) : null},
+                  ${order.reference_id || null},
+                  ${order.created_at ? new Date(order.created_at) : new Date()},
+                  ${order.updated_at ? new Date(order.updated_at) : new Date()},
+                  ${safeStringify(order)}::jsonb
+                )
+                ON CONFLICT (organization_id, order_id) DO UPDATE SET
+                  customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+                  state = COALESCE(EXCLUDED.state, orders.state),
+                  version = COALESCE(EXCLUDED.version, orders.version),
+                  reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+                  updated_at = EXCLUDED.updated_at,
+                  raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+              `
+            } else {
+              throw fkError // Re-throw if it's a different error
+            }
+          }
         } else {
           await prisma.$executeRaw`
             INSERT INTO orders (
