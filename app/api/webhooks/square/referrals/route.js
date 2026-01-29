@@ -1155,6 +1155,7 @@ async function completePromotionOrderPayment(orderId, amountMoney, locationId, r
 async function saveGiftCardToDatabase(giftCardData) {
   try {
     const {
+      organization_id,
       square_customer_id,
       square_gift_card_id,
       gift_card_gan,
@@ -1170,6 +1171,43 @@ async function saveGiftCardToDatabase(giftCardData) {
       state
     } = giftCardData
 
+    // Resolve organization_id if not provided - look up from customer
+    let orgId = organization_id
+    if (!orgId && square_customer_id) {
+      try {
+        const customer = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${square_customer_id}
+          LIMIT 1
+        `
+        if (customer && customer.length > 0) {
+          orgId = customer[0].organization_id
+        }
+      } catch (lookupErr) {
+        console.warn(`⚠️ Could not look up organization_id for customer ${square_customer_id}: ${lookupErr.message}`)
+      }
+    }
+    
+    // If still no organization_id, try to get from default organization
+    if (!orgId) {
+      try {
+        const defaultOrg = await prisma.$queryRaw`
+          SELECT id FROM organizations WHERE is_active = true ORDER BY created_at LIMIT 1
+        `
+        if (defaultOrg && defaultOrg.length > 0) {
+          orgId = defaultOrg[0].id
+          console.log(`ℹ️ Using default organization for gift card: ${orgId}`)
+        }
+      } catch (defaultOrgErr) {
+        console.warn(`⚠️ Could not get default organization: ${defaultOrgErr.message}`)
+      }
+    }
+    
+    if (!orgId) {
+      console.error(`❌ Cannot save gift card: organization_id is required but could not be resolved`)
+      return null
+    }
+
     // Upsert gift card record
     const giftCard = await prisma.giftCard.upsert({
       where: { square_gift_card_id },
@@ -1184,6 +1222,7 @@ async function saveGiftCardToDatabase(giftCardData) {
         updated_at: new Date()
       },
       create: {
+        organization_id: orgId,
         square_customer_id,
         square_gift_card_id,
         gift_card_gan,
