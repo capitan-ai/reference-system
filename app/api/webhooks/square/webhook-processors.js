@@ -36,24 +36,31 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
   console.log(`[WEBHOOK-PROCESSOR] Processing booking ${bookingId} for customer ${customerId}`)
 
   try {
-    // Resolve organization from location
+    // Resolve organization and location UUID from square_location_id
     let organizationId = null
+    let locationUuid = null
     if (locationId) {
       const location = await prisma.$queryRaw`
-        SELECT organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
+        SELECT id, organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
       `
-      if (location?.[0]?.organization_id) {
+      if (location?.[0]) {
         organizationId = location[0].organization_id
+        locationUuid = location[0].id
       }
     }
+    
+    if (!organizationId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Could not resolve organization for location ${locationId}`)
+      return
+    }
 
-    // Insert or update booking
+    // Insert or update booking (location_id is internal UUID)
     await prisma.$executeRaw`
       INSERT INTO bookings (
-        organization_id, booking_id, customer_id, location_id, status, version,
+        id, organization_id, booking_id, customer_id, location_id, status, version,
         created_at, updated_at, raw_json
       ) VALUES (
-        ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationId}, ${status}, ${version || 1},
+        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
         NOW(), NOW(), ${JSON.stringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
@@ -103,13 +110,27 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
   console.log(`[WEBHOOK-PROCESSOR] Processing customer ${customerId}: ${givenName} ${familyName}`)
 
   try {
+    // Get default organization for new customers
+    let organizationId = null
+    const defaultOrg = await prisma.$queryRaw`
+      SELECT id FROM organizations WHERE is_active = true ORDER BY created_at LIMIT 1
+    `
+    if (defaultOrg?.[0]?.id) {
+      organizationId = defaultOrg[0].id
+    }
+    
+    if (!organizationId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ No organization found, skipping customer ${customerId}`)
+      return
+    }
+
     // Insert or update customer in square_existing_clients
     await prisma.$executeRaw`
       INSERT INTO square_existing_clients (
-        square_customer_id, given_name, family_name, email_address, phone_number,
+        organization_id, square_customer_id, given_name, family_name, email_address, phone_number,
         created_at, updated_at
       ) VALUES (
-        ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
+        ${organizationId}::uuid, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
         NOW(), NOW()
       )
       ON CONFLICT (square_customer_id) DO UPDATE SET
@@ -130,6 +151,8 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
 /**
  * Process payment.updated webhook
  * Updates payment status in database
+ * NOTE: This is a simplified version for the cron retry system.
+ * The main webhook route's savePaymentToDatabase is more comprehensive.
  */
 export async function processPaymentUpdated(payload, eventId, eventCreatedAt) {
   console.log(`[WEBHOOK-PROCESSOR] processPaymentUpdated called for event ${eventId}`)
@@ -146,35 +169,44 @@ export async function processPaymentUpdated(payload, eventId, eventCreatedAt) {
   const customerId = paymentData.customer_id || paymentData.customerId
   const locationId = paymentData.location_id || paymentData.locationId
   const amountMoney = paymentData.amount_money || paymentData.amountMoney || {}
+  const totalMoney = paymentData.total_money || paymentData.totalMoney || amountMoney
 
   console.log(`[WEBHOOK-PROCESSOR] Processing payment ${paymentId} status: ${status}`)
 
   try {
-    // Resolve organization from location
+    // Resolve organization and location UUID from square_location_id
     let organizationId = null
+    let locationUuid = null
     if (locationId) {
       const location = await prisma.$queryRaw`
-        SELECT organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
+        SELECT id, organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
       `
-      if (location?.[0]?.organization_id) {
+      if (location?.[0]) {
         organizationId = location[0].organization_id
+        locationUuid = location[0].id
       }
     }
+    
+    if (!organizationId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Could not resolve organization for location ${locationId}`)
+      return
+    }
 
-    // Update payment in database
+    // Update payment in database with correct column names
     await prisma.$executeRaw`
       INSERT INTO payments (
-        organization_id, payment_id, order_id, customer_id, location_id, status,
-        amount_cents, currency, created_at, updated_at, raw_json
+        id, organization_id, payment_id, customer_id, location_id, status,
+        amount_money_amount, amount_money_currency, total_money_amount, total_money_currency,
+        event_type, created_at, updated_at
       ) VALUES (
-        ${organizationId}::uuid, ${paymentId}, ${orderId}, ${customerId}, ${locationId}, ${status},
+        gen_random_uuid(), ${organizationId}::uuid, ${paymentId}, ${customerId}, ${locationUuid}::uuid, ${status},
         ${Number(amountMoney.amount || 0)}, ${amountMoney.currency || 'USD'},
-        NOW(), NOW(), ${JSON.stringify(paymentData)}::jsonb
+        ${Number(totalMoney.amount || 0)}, ${totalMoney.currency || 'USD'},
+        'payment.updated', NOW(), NOW()
       )
       ON CONFLICT (organization_id, payment_id) DO UPDATE SET
         status = EXCLUDED.status,
-        updated_at = NOW(),
-        raw_json = EXCLUDED.raw_json
+        updated_at = NOW()
     `
 
     console.log(`[WEBHOOK-PROCESSOR] ✅ Saved payment ${paymentId}`)
@@ -220,14 +252,45 @@ export async function processGiftCardActivityCreated(payload, eventId, eventCrea
       amountCents = -Number(activityData.adjust_decrement_activity_details.amount_money?.amount || 0)
     }
 
+    // Look up the internal gift_card_id from gift_cards table
+    let internalGiftCardId = null
+    if (giftCardId) {
+      const gcRecord = await prisma.$queryRaw`
+        SELECT id FROM gift_cards WHERE square_gift_card_id = ${giftCardId} LIMIT 1
+      `
+      if (gcRecord?.[0]?.id) {
+        internalGiftCardId = gcRecord[0].id
+      }
+    }
+    // Fallback: try by GAN if no match by ID
+    if (!internalGiftCardId && giftCardGan) {
+      const gcByGan = await prisma.$queryRaw`
+        SELECT id FROM gift_cards WHERE gift_card_gan = ${giftCardGan} LIMIT 1
+      `
+      if (gcByGan?.[0]?.id) {
+        internalGiftCardId = gcByGan[0].id
+      }
+    }
+
+    if (!internalGiftCardId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Gift card not found in database: ${giftCardId || giftCardGan}`)
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Skipping transaction insert - gift card needs to be created first`)
+      return
+    }
+
+    // Get balance info from activity data
+    const balanceAfterCents = activityData.gift_card_balance_money 
+      ? Number(activityData.gift_card_balance_money.amount || 0)
+      : null
+
     // Insert gift card transaction
     await prisma.$executeRaw`
       INSERT INTO gift_card_transactions (
-        id, gift_card_id, gift_card_gan, transaction_type, amount_cents,
-        square_activity_id, location_id, created_at
+        id, gift_card_id, transaction_type, amount_cents, balance_after_cents,
+        square_activity_id, reason, created_at
       ) VALUES (
-        gen_random_uuid(), ${giftCardId}, ${giftCardGan}, ${activityType}, ${amountCents},
-        ${activityId}, ${locationId}, NOW()
+        gen_random_uuid(), ${internalGiftCardId}::uuid, ${activityType}, ${amountCents}, ${balanceAfterCents},
+        ${activityId}, 'WEBHOOK', NOW()
       )
       ON CONFLICT (square_activity_id) DO NOTHING
     `
@@ -336,6 +399,7 @@ export async function processGiftCardUpdated(payload, eventId, eventCreatedAt) {
 /**
  * Process refund.created webhook
  * Tracks refunds (may need to reverse referral rewards)
+ * NOTE: No refunds table exists yet - just logging for now
  */
 export async function processRefundCreated(payload, eventId, eventCreatedAt) {
   console.log(`[WEBHOOK-PROCESSOR] processRefundCreated called for event ${eventId}`)
@@ -351,43 +415,26 @@ export async function processRefundCreated(payload, eventId, eventCreatedAt) {
   const orderId = refundData.order_id || refundData.orderId
   const status = refundData.status
   const amountMoney = refundData.amount_money || refundData.amountMoney || {}
-  const locationId = refundData.location_id || refundData.locationId
 
   console.log(`[WEBHOOK-PROCESSOR] Processing refund ${refundId} for payment ${paymentId}`)
+  console.log(`[WEBHOOK-PROCESSOR] Refund amount: $${(Number(amountMoney.amount || 0) / 100).toFixed(2)} ${amountMoney.currency || 'USD'}`)
+  console.log(`[WEBHOOK-PROCESSOR] Refund status: ${status}`)
 
   try {
-    // Resolve organization from location
-    let organizationId = null
-    if (locationId) {
-      const location = await prisma.$queryRaw`
-        SELECT organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
-      `
-      if (location?.[0]?.organization_id) {
-        organizationId = location[0].organization_id
-      }
-    }
-
-    // Insert refund record
-    await prisma.$executeRaw`
-      INSERT INTO refunds (
-        organization_id, refund_id, payment_id, order_id, status,
-        amount_cents, currency, location_id, created_at, updated_at, raw_json
-      ) VALUES (
-        ${organizationId}::uuid, ${refundId}, ${paymentId}, ${orderId}, ${status},
-        ${Number(amountMoney.amount || 0)}, ${amountMoney.currency || 'USD'},
-        ${locationId}, NOW(), NOW(), ${JSON.stringify(refundData)}::jsonb
-      )
-      ON CONFLICT (organization_id, refund_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        updated_at = NOW(),
-        raw_json = EXCLUDED.raw_json
-    `
-
-    console.log(`[WEBHOOK-PROCESSOR] ✅ Saved refund ${refundId}`)
+    // NOTE: No refunds table exists in the current schema
+    // For now, just log the refund details
+    // TODO: Create refunds table if we need to track refund history
+    console.log(`[WEBHOOK-PROCESSOR] ⚠️ Refunds table not implemented - logging refund ${refundId} only`)
+    console.log(`[WEBHOOK-PROCESSOR] Refund details: order=${orderId}, payment=${paymentId}, amount=${amountMoney.amount}`)
     
-    // TODO: Consider reversing referral rewards if applicable
+    // In the future, we could:
+    // 1. Reverse referral rewards if the refund is for a first-time customer payment
+    // 2. Update gift card balances if gift cards were used
+    // For now, this is handled by Square directly
+
+    console.log(`[WEBHOOK-PROCESSOR] ✅ Logged refund ${refundId} (no DB insert - table not implemented)`)
   } catch (error) {
-    console.error(`[WEBHOOK-PROCESSOR] ❌ Error saving refund ${refundId}:`, error.message)
+    console.error(`[WEBHOOK-PROCESSOR] ❌ Error processing refund ${refundId}:`, error.message)
     throw error
   }
 }
@@ -433,16 +480,27 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
       }
     }
 
-    // Update order in database
+    // Resolve location UUID from square_location_id
+    let locationUuid = null
+    if (locationId && organizationId) {
+      const locRecord = await prisma.$queryRaw`
+        SELECT id FROM locations WHERE square_location_id = ${locationId} AND organization_id = ${organizationId}::uuid LIMIT 1
+      `
+      if (locRecord?.[0]?.id) {
+        locationUuid = locRecord[0].id
+      }
+    }
+
+    // Update order in database (column is order_id not square_order_id)
     await prisma.$executeRaw`
       INSERT INTO orders (
-        organization_id, square_order_id, location_id, customer_id, state,
+        id, organization_id, order_id, location_id, customer_id, state,
         created_at, updated_at, raw_json
       ) VALUES (
-        ${organizationId}::uuid, ${orderId}, ${locationId}, ${customerId}, ${state},
+        gen_random_uuid(), ${organizationId}::uuid, ${orderId}, ${locationUuid}::uuid, ${customerId}, ${state},
         NOW(), NOW(), ${JSON.stringify(orderData)}::jsonb
       )
-      ON CONFLICT (organization_id, square_order_id) DO UPDATE SET
+      ON CONFLICT (organization_id, order_id) DO UPDATE SET
         state = EXCLUDED.state,
         customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
         updated_at = NOW(),
@@ -479,20 +537,34 @@ export async function processTeamMemberCreated(payload, eventId, eventCreatedAt)
   console.log(`[WEBHOOK-PROCESSOR] Processing team member ${teamMemberId}: ${givenName} ${familyName}`)
 
   try {
-    // Insert or update technician
+    // Get default organization for team members
+    let organizationId = null
+    const defaultOrg = await prisma.$queryRaw`
+      SELECT id FROM organizations WHERE is_active = true ORDER BY created_at LIMIT 1
+    `
+    if (defaultOrg?.[0]?.id) {
+      organizationId = defaultOrg[0].id
+    }
+    
+    if (!organizationId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ No organization found, skipping team member ${teamMemberId}`)
+      return
+    }
+
+    // Insert or update team member (table is team_members, not technicians)
     await prisma.$executeRaw`
-      INSERT INTO technicians (
-        id, square_team_member_id, given_name, family_name, email_address, phone_number, status,
+      INSERT INTO team_members (
+        id, organization_id, square_team_member_id, given_name, family_name, email_address, phone_number, status,
         created_at, updated_at
       ) VALUES (
-        gen_random_uuid(), ${teamMemberId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber}, ${status},
+        gen_random_uuid(), ${organizationId}::uuid, ${teamMemberId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber}, ${status},
         NOW(), NOW()
       )
-      ON CONFLICT (square_team_member_id) DO UPDATE SET
-        given_name = COALESCE(EXCLUDED.given_name, technicians.given_name),
-        family_name = COALESCE(EXCLUDED.family_name, technicians.family_name),
-        email_address = COALESCE(EXCLUDED.email_address, technicians.email_address),
-        phone_number = COALESCE(EXCLUDED.phone_number, technicians.phone_number),
+      ON CONFLICT (organization_id, square_team_member_id) DO UPDATE SET
+        given_name = COALESCE(EXCLUDED.given_name, team_members.given_name),
+        family_name = COALESCE(EXCLUDED.family_name, team_members.family_name),
+        email_address = COALESCE(EXCLUDED.email_address, team_members.email_address),
+        phone_number = COALESCE(EXCLUDED.phone_number, team_members.phone_number),
         status = EXCLUDED.status,
         updated_at = NOW()
     `
