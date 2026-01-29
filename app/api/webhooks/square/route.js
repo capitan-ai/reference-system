@@ -1808,7 +1808,7 @@ async function processOrderWebhook(webhookData, eventType) {
     const orderState = orderMetadata.state
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:776',message:'Extracted locationId from webhook metadata',data:{orderId,locationId:locationId||'missing',orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1807',message:'Extracted locationId from webhook metadata',data:{orderId,locationId:locationId||'missing',orderState,orderMetadataKeys:Object.keys(orderMetadata||{})},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
     // #endregion
 
     console.log(`📦 Fetching full order details for order ${orderId} (state: ${orderState})`)
@@ -1979,6 +1979,9 @@ async function processOrderWebhook(webhookData, eventType) {
     
     try {
       console.log(`🔍 Looking up location: square_location_id=${finalLocationId}, organization_id=${organizationId}`)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1981',message:'Starting location lookup',data:{finalLocationId,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       
       // STEP 1: Try to find location by square_location_id AND organization_id (correct match)
       let locationRecord = await prisma.$queryRaw`
@@ -1988,9 +1991,15 @@ async function processOrderWebhook(webhookData, eventType) {
         LIMIT 1
       `
       console.log(`🔍 Query result: ${locationRecord?.length || 0} rows found`)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1992',message:'Location lookup STEP 1 result',data:{finalLocationId,organizationId,orderId,rowsFound:locationRecord?.length||0,locationUuid:locationRecord?.[0]?.id,foundOrgId:locationRecord?.[0]?.organization_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       if (locationRecord && locationRecord.length > 0) {
         locationUuid = locationRecord[0].id
         console.log(`✅ Found location: id=${locationUuid}, organization_id=${locationRecord[0].organization_id}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1996',message:'Location found in STEP 1',data:{finalLocationId,organizationId,orderId,locationUuid,locationUuidType:typeof locationUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
       }
       
       // STEP 2: If not found, try to find by square_location_id only (might need org update)
@@ -2095,6 +2104,9 @@ async function processOrderWebhook(webhookData, eventType) {
           throw new Error(`Location ${locationUuid} does not exist or does not belong to organization ${organizationId}`)
         }
         console.log(`✅ Verified location UUID ${locationUuid} exists and belongs to organization ${organizationId}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2097',message:'Location verified after resolution',data:{locationUuid,organizationId,orderId,finalLocationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
       } else {
         throw new Error(`Failed to resolve location UUID for square_location_id: ${finalLocationId}`)
       }
@@ -2123,8 +2135,46 @@ async function processOrderWebhook(webhookData, eventType) {
     console.log(`   locationUuid: ${locationUuid} (type: ${typeof locationUuid})`)
     console.log(`   organizationId: ${organizationId}`)
     
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2124',message:'Before order insert - locationUuid value',data:{locationUuid,locationUuidType:typeof locationUuid,locationUuidLength:locationUuid?.length,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
+    // Pre-insert verification: Check location exists right before insert
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2128',message:'Pre-insert location check starting',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      const preInsertCheck = await prisma.$queryRaw`
+        SELECT id::text as id, organization_id::text as organization_id FROM locations 
+        WHERE id = ${locationUuid}::uuid
+          AND organization_id = ${organizationId}::uuid
+        LIMIT 1
+      `
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2135',message:'Pre-insert location check result',data:{locationUuid,organizationId,orderId,found:preInsertCheck?.length>0,locationId:preInsertCheck?.[0]?.id,locationOrgId:preInsertCheck?.[0]?.organization_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      if (!preInsertCheck || preInsertCheck.length === 0) {
+        console.error(`❌ CRITICAL: Location ${locationUuid} does not exist right before insert!`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2140',message:'Location missing before insert - FK will fail',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        throw new Error(`Location ${locationUuid} does not exist right before insert - this will cause FK constraint violation`)
+      } else {
+        console.log(`✅ Pre-insert check: Location ${locationUuid} exists`)
+      }
+    } catch (preCheckError) {
+      console.error(`❌ Pre-insert location check failed:`, preCheckError.message)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2147',message:'Pre-insert check error',data:{locationUuid,organizationId,orderId,error:preCheckError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      throw preCheckError
+    }
+    
     try {
       // Insert order with location_id (always required)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2152',message:'About to execute INSERT with location_id',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       await prisma.$executeRaw`
         INSERT INTO orders (
           id,
@@ -2161,13 +2211,38 @@ async function processOrderWebhook(webhookData, eventType) {
           raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
       `
       console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2162',message:'Order INSERT succeeded',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
     } catch (orderError) {
       orderSaveError = orderError
       console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
       console.error(`   Stack:`, orderError.stack)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2167',message:'Order INSERT failed',data:{orderId,locationUuid,organizationId,errorCode:orderError.code,errorMessage:orderError.message,isFKError:orderError.code==='23503'&&orderError.message?.includes('location_id_fkey')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       
       // If foreign key constraint error, the location resolution failed - this should not happen
       if (orderError.code === '23503' && orderError.message?.includes('location_id_fkey')) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2172',message:'FK constraint violation detected',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
+        // Final check: Does location exist NOW (after error)?
+        try {
+          const postErrorCheck = await prisma.$queryRaw`
+            SELECT id::text as id FROM locations WHERE id = ${locationUuid}::uuid LIMIT 1
+          `
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2178',message:'Post-error location check',data:{orderId,locationUuid,organizationId,locationExists:postErrorCheck?.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          if (!postErrorCheck || postErrorCheck.length === 0) {
+            console.error(`❌ Location ${locationUuid} does NOT exist after FK error - transaction isolation issue!`)
+          } else {
+            console.error(`⚠️ Location ${locationUuid} EXISTS after FK error - this is very strange!`)
+          }
+        } catch (checkErr) {
+          console.error(`❌ Error checking location after FK error:`, checkErr.message)
+        }
         throw new Error(`Foreign key constraint violation: location ${locationUuid} does not exist. This indicates a bug in location resolution logic.`)
       }
       // Continue processing - try to get existing order UUID
