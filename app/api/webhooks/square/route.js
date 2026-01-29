@@ -2146,7 +2146,13 @@ async function processOrderWebhook(webhookData, eventType) {
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2128',message:'Starting transaction for order insert',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
       // #endregion
       
+      console.log(`🔄 Starting transaction for order insert with location_id: ${locationUuid}`)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2149',message:'About to start transaction',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      
       await prisma.$transaction(async (tx) => {
+        console.log(`🔍 [TX] Checking location within transaction: ${locationUuid}`)
         // Verify location exists within the same transaction
         const locationCheck = await tx.$queryRaw`
           SELECT id::text as id, organization_id::text as organization_id FROM locations 
@@ -2155,54 +2161,131 @@ async function processOrderWebhook(webhookData, eventType) {
           LIMIT 1
         `
         
+        console.log(`🔍 [TX] Location check result: ${locationCheck?.length || 0} rows found`)
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2137',message:'Location check within transaction',data:{locationUuid,organizationId,orderId,found:locationCheck?.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2160',message:'Location check within transaction',data:{locationUuid,organizationId,orderId,found:locationCheck?.length>0,locationId:locationCheck?.[0]?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
         // #endregion
         
         if (!locationCheck || locationCheck.length === 0) {
+          console.error(`❌ [TX] Location ${locationUuid} does not exist in transaction!`)
           throw new Error(`Location ${locationUuid} does not exist in transaction - cannot insert order`)
         }
         
+        console.log(`✅ [TX] Location verified, proceeding with INSERT`)
+        
+        // Also verify location exists using a direct FK check query
+        const fkCheck = await tx.$queryRaw`
+          SELECT l.id FROM locations l WHERE l.id = ${locationUuid}::uuid
+        `
+        console.log(`🔍 [TX] Direct FK check: ${fkCheck?.length || 0} rows found`)
+        if (!fkCheck || fkCheck.length === 0) {
+          console.error(`❌ [TX] Direct FK check failed - location ${locationUuid} not found!`)
+          // Check FK constraint definition
+          const fkDef = await tx.$queryRaw`
+            SELECT
+              tc.constraint_name,
+              kcu.column_name,
+              ccu.table_name AS foreign_table_name,
+              ccu.column_name AS foreign_column_name
+            FROM information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_name = tc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = 'orders'
+              AND kcu.column_name = 'location_id'
+          `
+          console.error(`🔍 [TX] FK constraint definition:`, JSON.stringify(fkDef, null, 2))
+          throw new Error(`Location ${locationUuid} not found in direct FK check`)
+        }
+        
+        // Verify the exact UUID format matches
+        const locationIdFromCheck = fkCheck[0]?.id
+        console.log(`🔍 [TX] Location ID from FK check: ${locationIdFromCheck} (type: ${typeof locationIdFromCheck})`)
+        console.log(`🔍 [TX] Location UUID we're using: ${locationUuid} (type: ${typeof locationUuid})`)
+        console.log(`🔍 [TX] UUIDs match: ${locationIdFromCheck === locationUuid}`)
+        
         // Insert order with location_id within the same transaction
+        console.log(`💾 [TX] Executing INSERT with location_id: ${locationUuid}`)
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2145',message:'Executing INSERT within transaction',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2177',message:'Executing INSERT within transaction',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
         // #endregion
         
-        await tx.$executeRaw`
-        INSERT INTO orders (
-          id,
-          organization_id,
-          order_id,
-          location_id,
-          customer_id,
-          state,
-          version,
-          reference_id,
-          created_at,
-          updated_at,
-          raw_json
-        ) VALUES (
-          gen_random_uuid(),
-          ${organizationId}::uuid,
-          ${orderId},
-          ${locationUuid}::uuid,
-          ${customerId},
-          ${orderState || order.state || null},
-          ${order.version ? Number(order.version) : null},
-          ${order.reference_id || null},
-          ${order.created_at ? new Date(order.created_at) : new Date()},
-          ${order.updated_at ? new Date(order.updated_at) : new Date()},
-          ${safeStringify(order)}::jsonb
-        )
-        ON CONFLICT (organization_id, order_id) DO UPDATE SET
-          location_id = EXCLUDED.location_id,
-          customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-          state = COALESCE(EXCLUDED.state, orders.state),
-          version = COALESCE(EXCLUDED.version, orders.version),
-          reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-          updated_at = EXCLUDED.updated_at,
-          raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-      `
+        // Try using Prisma's upsert instead of raw SQL to see if it handles FK better
+        console.log(`💾 [TX] Attempting to upsert order using Prisma client...`)
+        try {
+          await tx.order.upsert({
+            where: {
+              organization_id_order_id: {
+                organization_id: organizationId,
+                order_id: orderId
+              }
+            },
+            create: {
+              organization_id: organizationId,
+              order_id: orderId,
+              location_id: locationUuid,
+              customer_id: customerId,
+              state: orderState || order.state || null,
+              version: order.version ? Number(order.version) : null,
+              reference_id: order.reference_id || null,
+              created_at: order.created_at ? new Date(order.created_at) : new Date(),
+              updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+              raw_json: order
+            },
+            update: {
+              location_id: locationUuid,
+              customer_id: customerId,
+              state: orderState || order.state || null,
+              version: order.version ? Number(order.version) : null,
+              reference_id: order.reference_id || null,
+              updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+              raw_json: order
+            }
+          })
+          console.log(`✅ [TX] Order upserted successfully using Prisma client`)
+        } catch (prismaError) {
+          console.error(`❌ [TX] Prisma upsert failed:`, prismaError.message)
+          console.error(`   Error code: ${prismaError.code}`)
+          // Fallback to raw SQL
+          console.log(`🔄 [TX] Falling back to raw SQL INSERT...`)
+          await tx.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              customer_id,
+              state,
+              version,
+              reference_id,
+              created_at,
+              updated_at,
+              raw_json
+            ) VALUES (
+              gen_random_uuid(),
+              ${organizationId}::uuid,
+              ${orderId},
+              ${locationUuid}::uuid,
+              ${customerId},
+              ${orderState || order.state || null},
+              ${order.version ? Number(order.version) : null},
+              ${order.reference_id || null},
+              ${order.created_at ? new Date(order.created_at) : new Date()},
+              ${order.updated_at ? new Date(order.updated_at) : new Date()},
+              ${safeStringify(order)}::jsonb
+            )
+            ON CONFLICT (organization_id, order_id) DO UPDATE SET
+              location_id = EXCLUDED.location_id,
+              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+              state = COALESCE(EXCLUDED.state, orders.state),
+              version = COALESCE(EXCLUDED.version, orders.version),
+              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              updated_at = EXCLUDED.updated_at,
+              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+          `
+        }
         
         console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
         // #region agent log
