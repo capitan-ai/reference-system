@@ -14,6 +14,13 @@ function cleanValue(val) {
   return val
 }
 
+// Helper to safely stringify objects with BigInt values
+function safeStringify(value) {
+  return JSON.stringify(value, (_key, val) => 
+    typeof val === 'bigint' ? val.toString() : val
+  )
+}
+
 /**
  * Process booking.created webhook
  * Saves new booking to database
@@ -61,7 +68,7 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
-        NOW(), NOW(), ${JSON.stringify(bookingData)}::jsonb
+        NOW(), NOW(), ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         status = EXCLUDED.status,
@@ -492,13 +499,14 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
     }
 
     // Update order in database (column is order_id not square_order_id)
+    // Note: technician_id and administrator_id are populated later when payment arrives
     await prisma.$executeRaw`
       INSERT INTO orders (
         id, organization_id, order_id, location_id, customer_id, state,
         created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(), ${organizationId}::uuid, ${orderId}, ${locationUuid}::uuid, ${customerId}, ${state},
-        NOW(), NOW(), ${JSON.stringify(orderData)}::jsonb
+        NOW(), NOW(), ${safeStringify(orderData)}::jsonb
       )
       ON CONFLICT (organization_id, order_id) DO UPDATE SET
         state = EXCLUDED.state,

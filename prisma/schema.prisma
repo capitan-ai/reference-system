@@ -471,6 +471,8 @@ model TeamMember {
   organization                      Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   bookings_as_technician            Booking[]       @relation("BookingTechnician")
   bookings_as_administrator         Booking[]       @relation("BookingAdministrator")
+  orders_as_technician              Order[]         @relation("OrderTechnician")
+  orders_as_administrator           Order[]         @relation("OrderAdministrator")
   order_line_items_as_technician    OrderLineItem[] @relation("OrderLineItemTechnician")
   order_line_items_as_administrator OrderLineItem[] @relation("OrderLineItemAdministrator")
   payments_as_administrator         Payment[]       @relation("PaymentAdministrator")
@@ -598,6 +600,10 @@ model Order {
   customer_id     String? // Square customer ID
   booking_id      String? // Internal UUID FK to bookings.id
 
+  // ===== TEAM MEMBERS =====
+  technician_id    String? // Internal UUID FK to team_members.id (who performed the service)
+  administrator_id String? // Internal UUID FK to team_members.id (who processed the payment)
+
   // ===== ORDER FIELDS =====
   state        String? // OPEN, COMPLETED, CANCELED
   version      Int?
@@ -611,11 +617,13 @@ model Order {
   raw_json Json? // Immutable source of truth - full order object from Square API
 
   // Relations
-  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  location     Location?       @relation(fields: [location_id], references: [id])
-  booking      Booking?        @relation(fields: [booking_id], references: [id])
-  payments     Payment[]
-  line_items   OrderLineItem[]
+  organization  Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  location      Location?       @relation(fields: [location_id], references: [id])
+  booking       Booking?        @relation(fields: [booking_id], references: [id])
+  technician    TeamMember?     @relation("OrderTechnician", fields: [technician_id], references: [id])
+  administrator TeamMember?     @relation("OrderAdministrator", fields: [administrator_id], references: [id])
+  payments      Payment[]
+  line_items    OrderLineItem[]
 
   @@unique([organization_id, order_id])
   @@index([organization_id])
@@ -624,6 +632,8 @@ model Order {
   @@index([booking_id])
   @@index([order_id])
   @@index([state])
+  @@index([technician_id])
+  @@index([administrator_id])
   @@map("orders")
 }
 

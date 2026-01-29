@@ -1307,7 +1307,7 @@ async function saveGiftCardTransaction(transactionData) {
         square_payment_id,
         reason,
         context_label,
-        metadata: metadata ? JSON.parse(JSON.stringify(metadata)) : null
+        metadata: metadata ? JSON.parse(safeStringify(metadata)) : null
       }
     })
 
@@ -3406,6 +3406,26 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       }
     }
     
+    // Resolve administrator_id from creator_details.team_member_id
+    let administratorUuid = null
+    const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+    if (creatorTeamMemberId && finalOrganizationId) {
+      try {
+        const adminRecord = await prisma.$queryRaw`
+          SELECT id::text as id FROM team_members
+          WHERE square_team_member_id = ${creatorTeamMemberId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
+        if (administratorUuid) {
+          console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorUuid}`)
+        }
+      } catch (error) {
+        console.error(`❌ Error resolving administrator: ${error.message}`)
+      }
+    }
+    
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, version, customer_id, location_id, location_type, source,
@@ -3431,23 +3451,23 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${bookingData.transition_time_minutes || bookingData.transitionTimeMinutes || 0},
         ${creatorDetails.creator_type || creatorDetails.creatorType || null},
         ${creatorDetails.customer_id || creatorDetails.customerId || null},
-        ${creatorDetails.team_member_id || creatorDetails.teamMemberId || null},
+        ${administratorUuid}::uuid,
         ${address.address_line_1 || address.addressLine1 || null},
         ${address.locality || null},
         ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
         ${address.postal_code || address.postalCode || null},
-        ${serviceVariationUuid || null},
+        ${serviceVariationUuid}::uuid,
         ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
         ${segment?.duration_minutes || segment?.durationMinutes || null},
         ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
-        ${technicianUuid || null},
+        ${technicianUuid}::uuid,
         ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
         ${bookingData.customer_note || bookingData.customerNote || null},
         ${bookingData.seller_note || bookingData.sellerNote || null},
         ${finalMerchantId},
         ${bookingData.created_at || bookingData.createdAt ? new Date(bookingData.created_at || bookingData.createdAt) : new Date()}::timestamptz,
         ${bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updatedAt || bookingData.updated_at) : new Date()}::timestamptz,
-        ${JSON.stringify(bookingData)}::jsonb
+        ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         version = EXCLUDED.version,
@@ -3732,14 +3752,14 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       }
       
       if (serviceVariationVersion !== null) {
-        updateFields.push('service_variation_version = $' + (updateValues.length + 1))
+        updateFields.push('service_variation_version = $' + (updateValues.length + 1) + '::bigint')
         updateValues.push(serviceVariationVersion.toString())
       } else if (appointmentSegments.length > 0) {
         // If version is null but we have segments, try to get it from raw_json
         const firstSegment = appointmentSegments[0]
         const rawVersion = firstSegment.serviceVariationVersion || firstSegment.service_variation_version
         if (rawVersion) {
-          updateFields.push('service_variation_version = $' + (updateValues.length + 1))
+          updateFields.push('service_variation_version = $' + (updateValues.length + 1) + '::bigint')
           updateValues.push(BigInt(rawVersion).toString())
         }
       }
@@ -3749,7 +3769,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       updateValues.push(updatedAt)
       
       updateFields.push('raw_json = $' + (updateValues.length + 1) + '::jsonb')
-      updateValues.push(JSON.stringify(bookingData))
+      updateValues.push(safeStringify(bookingData))
 
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:3682',message:'preparing update query',data:{bookingUuid,updateFieldsCount:updateFields.length,updateFields:updateFields.join(','),hasVersion:version!==null,versionValue:version,hasStatus:status!==null,statusValue:status,updatedAtValue:updatedAt?.toISOString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});

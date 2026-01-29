@@ -1683,16 +1683,25 @@ async function updateOrderLineItemsWithTechnician(orderId) {
     const administratorId = paymentWithBooking[0].administrator_id || null
     console.log(`🔍 Found booking ${bookingId} for order ${orderId}`)
 
-    // Update order with booking_id if not already set
+    // Update order with booking_id, technician_id, and administrator_id if not already set
     if (bookingId) {
+      // First get the primary technician from booking
+      const bookingTech = await prisma.$queryRaw`
+        SELECT technician_id FROM bookings 
+        WHERE id = ${bookingId}::uuid AND technician_id IS NOT NULL
+        LIMIT 1
+      `
+      const technicianId = bookingTech?.[0]?.technician_id || null
+      
       await prisma.$executeRaw`
         UPDATE orders
-        SET booking_id = ${bookingId}::uuid,
+        SET booking_id = COALESCE(booking_id, ${bookingId}::uuid),
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
             updated_at = NOW()
         WHERE id = ${orderUuid}::uuid
-          AND booking_id IS NULL
       `
-      console.log(`✅ Updated order with booking_id: ${bookingId}`)
+      console.log(`✅ Updated order with booking_id: ${bookingId}, technician_id: ${technicianId}, administrator_id: ${administratorId}`)
       
       // Update order_line_items with booking_id
       await prisma.$executeRaw`
