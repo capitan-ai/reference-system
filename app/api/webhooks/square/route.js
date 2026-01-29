@@ -2279,47 +2279,89 @@ async function processOrderWebhook(webhookData, eventType) {
             })
       } else {
             console.log(`➕ [TX] Order doesn't exist, creating...`)
-            await tx.order.create({
-              data: {
-                organization_id: organizationId,
-                order_id: orderId,
-                location_id: locationUuid,
-                customer_id: customerId,
-                state: orderState || order.state || null,
-                version: order.version ? Number(order.version) : null,
-                reference_id: order.reference_id || null,
-                created_at: order.created_at ? new Date(order.created_at) : new Date(),
-                updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-                raw_json: order
-              }
+            // Verify location exists using Prisma's native method
+            const locationExists = await tx.location.findUnique({
+              where: { id: cleanLocationUuid }
             })
-          }
-            create: {
-              organization_id: organizationId,
-              order_id: orderId,
-              location_id: locationUuid,
-              customer_id: customerId,
-              state: orderState || order.state || null,
-              version: order.version ? Number(order.version) : null,
-              reference_id: order.reference_id || null,
-              created_at: order.created_at ? new Date(order.created_at) : new Date(),
-              updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-              raw_json: order
-            },
-            update: {
-              location_id: locationUuid,
-              customer_id: customerId,
-              state: orderState || order.state || null,
-              version: order.version ? Number(order.version) : null,
-              reference_id: order.reference_id || null,
-              updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-              raw_json: order
+            console.log(`🔍 [TX] Prisma location.findUnique result:`, locationExists ? 'FOUND' : 'NOT FOUND')
+            if (!locationExists) {
+              throw new Error(`Location ${cleanLocationUuid} not found using Prisma findUnique`)
             }
-          })
-          console.log(`✅ [TX] Order upserted successfully using Prisma client`)
+            console.log(`🔍 [TX] Location found via Prisma: id=${locationExists.id}, org_id=${locationExists.organization_id}`)
+            
+            // Try using Prisma's connect syntax instead of direct UUID
+            console.log(`🔍 [TX] Attempting create with location connection...`)
+            try {
+              await tx.order.create({
+                data: {
+                  organization_id: organizationId,
+                  order_id: orderId,
+                  location: {
+                    connect: { id: cleanLocationUuid }
+                  },
+                  customer_id: customerId,
+                  state: orderState || order.state || null,
+                  version: order.version ? Number(order.version) : null,
+                  reference_id: order.reference_id || null,
+                  created_at: order.created_at ? new Date(order.created_at) : new Date(),
+                  updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+                  raw_json: order
+                }
+              })
+              console.log(`✅ [TX] Order created successfully using location.connect`)
+            } catch (connectError) {
+              console.error(`❌ [TX] Location.connect failed:`, connectError.message)
+              console.error(`   Error code: ${connectError.code}`)
+              // Fallback to direct location_id
+              console.log(`🔄 [TX] Falling back to direct location_id assignment...`)
+              await tx.order.create({
+                data: {
+                  organization_id: organizationId,
+                  order_id: orderId,
+                  location_id: cleanLocationUuid,
+                  customer_id: customerId,
+                  state: orderState || order.state || null,
+                  version: order.version ? Number(order.version) : null,
+                  reference_id: order.reference_id || null,
+                  created_at: order.created_at ? new Date(order.created_at) : new Date(),
+                  updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+                  raw_json: order
+                }
+              })
+            }
+          }
+          console.log(`✅ [TX] Order created/updated successfully using Prisma client`)
         } catch (prismaError) {
-          console.error(`❌ [TX] Prisma upsert failed:`, prismaError.message)
+          console.error(`❌ [TX] Prisma create/update failed:`, prismaError.message)
           console.error(`   Error code: ${prismaError.code}`)
+          console.error(`   Error meta:`, JSON.stringify(prismaError.meta, null, 2))
+          
+          // Check FK constraint definition if it's a FK error
+          if (prismaError.code === 'P2003') {
+            console.error(`🔍 [TX] This is a foreign key constraint violation!`)
+            const fkDef = await tx.$queryRaw`
+              SELECT
+                tc.constraint_name,
+                kcu.column_name,
+                ccu.table_name AS foreign_table_name,
+                ccu.column_name AS foreign_column_name
+              FROM information_schema.table_constraints AS tc
+              JOIN information_schema.key_column_usage AS kcu
+                ON tc.constraint_name = kcu.constraint_name
+              JOIN information_schema.constraint_column_usage AS ccu
+                ON ccu.constraint_name = tc.constraint_name
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_name = 'orders'
+                AND kcu.column_name = 'location_id'
+            `
+            console.error(`🔍 [TX] FK constraint definition:`, JSON.stringify(fkDef, null, 2))
+            
+            // Try to verify location exists one more time
+            const finalLocationCheck = await tx.$queryRaw`
+              SELECT id::text as id FROM locations WHERE id = ${cleanLocationUuid}::uuid
+            `
+            console.error(`🔍 [TX] Final location check after FK error: ${finalLocationCheck?.length || 0} rows`)
+          }
           // Fallback to raw SQL with explicit UUID validation
           console.log(`🔄 [TX] Falling back to raw SQL INSERT...`)
           // cleanLocationUuid is already defined above
