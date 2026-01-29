@@ -2139,43 +2139,36 @@ async function processOrderWebhook(webhookData, eventType) {
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2124',message:'Before order insert - locationUuid value',data:{locationUuid,locationUuidType:typeof locationUuid,locationUuidLength:locationUuid?.length,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
     // #endregion
     
-    // Pre-insert verification: Check location exists right before insert
+    // Wrap location verification and order insert in a single transaction
+    // This ensures transaction isolation - location lookup and insert happen in same transaction
     try {
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2128',message:'Pre-insert location check starting',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2128',message:'Starting transaction for order insert',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
       // #endregion
-      const preInsertCheck = await prisma.$queryRaw`
-        SELECT id::text as id, organization_id::text as organization_id FROM locations 
-        WHERE id = ${locationUuid}::uuid
-          AND organization_id = ${organizationId}::uuid
-        LIMIT 1
-      `
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2135',message:'Pre-insert location check result',data:{locationUuid,organizationId,orderId,found:preInsertCheck?.length>0,locationId:preInsertCheck?.[0]?.id,locationOrgId:preInsertCheck?.[0]?.organization_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      if (!preInsertCheck || preInsertCheck.length === 0) {
-        console.error(`❌ CRITICAL: Location ${locationUuid} does not exist right before insert!`)
+      
+      await prisma.$transaction(async (tx) => {
+        // Verify location exists within the same transaction
+        const locationCheck = await tx.$queryRaw`
+          SELECT id::text as id, organization_id::text as organization_id FROM locations 
+          WHERE id = ${locationUuid}::uuid
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2140',message:'Location missing before insert - FK will fail',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2137',message:'Location check within transaction',data:{locationUuid,organizationId,orderId,found:locationCheck?.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
         // #endregion
-        throw new Error(`Location ${locationUuid} does not exist right before insert - this will cause FK constraint violation`)
-      } else {
-        console.log(`✅ Pre-insert check: Location ${locationUuid} exists`)
-      }
-    } catch (preCheckError) {
-      console.error(`❌ Pre-insert location check failed:`, preCheckError.message)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2147',message:'Pre-insert check error',data:{locationUuid,organizationId,orderId,error:preCheckError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      throw preCheckError
-    }
-    
-    try {
-      // Insert order with location_id (always required)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2152',message:'About to execute INSERT with location_id',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      await prisma.$executeRaw`
+        
+        if (!locationCheck || locationCheck.length === 0) {
+          throw new Error(`Location ${locationUuid} does not exist in transaction - cannot insert order`)
+        }
+        
+        // Insert order with location_id within the same transaction
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2145',message:'Executing INSERT within transaction',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
+        
+        await tx.$executeRaw`
         INSERT INTO orders (
           id,
           organization_id,
@@ -2210,10 +2203,15 @@ async function processOrderWebhook(webhookData, eventType) {
           updated_at = EXCLUDED.updated_at,
           raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
       `
-      console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2162',message:'Order INSERT succeeded',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
+        
+        console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2162',message:'Order INSERT succeeded within transaction',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+      }, {
+        isolationLevel: 'ReadCommitted',
+        timeout: 30000
+      })
     } catch (orderError) {
       orderSaveError = orderError
       console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
