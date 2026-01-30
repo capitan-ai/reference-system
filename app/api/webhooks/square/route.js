@@ -549,7 +549,8 @@ export async function POST(request) {
     } else if (eventData.type === 'order.created' || eventData.type === 'order.updated') {
       console.log(`📦 Order ${eventData.type === 'order.created' ? 'created' : 'updated'} event received`)
       try {
-        await processOrderWebhook(eventData.data, eventData.type)
+        // Pass merchant_id from webhook if available (for faster organization_id resolution)
+        await processOrderWebhook(eventData.data, eventData.type, eventData.merchant_id)
         console.log(`✅ Order webhook processed successfully`)
       } catch (orderError) {
         console.error(`❌ Error processing order webhook:`, orderError.message)
@@ -1791,7 +1792,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
   }
 }
 
-async function processOrderWebhook(webhookData, eventType) {
+async function processOrderWebhook(webhookData, eventType, webhookMerchantId = null) {
   try {
     // Extract order_id from webhook payload structure
     // order.created: data.object.order_created.order_id
@@ -1806,6 +1807,11 @@ async function processOrderWebhook(webhookData, eventType) {
     const orderId = orderMetadata.order_id
     const locationId = orderMetadata.location_id
     const orderState = orderMetadata.state
+    
+    console.log(`📦 Processing ${eventType} webhook for order ${orderId}`)
+    if (webhookMerchantId) {
+      console.log(`   merchant_id from webhook: ${webhookMerchantId}`)
+    }
 
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1807',message:'Extracted locationId from webhook metadata',data:{orderId,locationId:locationId||'missing',orderState,orderMetadataKeys:Object.keys(orderMetadata||{})},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
@@ -1838,7 +1844,8 @@ async function processOrderWebhook(webhookData, eventType) {
     const finalLocationId = orderLocationId || locationId || null
     const customerId = order.customer_id || order.customerId || null
     const lineItems = order.line_items || order.lineItems || []
-    const merchantId = order.merchant_id || order.merchantId || null
+    // Use merchant_id from order API response, fallback to webhook merchant_id
+    const merchantId = order.merchant_id || order.merchantId || webhookMerchantId || null
 
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:locationId?.substring(0,16)||'missing',orderLocationId:orderLocationId?.substring(0,16)||'missing',finalLocationId:finalLocationId?.substring(0,16)||'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
