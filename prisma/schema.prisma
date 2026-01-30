@@ -137,7 +137,7 @@ model DevicePassRegistration {
 model SquareExistingClient {
   id                         Int       @id @default(autoincrement())
   organization_id            String // Multi-tenant isolation
-  square_customer_id         String // Square customer ID (composite unique with organization_id below)
+  square_customer_id         String    @unique // Square customer ID (also has composite unique with organization_id below for multi-tenant)
   given_name                 String?
   family_name                String?
   email_address              String?
@@ -468,15 +468,15 @@ model TeamMember {
   updated_at DateTime @updatedAt
 
   // Relations
-  organization                      Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings_as_technician            Booking[]       @relation("BookingTechnician")
-  bookings_as_administrator         Booking[]       @relation("BookingAdministrator")
+  organization                      Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings_as_technician            Booking[]        @relation("BookingTechnician")
+  bookings_as_administrator         Booking[]        @relation("BookingAdministrator")
   booking_segments_as_technician    BookingSegment[] @relation("BookingSegmentTechnician")
-  orders_as_technician              Order[]         @relation("OrderTechnician")
-  orders_as_administrator           Order[]         @relation("OrderAdministrator")
-  order_line_items_as_technician    OrderLineItem[] @relation("OrderLineItemTechnician")
-  order_line_items_as_administrator OrderLineItem[] @relation("OrderLineItemAdministrator")
-  payments_as_administrator         Payment[]       @relation("PaymentAdministrator")
+  orders_as_technician              Order[]          @relation("OrderTechnician")
+  orders_as_administrator           Order[]          @relation("OrderAdministrator")
+  order_line_items_as_technician    OrderLineItem[]  @relation("OrderLineItemTechnician")
+  order_line_items_as_administrator OrderLineItem[]  @relation("OrderLineItemAdministrator")
+  payments_as_administrator         Payment[]        @relation("PaymentAdministrator")
 
   @@unique([organization_id, square_team_member_id])
   @@index([organization_id])
@@ -502,8 +502,8 @@ model ServiceVariation {
   updated_at DateTime @updatedAt
 
   // Relations
-  organization   Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings       Booking[]
+  organization    Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings        Booking[]
   bookingSegments BookingSegment[]
 
   @@unique([organization_id, square_id])
@@ -596,38 +596,38 @@ model Booking {
 // ============================================================================
 
 model BookingSegment {
-  id                         String   @id @default(uuid())
-  booking_id                 String
-  segment_index              Int
-  square_segment_uid         String?
+  id                          String    @id @default(uuid())
+  booking_id                  String
+  segment_index               Int
+  square_segment_uid          String?
   square_service_variation_id String?
-  service_variation_id       String?
-  service_variation_version  BigInt?
-  duration_minutes           Int?
-  intermission_minutes       Int?     @default(0)
-  square_team_member_id      String?
-  technician_id              String?
-  any_team_member            Boolean  @default(false)
-  booking_version            Int      @default(0)
-  is_active                  Boolean  @default(true)
-  deleted_at                 DateTime?
+  service_variation_id        String?
+  service_variation_version   BigInt?
+  duration_minutes            Int?
+  intermission_minutes        Int?      @default(0)
+  square_team_member_id       String?
+  technician_id               String?
+  any_team_member             Boolean   @default(false)
+  booking_version             Int       @default(0)
+  is_active                   Boolean   @default(true)
+  deleted_at                  DateTime?
   // Booking time fields (from parent booking)
   booking_created_at          DateTime? // When booking was created in Square
   booking_start_at            DateTime? // Scheduled appointment time
   // Row timestamps
-  created_at                 DateTime @default(now())
-  updated_at                 DateTime @updatedAt
+  created_at                  DateTime  @default(now())
+  updated_at                  DateTime  @updatedAt
 
-  booking         Booking         @relation(fields: [booking_id], references: [id], onDelete: Cascade)
-  technician      TeamMember?     @relation("BookingSegmentTechnician", fields: [technician_id], references: [id])
+  booking          Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  technician       TeamMember?       @relation("BookingSegmentTechnician", fields: [technician_id], references: [id])
   serviceVariation ServiceVariation? @relation(fields: [service_variation_id], references: [id])
 
+  @@unique([booking_id, segment_index, booking_version])
   @@index([booking_id])
   @@index([service_variation_id])
   @@index([square_service_variation_id])
   @@index([square_team_member_id])
   @@index([is_active])
-  @@unique([booking_id, segment_index, booking_version])
   @@map("booking_segments")
 }
 
