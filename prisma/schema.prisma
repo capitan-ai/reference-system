@@ -471,6 +471,7 @@ model TeamMember {
   organization                      Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   bookings_as_technician            Booking[]       @relation("BookingTechnician")
   bookings_as_administrator         Booking[]       @relation("BookingAdministrator")
+  booking_segments_as_technician    BookingSegment[] @relation("BookingSegmentTechnician")
   orders_as_technician              Order[]         @relation("OrderTechnician")
   orders_as_administrator           Order[]         @relation("OrderAdministrator")
   order_line_items_as_technician    OrderLineItem[] @relation("OrderLineItemTechnician")
@@ -501,8 +502,9 @@ model ServiceVariation {
   updated_at DateTime @updatedAt
 
   // Relations
-  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings     Booking[]
+  organization   Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  bookings       Booking[]
+  bookingSegments BookingSegment[]
 
   @@unique([organization_id, square_id])
   @@index([organization_id])
