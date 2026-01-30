@@ -634,24 +634,71 @@ export async function POST(request) {
       
       if (queueableEventTypes.includes(eventData.type)) {
         try {
-          // Resolve organization_id from webhook payload
+          // Resolve organization_id from webhook payload - try multiple strategies
           let organizationId = null
           const payload = eventData.data || {}
-          const locationId = payload.object?.location_id || 
-                            payload.object?.locationId || 
-                            payload.location_id || 
-                            payload.locationId ||
-                            null
+          
+          // Strategy 1: Try location_id from various payload structures
+          const locationId = 
+            payload.object?.location_id || 
+            payload.object?.locationId || 
+            payload.location_id || 
+            payload.locationId ||
+            eventData.location_id ||
+            eventData.locationId ||
+            null
           
           if (locationId) {
+            console.log(`📍 Attempting to resolve organization_id from location_id: ${locationId}`)
             organizationId = await resolveOrganizationIdFromLocationId(locationId)
-          } else if (eventData.merchant_id) {
-            // Fallback to merchant_id resolution
-            organizationId = await resolveOrganizationId(eventData.merchant_id)
+            if (organizationId) {
+              console.log(`✅ Resolved organization_id from location_id: ${organizationId}`)
+            } else {
+              console.warn(`⚠️ Failed to resolve organization_id from location_id: ${locationId}`)
+            }
+          }
+          
+          // Strategy 2: Fallback to merchant_id if location_id resolution failed
+          if (!organizationId) {
+            const merchantId = 
+              eventData.merchant_id || 
+              payload.object?.merchant_id ||
+              payload.merchant_id ||
+              null
+            
+            if (merchantId) {
+              console.log(`🏢 Attempting to resolve organization_id from merchant_id: ${merchantId}`)
+              organizationId = await resolveOrganizationId(merchantId)
+              if (organizationId) {
+                console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+              } else {
+                console.warn(`⚠️ Failed to resolve organization_id from merchant_id: ${merchantId}`)
+              }
+            }
+          }
+          
+          // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
+          if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
+            // Try nested location_id in order/booking/payment objects
+            const nestedLocationId = 
+              payload.object?.order?.location_id ||
+              payload.object?.booking?.location_id ||
+              payload.object?.payment?.location_id ||
+              null
+            
+            if (nestedLocationId) {
+              console.log(`📍 Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
+              organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
+              if (organizationId) {
+                console.log(`✅ Resolved organization_id from nested location_id: ${organizationId}`)
+              }
+            }
           }
           
           if (!organizationId) {
-            console.warn(`⚠️ Cannot enqueue ${eventData.type}: organization_id could not be resolved`)
+            console.warn(`⚠️ Cannot enqueue ${eventData.type}: organization_id could not be resolved from location_id or merchant_id`)
+            console.warn(`   Payload keys: ${Object.keys(payload).join(', ')}`)
+            console.warn(`   Event data keys: ${Object.keys(eventData).filter(k => k !== 'data').join(', ')}`)
             // Don't fail the webhook - just log the warning
           } else {
             // eslint-disable-next-line global-require
@@ -668,7 +715,7 @@ export async function POST(request) {
               organizationId: organizationId
             })
             
-            console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) for async processing`)
+            console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId}`)
             
             await queuePrisma.$disconnect()
           }
@@ -692,19 +739,65 @@ export async function POST(request) {
     // Enqueue failed webhook for retry via cron
     if (eventData?.type && eventData?.event_id) {
       try {
-        // Resolve organization_id from webhook payload
+        // Resolve organization_id from webhook payload - try multiple strategies
         let organizationId = null
         const payload = eventData.data || {}
-        const locationId = payload.object?.location_id || 
-                          payload.object?.locationId || 
-                          payload.location_id || 
-                          payload.locationId ||
-                          null
+        
+        // Strategy 1: Try location_id from various payload structures
+        const locationId = 
+          payload.object?.location_id || 
+          payload.object?.locationId || 
+          payload.location_id || 
+          payload.locationId ||
+          eventData.location_id ||
+          eventData.locationId ||
+          null
         
         if (locationId) {
+          console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from location_id: ${locationId}`)
           organizationId = await resolveOrganizationIdFromLocationId(locationId)
-        } else if (eventData.merchant_id) {
-          organizationId = await resolveOrganizationId(eventData.merchant_id)
+          if (organizationId) {
+            console.log(`✅ [ERROR HANDLER] Resolved organization_id from location_id: ${organizationId}`)
+          } else {
+            console.warn(`⚠️ [ERROR HANDLER] Failed to resolve organization_id from location_id: ${locationId}`)
+          }
+        }
+        
+        // Strategy 2: Fallback to merchant_id if location_id resolution failed
+        if (!organizationId) {
+          const merchantId = 
+            eventData.merchant_id || 
+            payload.object?.merchant_id ||
+            payload.merchant_id ||
+            null
+          
+          if (merchantId) {
+            console.log(`🏢 [ERROR HANDLER] Attempting to resolve organization_id from merchant_id: ${merchantId}`)
+            organizationId = await resolveOrganizationId(merchantId)
+            if (organizationId) {
+              console.log(`✅ [ERROR HANDLER] Resolved organization_id from merchant_id: ${organizationId}`)
+            } else {
+              console.warn(`⚠️ [ERROR HANDLER] Failed to resolve organization_id from merchant_id: ${merchantId}`)
+            }
+          }
+        }
+        
+        // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
+        if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
+          // Try nested location_id in order/booking/payment objects
+          const nestedLocationId = 
+            payload.object?.order?.location_id ||
+            payload.object?.booking?.location_id ||
+            payload.object?.payment?.location_id ||
+            null
+          
+          if (nestedLocationId) {
+            console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
+            organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
+            if (organizationId) {
+              console.log(`✅ [ERROR HANDLER] Resolved organization_id from nested location_id: ${organizationId}`)
+            }
+          }
         }
         
         if (organizationId) {
@@ -721,14 +814,14 @@ export async function POST(request) {
             error: error.message || String(error)
           })
           
+          console.log(`📦 [ERROR HANDLER] Enqueued failed webhook ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId} for retry`)
+          
           await prisma.$disconnect()
         } else {
-          console.warn(`⚠️ Cannot enqueue failed webhook ${eventData.type}: organization_id could not be resolved`)
+          console.warn(`⚠️ [ERROR HANDLER] Cannot enqueue failed webhook ${eventData.type}: organization_id could not be resolved`)
+          console.warn(`   Payload keys: ${Object.keys(payload).join(', ')}`)
+          console.warn(`   Event data keys: ${Object.keys(eventData).filter(k => k !== 'data').join(', ')}`)
         }
-        
-        console.log(`📦 Enqueued failed webhook ${eventData.type} (${eventData.event_id}) for retry`)
-        
-        await prisma.$disconnect()
       } catch (enqueueError) {
         console.error(`❌ Failed to enqueue webhook job:`, enqueueError.message)
         // Continue to return 500 so Square retries
@@ -2094,7 +2187,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       FROM payments p
       INNER JOIN orders o ON p.order_id = o.id
       WHERE o.order_id = ${orderId}
-        AND o.organization_id = ${organizationId}
+        AND o.organization_id = ${organizationId}::uuid
       LIMIT 1
     `
     
@@ -2260,7 +2353,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     // First, try to find existing order
     const existingOrder = await prisma.$queryRaw`
       SELECT id FROM orders
-      WHERE organization_id = ${organizationId}
+      WHERE organization_id = ${organizationId}::uuid
         AND order_id = ${orderId}
       LIMIT 1
     `
