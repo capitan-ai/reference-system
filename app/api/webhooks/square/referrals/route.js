@@ -3355,7 +3355,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
             updated_at
           ) VALUES (
             gen_random_uuid(),
-            ${finalOrganizationId}::uuid,
+            ${finalOrganizationId}::text,
             ${squareLocationId},
             ${locationMerchantId},
             ${locationName},
@@ -3472,7 +3472,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         merchant_id, created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(),
-        ${finalOrganizationId}::uuid,
+        ${finalOrganizationId}::text,
         ${bookingId},
         ${bookingData.version || 0},
         ${customerId},

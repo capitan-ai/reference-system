@@ -385,7 +385,7 @@ async function resolveOrganizationIdFromLocationId(squareLocationId) {
             updated_at
           ) VALUES (
             gen_random_uuid(),
-            ${orgId}::uuid,
+            ${orgId}::text,
             ${squareLocationId},
             ${merchantId},
             ${location.name || `Location ${squareLocationId.substring(0, 8)}...`},
@@ -922,7 +922,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
             created_at,
             updated_at
           ) VALUES (
-            ${organizationId}::uuid,
+            ${organizationId}::text,
             ${customerId},
             false,
             NOW(),
@@ -962,7 +962,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
               updated_at
             ) VALUES (
               gen_random_uuid(),
-              ${organizationId}::uuid,
+              ${organizationId}::text,
               ${orderId},
               ${locationUuid}::uuid,
               NOW(),
@@ -2327,7 +2327,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               raw_json
             ) VALUES (
               ${newOrderUuid}::uuid,
-              ${organizationId}::uuid,
+              ${organizationId}::text,
               ${orderId},
               ${locationUuid}::uuid,
               ${customerId},
