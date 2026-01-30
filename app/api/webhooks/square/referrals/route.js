@@ -2046,6 +2046,27 @@ async function sendReferralCodeToNewClient(
 ) {
   try {
     const locationId = options?.locationId || null
+    
+    // Resolve organization_id from locationId
+    let organizationId = null
+    if (locationId) {
+      organizationId = await resolveOrganizationIdFromLocationId(locationId)
+    }
+    
+    // Fallback: get organization_id from customer record if locationId not available
+    if (!organizationId) {
+      const orgCheck = await prisma.$queryRaw`
+        SELECT organization_id FROM square_existing_clients 
+        WHERE square_customer_id = ${customerId} 
+        LIMIT 1
+      `
+      organizationId = orgCheck?.[0]?.organization_id || null
+    }
+    
+    if (!organizationId) {
+      throw new Error(`Cannot resolve organization_id for customer ${customerId}`)
+    }
+    
     // Check if email already sent
     const customerData = await prisma.$queryRaw`
       SELECT gift_card_id, got_signup_bonus, referral_email_sent, personal_code, activated_as_referrer,
@@ -2054,6 +2075,7 @@ async function sendReferralCodeToNewClient(
              phone_number, referral_sms_sent, referral_sms_sent_at, referral_sms_sid
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     // If email already sent, skip
@@ -2223,6 +2245,7 @@ async function sendReferralCodeToNewClient(
         referral_email_sent = TRUE,
         updated_at = NOW()
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     } catch (updateError) {
       // Handle duplicate key error (race condition - code was taken between check and update)
@@ -2252,6 +2275,7 @@ async function sendReferralCodeToNewClient(
                 referral_email_sent = TRUE,
                 updated_at = NOW()
               WHERE square_customer_id = ${customerId}
+                AND organization_id = ${organizationId}::uuid
             `
             console.log(`✅ Retried with new unique code: ${referralCode}`)
             retrySuccess = true
@@ -2290,6 +2314,7 @@ async function sendReferralCodeToNewClient(
           gift_card_digital_email = ${referrerGiftCardMeta?.digitalEmail ?? null},
           updated_at = NOW()
         WHERE square_customer_id = ${customerId}
+          AND organization_id = ${organizationId}::uuid
       `
     }
     
@@ -2379,6 +2404,7 @@ async function sendReferralCodeToNewClient(
                 referral_sms_sid = ${smsResult.sid ?? null},
                 updated_at = NOW()
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
         }
       } else {
@@ -2404,10 +2430,24 @@ async function sendReferralCodeToNewClient(
 // Check if customer is new (first time booking)
 async function isNewCustomer(customerId) {
   try {
+    // First, get organization_id from customer record
+    const orgCheck = await prisma.$queryRaw`
+      SELECT organization_id FROM square_existing_clients 
+      WHERE square_customer_id = ${customerId} 
+      LIMIT 1
+    `
+    const organizationId = orgCheck?.[0]?.organization_id || null
+    
+    if (!organizationId) {
+      // Customer doesn't exist, they are new
+      return true
+    }
+    
     // Check if customer exists in our database
     const existingCustomer = await prisma.$queryRaw`
       SELECT square_customer_id FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     // If customer doesn't exist in our database, they are new
@@ -2419,6 +2459,7 @@ async function isNewCustomer(customerId) {
     const customerData = await prisma.$queryRaw`
       SELECT got_signup_bonus, activated_as_referrer FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     const customer = customerData[0]
@@ -2631,6 +2672,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
             SET referral_email_sent = TRUE,
                 updated_at = NOW()
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
           
           console.log(`✅ Referral code email sent successfully`)
@@ -2655,7 +2697,9 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     
     // Verify customer was added
     const verifyCustomer = await prisma.$queryRaw`
-      SELECT * FROM square_existing_clients WHERE square_customer_id = ${customerId}
+      SELECT * FROM square_existing_clients 
+      WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     console.log(`✅ Verification: Customer found in DB:`, verifyCustomer.length > 0)
 
@@ -2714,6 +2758,31 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       console.log(`📍 Payment attributed to location: ${paymentLocationId}`)
     }
 
+    // Resolve organization_id from payment location or customer record
+    let organizationId = null
+    if (paymentLocationId) {
+      // Try to resolve from Square location ID (need to convert friendly location ID to square location ID)
+      const squareLocationId = paymentData.location_id || paymentData.locationId
+      if (squareLocationId) {
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+      }
+    }
+    
+    // Fallback: get organization_id from customer record
+    if (!organizationId) {
+      const orgCheck = await prisma.$queryRaw`
+        SELECT organization_id FROM square_existing_clients 
+        WHERE square_customer_id = ${customerId} 
+        LIMIT 1
+      `
+      organizationId = orgCheck?.[0]?.organization_id || null
+    }
+    
+    if (!organizationId) {
+      console.warn(`⚠️ Cannot resolve organization_id for customer ${customerId}, skipping payment processing`)
+      return
+    }
+
     // Process gift card redemptions (for ALL payments, not just first payment)
     await processGiftCardRedemptions(paymentData)
 
@@ -2723,6 +2792,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
              given_name, family_name, email_address, first_payment_completed, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
 
     if (!customerData || customerData.length === 0) {
@@ -2741,6 +2811,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
           SELECT COUNT(*) as count 
           FROM square_existing_clients 
           WHERE gift_card_order_id = ${orderId}
+            AND organization_id = ${organizationId}::uuid
         `
         if (isOurOrder && isOurOrder[0]?.count > 0) {
           console.log(`⚠️ Payment ${paymentId || 'unknown'} is for our gift card order ${orderId}, skipping...`)
@@ -2777,12 +2848,21 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
         }
 
         // Check if referrer already has a gift card
+        // First get referrer's organization_id
+        const referrerOrgCheck = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${referrer.square_customer_id} 
+          LIMIT 1
+        `
+        const referrerOrganizationId = referrerOrgCheck?.[0]?.organization_id || organizationId
+        
         const referrerData = await prisma.$queryRaw`
           SELECT square_customer_id, total_rewards, gift_card_id,
                  gift_card_order_id, gift_card_line_item_uid, gift_card_delivery_channel,
                  gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email
           FROM square_existing_clients 
           WHERE square_customer_id = ${referrer.square_customer_id}
+            AND organization_id = ${referrerOrganizationId}::uuid
         `
 
         if (referrerData && referrerData.length > 0) {
@@ -2874,6 +2954,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   gift_card_pass_kit_url = ${referrerGiftCard.passKitUrl ?? null},
                   gift_card_digital_email = ${referrerGiftCard.digitalEmail ?? null}
                 WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
               `
 
               console.log(`✅ Referrer gets NEW gift card:`)
@@ -3011,6 +3092,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   gift_card_pass_kit_url = ${loadResult.passKitUrl ?? referrerInfo.gift_card_pass_kit_url ?? null},
                   gift_card_digital_email = ${loadResult.digitalEmail ?? referrerInfo.gift_card_digital_email ?? null}
                 WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
               `
 
               if (runContext?.correlationId) {
@@ -3182,6 +3264,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       UPDATE square_existing_clients 
       SET first_payment_completed = TRUE
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     }
 
@@ -4108,6 +4191,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
              personal_code, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     console.log(`   Found ${customerExists?.length || 0} customer(s) in database`)
 
@@ -4178,6 +4262,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
                  gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email
           FROM square_existing_clients 
           WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
         `
         customerExists = newCustomerData
       } catch (error) {
@@ -4193,6 +4278,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
                    personal_code, activated_as_referrer
             FROM square_existing_clients 
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
           if (retryCustomer && retryCustomer.length > 0) {
             console.log(`✅ Customer found on retry after insert error`)
@@ -4229,6 +4315,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             phone_number = COALESCE(square_existing_clients.phone_number, ${squarePhone}),
             updated_at = NOW()
           WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
         `
       }
     }
@@ -4587,6 +4674,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
               used_referral_code = ${referralCode},
               updated_at = NOW()
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
 
           console.log(`✅ Friend received $10 gift card IMMEDIATELY: ${friendGiftCard.giftCardId}`)
@@ -5185,7 +5273,8 @@ export async function POST(request) {
             eventType: 'booking.created',
             eventId: webhookData.event_id,
             eventCreatedAt: webhookData.created_at,
-            payload: webhookData.data || {}
+            payload: webhookData.data || {},
+            organizationId: organizationId
           })
 
           console.log(`📦 Enqueued booking.created (${webhookData.event_id}) for bookings persistence`)
