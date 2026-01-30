@@ -575,6 +575,7 @@ model Booking {
   payments          Payment[]
   orders            Order[]
   order_line_items  OrderLineItem[]
+  segments          BookingSegment[]
 
   @@unique([organization_id, booking_id])
   @@index([organization_id])
@@ -585,6 +586,47 @@ model Booking {
   @@index([created_at])
   @@index([booking_id])
   @@map("bookings")
+}
+
+// ============================================================================
+// BOOKING SEGMENTS TABLE
+// Stores one row per appointment segment from Square
+// ============================================================================
+
+model BookingSegment {
+  id                         String   @id @default(uuid())
+  booking_id                 String
+  segment_index              Int
+  square_segment_uid         String?
+  square_service_variation_id String?
+  service_variation_id       String?
+  service_variation_version  BigInt?
+  duration_minutes           Int?
+  intermission_minutes       Int?     @default(0)
+  square_team_member_id      String?
+  technician_id              String?
+  any_team_member            Boolean  @default(false)
+  booking_version            Int      @default(0)
+  is_active                  Boolean  @default(true)
+  deleted_at                 DateTime?
+  // Booking time fields (from parent booking)
+  booking_created_at          DateTime? // When booking was created in Square
+  booking_start_at            DateTime? // Scheduled appointment time
+  // Row timestamps
+  created_at                 DateTime @default(now())
+  updated_at                 DateTime @updatedAt
+
+  booking         Booking         @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  technician      TeamMember?     @relation("BookingSegmentTechnician", fields: [technician_id], references: [id])
+  serviceVariation ServiceVariation? @relation(fields: [service_variation_id], references: [id])
+
+  @@index([booking_id])
+  @@index([service_variation_id])
+  @@index([square_service_variation_id])
+  @@index([square_team_member_id])
+  @@index([is_active])
+  @@unique([booking_id, segment_index, booking_version])
+  @@map("booking_segments")
 }
 
 // ============================================================================

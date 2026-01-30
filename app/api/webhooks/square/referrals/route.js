@@ -1822,7 +1822,7 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     const finalBalanceCents = typeof activityBalanceNumber === 'bigint'
       ? Number(activityBalanceNumber)
       : (Number.isFinite(activityBalanceNumber) ? Number(activityBalanceNumber) : 0)
-    
+
     return {
       giftCardId,
       giftCardGan,
@@ -2213,17 +2213,17 @@ async function sendReferralCodeToNewClient(
     
     // Also update square_existing_clients for backward compatibility
     try {
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET 
-          personal_code = ${referralCode},
-          referral_url = ${referralUrl},
-          activated_as_referrer = TRUE,
-          got_signup_bonus = TRUE,
-          referral_email_sent = TRUE,
-          updated_at = NOW()
-        WHERE square_customer_id = ${customerId}
-      `
+    await prisma.$executeRaw`
+      UPDATE square_existing_clients 
+      SET 
+        personal_code = ${referralCode},
+        referral_url = ${referralUrl},
+        activated_as_referrer = TRUE,
+        got_signup_bonus = TRUE,
+        referral_email_sent = TRUE,
+        updated_at = NOW()
+      WHERE square_customer_id = ${customerId}
+    `
     } catch (updateError) {
       // Handle duplicate key error (race condition - code was taken between check and update)
       if (updateError.code === '23505' && updateError.message?.includes('personal_code')) {
@@ -2502,6 +2502,38 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
 
     console.log(`🎉 New customer detected: ${customerId}`)
 
+    // Resolve organization_id from runContext
+    let organizationId = runContext?.organizationId || runContext?.context?.organizationId || null
+
+    // If not in runContext, try to resolve from merchantId
+    if (!organizationId && runContext?.merchantId) {
+      organizationId = await resolveOrganizationId(runContext.merchantId)
+    }
+
+    // If still not available, try to get from customer's existing record (if they exist)
+    if (!organizationId) {
+      try {
+        const existingCustomer = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${customerId}
+          LIMIT 1
+        `
+        if (existingCustomer && existingCustomer.length > 0) {
+          organizationId = existingCustomer[0].organization_id
+          console.log(`✅ Resolved organization_id from existing customer record: ${organizationId}`)
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not resolve organization_id from existing customer: ${error.message}`)
+      }
+    }
+
+    if (!organizationId) {
+      console.error(`❌ Cannot create customer: organization_id is required but could not be resolved`)
+      console.error(`   Customer ID: ${customerId}`)
+      console.error(`   Merchant ID: ${runContext?.merchantId || 'missing'}`)
+      throw new Error(`Cannot create customer: organization_id is required but could not be resolved`)
+    }
+
     // 2. Generate referral code immediately when customer creates profile
     // This allows customer to start sharing their referral code right away
     const customerName = `${givenName || ''} ${familyName || ''}`.trim() || 'Customer'
@@ -2514,6 +2546,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     // 3. Add customer to database with referral code (but no gift card yet)
     await prisma.$executeRaw`
       INSERT INTO square_existing_clients (
+        organization_id,
         square_customer_id,
         given_name,
         family_name,
@@ -2529,6 +2562,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         created_at,
         updated_at
       ) VALUES (
+        ${organizationId}::uuid,
         ${customerId},
         ${givenName},
         ${familyName},
@@ -2917,7 +2951,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               // Send notification to admin about referral code usage (referrer reward)
               try {
                 await sendReferralCodeUsageNotification({
-                  referralCode: customer.used_referral_code,
+            referralCode: customer.used_referral_code,
                   customer: {
                     square_customer_id: customerId,
                     given_name: customer.given_name,
@@ -3053,7 +3087,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               // Send notification to admin about referral code usage (referrer reward - loaded)
               try {
                 await sendReferralCodeUsageNotification({
-                  referralCode: customer.used_referral_code,
+            referralCode: customer.used_referral_code,
                   customer: {
                     square_customer_id: customerId,
                     given_name: customer.given_name,
@@ -3144,11 +3178,11 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     // 4. Mark first payment as completed ONLY if there were no errors
     // This allows the client to retry processing if something failed
     if (!paymentHadError) {
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET first_payment_completed = TRUE
-        WHERE square_customer_id = ${customerId}
-      `
+    await prisma.$executeRaw`
+      UPDATE square_existing_clients 
+      SET first_payment_completed = TRUE
+      WHERE square_customer_id = ${customerId}
+    `
     }
 
     const paymentAmountCents = extractPaymentAmountCents(paymentData)
@@ -3346,7 +3380,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const locationRecord = await prisma.$queryRaw`
           SELECT id FROM locations 
           WHERE square_location_id = ${squareLocationId}
-            AND organization_id = ${finalOrganizationId}::uuid
+            AND organization_id = ${finalOrganizationId}::text
           LIMIT 1
         `
         locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
@@ -3372,7 +3406,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const svRecord = await prisma.$queryRaw`
           SELECT uuid::text as id FROM service_variation
           WHERE square_variation_id = ${squareServiceVariationId}
-            AND organization_id = ${finalOrganizationId}::uuid
+            AND organization_id = ${finalOrganizationId}::text
           LIMIT 1
         `
         serviceVariationUuid = svRecord && svRecord.length > 0 ? svRecord[0].id : null
@@ -3394,7 +3428,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const tmRecord = await prisma.$queryRaw`
           SELECT id::text as id FROM team_members
           WHERE square_team_member_id = ${squareTeamMemberId}
-            AND organization_id = ${finalOrganizationId}::uuid
+            AND organization_id = ${finalOrganizationId}::text
           LIMIT 1
         `
         technicianUuid = tmRecord && tmRecord.length > 0 ? tmRecord[0].id : null
@@ -3414,7 +3448,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const adminRecord = await prisma.$queryRaw`
           SELECT id::text as id FROM team_members
           WHERE square_team_member_id = ${creatorTeamMemberId}
-            AND organization_id = ${finalOrganizationId}::uuid
+            AND organization_id = ${finalOrganizationId}::text
           LIMIT 1
         `
         administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
@@ -3489,6 +3523,153 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
   }
 }
 
+async function ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId) {
+  const baseBookingId = bookingData.id || bookingData.bookingId
+  if (!baseBookingId) {
+    return null
+  }
+
+  const existing = await prisma.$queryRaw`
+    SELECT id FROM bookings
+    WHERE booking_id = ${baseBookingId}
+      AND organization_id = ${organizationId}::text
+    LIMIT 1
+  `
+
+  if (existing && existing.length > 0) {
+    return existing[0].id
+  }
+
+  // Create a header booking row if missing (segment-less)
+  await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
+  const created = await prisma.$queryRaw`
+    SELECT id FROM bookings
+    WHERE booking_id = ${baseBookingId}
+      AND organization_id = ${organizationId}::text
+    LIMIT 1
+  `
+
+  return created?.[0]?.id || null
+}
+
+async function upsertBookingSegments(bookingUuid, bookingData, organizationId) {
+  if (!bookingUuid) return
+
+  const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return
+  }
+
+  const bookingVersion = Number.isFinite(bookingData.version) ? bookingData.version : 0
+
+  // Soft-delete old segments when version changes
+  await prisma.$executeRaw`
+    UPDATE booking_segments
+    SET is_active = false,
+        deleted_at = NOW(),
+        updated_at = NOW()
+    WHERE booking_id = ${bookingUuid}::uuid
+      AND is_active = true
+      AND booking_version != ${bookingVersion}
+  `
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i] || {}
+    const segmentIndex = i
+    const squareServiceVariationId = segment.service_variation_id || segment.serviceVariationId || null
+    const squareTeamMemberId = segment.team_member_id || segment.teamMemberId || null
+    const squareSegmentUid = segment.segment_uid || segment.uid || segment.id || null
+
+    let serviceVariationUuid = null
+    if (squareServiceVariationId) {
+      const svRecord = await prisma.$queryRaw`
+        SELECT uuid::text as id FROM service_variation
+        WHERE square_variation_id = ${squareServiceVariationId}
+          AND organization_id = ${organizationId}::text
+        LIMIT 1
+      `
+      serviceVariationUuid = svRecord?.[0]?.id || null
+    }
+
+    let technicianUuid = null
+    if (squareTeamMemberId) {
+      const tmRecord = await prisma.$queryRaw`
+        SELECT id::text as id FROM team_members
+        WHERE square_team_member_id = ${squareTeamMemberId}
+          AND organization_id = ${organizationId}::text
+        LIMIT 1
+      `
+      technicianUuid = tmRecord?.[0]?.id || null
+    }
+
+    const anyTeamMember = segment.any_team_member ?? segment.anyTeamMember ?? false
+    const durationMinutes = segment.duration_minutes || segment.durationMinutes || null
+    const intermissionMinutes = segment.intermission_minutes || segment.intermissionMinutes || 0
+    const serviceVariationVersion = segment.service_variation_version || segment.serviceVariationVersion || null
+
+    // Extract booking times from bookingData
+    const bookingCreatedAt = bookingData.created_at || bookingData.createdAt || null
+    const bookingStartAt = bookingData.start_at || bookingData.startAt || null
+
+    await prisma.$executeRaw`
+      INSERT INTO booking_segments (
+        id,
+        booking_id,
+        segment_index,
+        square_segment_uid,
+        square_service_variation_id,
+        service_variation_id,
+        service_variation_version,
+        duration_minutes,
+        intermission_minutes,
+        square_team_member_id,
+        technician_id,
+        any_team_member,
+        booking_version,
+        booking_created_at,
+        booking_start_at,
+        is_active,
+        created_at,
+        updated_at
+      ) VALUES (
+        gen_random_uuid(),
+        ${bookingUuid}::uuid,
+        ${segmentIndex},
+        ${squareSegmentUid},
+        ${squareServiceVariationId},
+        ${serviceVariationUuid}::uuid,
+        ${serviceVariationVersion ? BigInt(serviceVariationVersion) : null},
+        ${durationMinutes},
+        ${intermissionMinutes},
+        ${squareTeamMemberId},
+        ${technicianUuid}::uuid,
+        ${anyTeamMember},
+        ${bookingVersion},
+        ${bookingCreatedAt ? new Date(bookingCreatedAt) : null}::timestamp,
+        ${bookingStartAt ? new Date(bookingStartAt) : null}::timestamp,
+        true,
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (booking_id, segment_index, booking_version) DO UPDATE SET
+        square_segment_uid = COALESCE(EXCLUDED.square_segment_uid, booking_segments.square_segment_uid),
+        square_service_variation_id = COALESCE(EXCLUDED.square_service_variation_id, booking_segments.square_service_variation_id),
+        service_variation_id = COALESCE(EXCLUDED.service_variation_id, booking_segments.service_variation_id),
+        service_variation_version = COALESCE(EXCLUDED.service_variation_version, booking_segments.service_variation_version),
+        duration_minutes = COALESCE(EXCLUDED.duration_minutes, booking_segments.duration_minutes),
+        intermission_minutes = COALESCE(EXCLUDED.intermission_minutes, booking_segments.intermission_minutes),
+        square_team_member_id = COALESCE(EXCLUDED.square_team_member_id, booking_segments.square_team_member_id),
+        technician_id = COALESCE(EXCLUDED.technician_id, booking_segments.technician_id),
+        any_team_member = COALESCE(EXCLUDED.any_team_member, booking_segments.any_team_member),
+        booking_created_at = COALESCE(EXCLUDED.booking_created_at, booking_segments.booking_created_at),
+        booking_start_at = COALESCE(EXCLUDED.booking_start_at, booking_segments.booking_start_at),
+        is_active = true,
+        deleted_at = NULL,
+        updated_at = NOW()
+    `
+  }
+}
+
 /**
  * Process booking.updated webhook event
  * Updates existing booking with new data from Square
@@ -3542,11 +3723,11 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
                         bookingData.creator_details?.customer_id || 
                         bookingData.creatorDetails?.customerId || null
       
-      if (!customerId) {
+    if (!customerId) {
         console.error(`❌ Cannot create booking: customer_id is missing from booking data`)
-        return
-      }
-      
+      return
+    }
+
       // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
       let organizationId = null
       // Extract merchantId from webhook data at this scope so it's available for saveBookingToDatabase
@@ -3596,9 +3777,9 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         console.error(`   Merchant ID: ${merchantId || 'missing'}`)
         console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
         console.error(`   Attempted: customer lookup, merchant_id lookup, location_id lookup (with Square API)`)
-        return
-      }
-      
+          return
+        }
+        
       // Save booking using the same logic as processBookingCreated
       const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
       
@@ -3612,10 +3793,13 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         }
         console.log(`✅ Created ${segments.length} booking record(s) from booking.updated webhook`)
       }
+
+      const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
+      await upsertBookingSegments(headerBookingId, bookingData, organizationId)
       
       console.log(`✅ Successfully created booking ${baseBookingId} from booking.updated webhook`)
-      return
-    }
+          return
+        }
 
     console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
     // #region agent log
@@ -3636,7 +3820,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         const locationRecord = await prisma.$queryRaw`
           SELECT id FROM locations 
           WHERE square_location_id = ${squareLocationId}
-            AND organization_id = ${organizationId}::uuid
+            AND organization_id = ${organizationId}::text
           LIMIT 1
         `
         locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
@@ -3682,7 +3866,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
             const svRecord = await prisma.$queryRaw`
               SELECT uuid::text as id FROM service_variation
               WHERE square_variation_id = ${squareServiceVariationId}
-                AND organization_id = ${organizationId}::uuid
+                AND organization_id = ${organizationId}::text
               LIMIT 1
             `
             serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
@@ -3694,7 +3878,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
             const teamMemberRecord = await prisma.$queryRaw`
               SELECT id::text as id FROM team_members
               WHERE square_team_member_id = ${squareTeamMemberId}
-                AND organization_id = ${organizationId}::uuid
+                AND organization_id = ${organizationId}::text
               LIMIT 1
             `
             technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
@@ -3800,8 +3984,11 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       }
     }
 
+    const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, bookingData.merchant_id || bookingData.merchantId || null, existingBookings[0]?.organization_id)
+    await upsertBookingSegments(headerBookingId, bookingData, existingBookings[0]?.organization_id)
+
     console.log(`✅ Successfully processed booking.updated for ${baseBookingId}`)
-  } catch (error) {
+      } catch (error) {
     console.error(`❌ Error processing booking.updated:`, error.message)
     console.error(`   Stack:`, error.stack)
     throw error // Re-throw so webhook returns 500 and Square retries
@@ -3908,6 +4095,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
       console.log(`✅ Saved ${segments.length} booking record(s) for booking ${bookingId}`)
     }
 
+    const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
+    await upsertBookingSegments(headerBookingId, bookingData, organizationId)
+
     // Check if customer exists in our database
     console.log('🔍 Step 1: Checking if customer exists in database...')
     let customerExists = await prisma.$queryRaw`
@@ -3940,6 +4130,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
         await prisma.$executeRaw`
           INSERT INTO square_existing_clients (
+            organization_id,
             square_customer_id,
             given_name,
             family_name,
@@ -3954,6 +4145,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             created_at,
             updated_at
           ) VALUES (
+            ${organizationId}::uuid,
             ${customerId},
             ${squareGivenName},
             ${squareFamilyName},
@@ -3990,7 +4182,29 @@ async function processBookingCreated(bookingData, runContext = {}) {
         customerExists = newCustomerData
       } catch (error) {
         console.error(`❌ Error fetching/adding customer from Square:`, error.message)
+        
+        // Try to find customer again in case they were added by another process
+        try {
+          const retryCustomer = await prisma.$queryRaw`
+            SELECT square_customer_id, got_signup_bonus, used_referral_code, email_address,
+                   given_name, family_name, phone_number, gift_card_id,
+                   gift_card_order_id, gift_card_line_item_uid, gift_card_delivery_channel,
+                   gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email,
+                   personal_code, activated_as_referrer
+            FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId}
+          `
+          if (retryCustomer && retryCustomer.length > 0) {
+            console.log(`✅ Customer found on retry after insert error`)
+            customerExists = retryCustomer
+          } else {
+            console.error(`❌ Customer insert failed and customer not found in DB. Cannot proceed with referral check.`)
         return
+          }
+        } catch (retryError) {
+          console.error(`❌ Error retrying customer lookup: ${retryError.message}`)
+          return
+        }
       }
     }
 
@@ -4404,21 +4618,21 @@ async function processBookingCreated(bookingData, runContext = {}) {
             
             try {
               const emailResult = await sendGiftCardEmailNotification({
-                customerName: friendNameBase || friendEmail || 'there',
-                email: friendEmail,
-                giftCardGan: friendGiftCard.giftCardGan,
-                amountCents: friendGiftCard.amountCents,
-                balanceCents: friendGiftCard.balanceCents,
-                activationUrl: friendGiftCard.activationUrl,
-                passKitUrl: friendGiftCard.passKitUrl,
-                giftCardId: friendGiftCard.giftCardId,
-                waitForPassKit: true,
-                locationId: bookingLocationId,
-                notificationMetadata: {
-                  customerId,
-                  referralCode
-                }
-              })
+              customerName: friendNameBase || friendEmail || 'there',
+              email: friendEmail,
+              giftCardGan: friendGiftCard.giftCardGan,
+              amountCents: friendGiftCard.amountCents,
+              balanceCents: friendGiftCard.balanceCents,
+              activationUrl: friendGiftCard.activationUrl,
+              passKitUrl: friendGiftCard.passKitUrl,
+              giftCardId: friendGiftCard.giftCardId,
+              waitForPassKit: true,
+              locationId: bookingLocationId,
+              notificationMetadata: {
+                customerId,
+                referralCode
+              }
+            })
               
               if (emailResult?.success === false && emailResult?.skipped) {
                 console.log(`⚠️ Email skipped: ${emailResult.reason}`)
@@ -5591,14 +5805,14 @@ export async function POST(request) {
         if (processOrder) {
           await processOrder(webhookData.data, webhookData.type)
           console.log(`✅ Order webhook processed successfully`)
-          return Response.json({
-            success: true,
+        return Response.json({
+          success: true,
             message: `Order ${webhookData.type} processed`,
             eventType: webhookData.type
           })
         } else {
           console.error('❌ processOrderWebhook function not available')
-          return Response.json({
+        return Response.json({
             success: false,
             message: 'Order processing unavailable',
             eventType: webhookData.type

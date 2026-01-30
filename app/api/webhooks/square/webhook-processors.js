@@ -24,6 +24,132 @@ function safeStringify(value) {
   )
 }
 
+async function upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData) {
+  const segments = bookingData?.appointment_segments || bookingData?.appointmentSegments || []
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return
+  }
+
+  const bookingRecord = await prisma.$queryRaw`
+    SELECT id FROM bookings
+    WHERE booking_id = ${bookingId}
+      AND organization_id = ${organizationId}::text
+    LIMIT 1
+  `
+  const bookingUuid = bookingRecord?.[0]?.id
+  if (!bookingUuid) {
+    return
+  }
+
+  const bookingVersion = Number.isFinite(bookingData?.version) ? bookingData.version : 0
+
+  await prisma.$executeRaw`
+    UPDATE booking_segments
+    SET is_active = false,
+        deleted_at = NOW(),
+        updated_at = NOW()
+    WHERE booking_id = ${bookingUuid}::uuid
+      AND is_active = true
+      AND booking_version != ${bookingVersion}
+  `
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i] || {}
+    const segmentIndex = i
+    const squareServiceVariationId = segment.service_variation_id || segment.serviceVariationId || null
+    const squareTeamMemberId = segment.team_member_id || segment.teamMemberId || null
+    const squareSegmentUid = segment.segment_uid || segment.uid || segment.id || null
+
+    let serviceVariationUuid = null
+    if (squareServiceVariationId) {
+      const svRecord = await prisma.$queryRaw`
+        SELECT uuid::text as id FROM service_variation
+        WHERE square_variation_id = ${squareServiceVariationId}
+          AND organization_id = ${organizationId}::text
+        LIMIT 1
+      `
+      serviceVariationUuid = svRecord?.[0]?.id || null
+    }
+
+    let technicianUuid = null
+    if (squareTeamMemberId) {
+      const tmRecord = await prisma.$queryRaw`
+        SELECT id::text as id FROM team_members
+        WHERE square_team_member_id = ${squareTeamMemberId}
+          AND organization_id = ${organizationId}::text
+        LIMIT 1
+      `
+      technicianUuid = tmRecord?.[0]?.id || null
+    }
+
+    const anyTeamMember = segment.any_team_member ?? segment.anyTeamMember ?? false
+    const durationMinutes = segment.duration_minutes || segment.durationMinutes || null
+    const intermissionMinutes = segment.intermission_minutes || segment.intermissionMinutes || 0
+    const serviceVariationVersion = segment.service_variation_version || segment.serviceVariationVersion || null
+
+    // Extract booking times from bookingData
+    const bookingCreatedAt = bookingData?.created_at || bookingData?.createdAt || null
+    const bookingStartAt = bookingData?.start_at || bookingData?.startAt || null
+
+    await prisma.$executeRaw`
+      INSERT INTO booking_segments (
+        id,
+        booking_id,
+        segment_index,
+        square_segment_uid,
+        square_service_variation_id,
+        service_variation_id,
+        service_variation_version,
+        duration_minutes,
+        intermission_minutes,
+        square_team_member_id,
+        technician_id,
+        any_team_member,
+        booking_version,
+        booking_created_at,
+        booking_start_at,
+        is_active,
+        created_at,
+        updated_at
+      ) VALUES (
+        gen_random_uuid(),
+        ${bookingUuid}::uuid,
+        ${segmentIndex},
+        ${squareSegmentUid},
+        ${squareServiceVariationId},
+        ${serviceVariationUuid}::uuid,
+        ${serviceVariationVersion ? BigInt(serviceVariationVersion) : null},
+        ${durationMinutes},
+        ${intermissionMinutes},
+        ${squareTeamMemberId},
+        ${technicianUuid}::uuid,
+        ${anyTeamMember},
+        ${bookingVersion},
+        ${bookingCreatedAt ? new Date(bookingCreatedAt) : null}::timestamp,
+        ${bookingStartAt ? new Date(bookingStartAt) : null}::timestamp,
+        true,
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (booking_id, segment_index, booking_version) DO UPDATE SET
+        square_segment_uid = COALESCE(EXCLUDED.square_segment_uid, booking_segments.square_segment_uid),
+        square_service_variation_id = COALESCE(EXCLUDED.square_service_variation_id, booking_segments.square_service_variation_id),
+        service_variation_id = COALESCE(EXCLUDED.service_variation_id, booking_segments.service_variation_id),
+        service_variation_version = COALESCE(EXCLUDED.service_variation_version, booking_segments.service_variation_version),
+        duration_minutes = COALESCE(EXCLUDED.duration_minutes, booking_segments.duration_minutes),
+        intermission_minutes = COALESCE(EXCLUDED.intermission_minutes, booking_segments.intermission_minutes),
+        square_team_member_id = COALESCE(EXCLUDED.square_team_member_id, booking_segments.square_team_member_id),
+        technician_id = COALESCE(EXCLUDED.technician_id, booking_segments.technician_id),
+        any_team_member = COALESCE(EXCLUDED.any_team_member, booking_segments.any_team_member),
+        booking_created_at = COALESCE(EXCLUDED.booking_created_at, booking_segments.booking_created_at),
+        booking_start_at = COALESCE(EXCLUDED.booking_start_at, booking_segments.booking_start_at),
+        is_active = true,
+        deleted_at = NULL,
+        updated_at = NOW()
+    `
+  }
+}
+
 /**
  * Process booking.created webhook
  * Saves new booking to database
@@ -91,6 +217,8 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         updated_at = ${bookingUpdatedAt}::timestamp,
         raw_json = EXCLUDED.raw_json
     `
+
+    await upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData)
 
     console.log(`[WEBHOOK-PROCESSOR] ✅ Saved booking ${bookingId}`)
   } catch (error) {
@@ -506,7 +634,7 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
     let locationUuid = null
     if (locationId && organizationId) {
       const locRecord = await prisma.$queryRaw`
-        SELECT id FROM locations WHERE square_location_id = ${locationId} AND organization_id = ${organizationId}::uuid LIMIT 1
+        SELECT id FROM locations WHERE square_location_id = ${locationId} AND organization_id = ${organizationId}::text LIMIT 1
       `
       if (locRecord?.[0]?.id) {
         locationUuid = locRecord[0].id

@@ -813,7 +813,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const defaultLocation = await prisma.$queryRaw`
           SELECT square_location_id 
           FROM locations 
-          WHERE organization_id = ${organizationId}::uuid
+          WHERE organization_id = ${organizationId}::text
           ORDER BY updated_at DESC, created_at DESC
           LIMIT 1
         `
@@ -1026,7 +1026,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const orderRecord = await prisma.$queryRaw`
           SELECT id FROM orders 
           WHERE order_id = ${orderId}
-            AND organization_id = ${organizationId}::uuid
+            AND organization_id = ${organizationId}::text
           LIMIT 1
         `
         // #region agent log
@@ -1057,7 +1057,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const teamMember = await prisma.$queryRaw`
           SELECT id FROM team_members 
           WHERE square_team_member_id = ${squareTeamMemberId}
-            AND organization_id = ${organizationId}::uuid
+            AND organization_id = ${organizationId}::text
           LIMIT 1
         `
         if (teamMember && teamMember.length > 0) {
@@ -1202,7 +1202,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // First, try to find existing payment
     const existingPayment = await prisma.$queryRaw`
       SELECT id FROM payments
-      WHERE organization_id = ${organizationId}::uuid
+      WHERE organization_id = ${organizationId}::text
         AND payment_id = ${paymentId}
       LIMIT 1
     `
@@ -1392,7 +1392,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           SET booking_id = ${orderWithBooking[0].booking_id}::uuid,
               updated_at = NOW()
           WHERE payment_id = ${paymentId}
-            AND organization_id = ${organizationId}::uuid
+            AND organization_id = ${organizationId}::text
             AND booking_id IS NULL
         `
         console.log(`✅ Copied booking_id from order to payment`)
@@ -1670,7 +1670,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
           SET booking_id = ${bookingId}::uuid,
               updated_at = NOW()
           WHERE payment_id = ${paymentId}
-            AND organization_id = ${organizationId}::uuid
+            AND organization_id = ${organizationId}::text
             AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
         `
         console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}`)
@@ -1779,16 +1779,34 @@ async function updateOrderLineItemsWithTechnician(orderId) {
       console.log(`✅ Updated order_line_items with booking_id: ${bookingId}`)
     }
 
-    // Get technician_id from bookings table (match by booking ID or booking-service ID)
-    // For multi-service bookings, we match by booking ID prefix
-    const bookings = await prisma.$queryRaw`
-      SELECT service_variation_id, technician_id
-      FROM bookings
-      WHERE booking_id LIKE ${`${bookingId}%`}
+    // Prefer segment-level mapping (deterministic)
+    const segmentMappings = await prisma.$queryRaw`
+      SELECT DISTINCT ON (service_variation_id)
+        service_variation_id,
+        technician_id
+      FROM booking_segments
+      WHERE booking_id = ${bookingId}::uuid
+        AND is_active = true
+        AND service_variation_id IS NOT NULL
         AND technician_id IS NOT NULL
-        AND any_team_member = false
-      ORDER BY duration_minutes DESC
+      ORDER BY
+        service_variation_id,
+        duration_minutes DESC NULLS LAST,
+        segment_index ASC,
+        id ASC
     `
+
+    // Fallback to legacy bookings table if no segments found
+    const bookings = segmentMappings && segmentMappings.length > 0
+      ? segmentMappings
+      : await prisma.$queryRaw`
+          SELECT service_variation_id, technician_id
+          FROM bookings
+          WHERE booking_id LIKE ${`${bookingId}%`}
+            AND technician_id IS NOT NULL
+            AND any_team_member = false
+          ORDER BY duration_minutes DESC
+        `
 
     if (!bookings || bookings.length === 0) {
       console.log(`⚠️ No booking found with technician_id for booking ${bookingId}`)
@@ -1816,7 +1834,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
           technician_id = COALESCE(${technicianId}::uuid, technician_id),
           administrator_id = COALESCE(${administratorId}::uuid, administrator_id)
         WHERE order_id = ${orderUuid}::uuid
-          AND organization_id = ${organizationId}::uuid
+          AND organization_id = ${organizationId}::text
           AND service_variation_id = ${serviceVariationId}
           AND (
             technician_id IS NULL 
@@ -1836,7 +1854,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
           technician_id = COALESCE(${primaryTechnicianId}::uuid, technician_id),
           administrator_id = COALESCE(${administratorId}::uuid, administrator_id)
         WHERE order_id = ${orderUuid}::uuid
-          AND organization_id = ${organizationId}::uuid
+          AND organization_id = ${organizationId}::text
           AND (technician_id IS NULL OR administrator_id IS NULL)
       `
     }
@@ -1943,9 +1961,10 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
 
     if (!merchantId && !organizationId) {
       console.warn(`⚠️ Order ${orderId} missing merchant_id AND fallback resolution failed`)
-    } else if (!merchantId && organizationId) {
-      console.info(`ℹ️ Order ${orderId} missing merchant_id (resolved via location fallback)`)
     }
+    // Note: If merchant_id is missing but organizationId was resolved via location fallback,
+    // that's expected behavior (Square webhooks don't always include merchant_id).
+    // No need to log this as it's working correctly.
 
     // Location lookup already done above (STEP 1), no need to duplicate
 
@@ -2005,25 +2024,43 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       FROM payments p
       INNER JOIN orders o ON p.order_id = o.id
       WHERE o.order_id = ${orderId}
-        AND o.organization_id = ${organizationId}::uuid
+        AND o.organization_id = ${organizationId}::text
       LIMIT 1
     `
     
     const bookingId = paymentInfo?.[0]?.booking_id || null
     const administratorId = paymentInfo?.[0]?.administrator_id || null
     
-    // Get technician_id from bookings (match by service_variation_id)
+    // Get technician_id from booking segments (match by service_variation_id)
     const serviceTechnicianMap = new Map()
     
     if (bookingId) {
-      const bookings = await prisma.$queryRaw`
-        SELECT service_variation_id, technician_id
-        FROM bookings
-        WHERE booking_id LIKE ${`${bookingId}%`}
+      const segmentMappings = await prisma.$queryRaw`
+        SELECT DISTINCT ON (service_variation_id)
+          service_variation_id,
+          technician_id
+        FROM booking_segments
+        WHERE booking_id = ${bookingId}::uuid
+          AND is_active = true
+          AND service_variation_id IS NOT NULL
           AND technician_id IS NOT NULL
+        ORDER BY
+          service_variation_id,
+          duration_minutes DESC NULLS LAST,
+          segment_index ASC,
+          id ASC
       `
+
+      const mappings = segmentMappings && segmentMappings.length > 0
+        ? segmentMappings
+        : await prisma.$queryRaw`
+            SELECT service_variation_id, technician_id
+            FROM bookings
+            WHERE booking_id LIKE ${`${bookingId}%`}
+              AND technician_id IS NOT NULL
+          `
       
-      bookings.forEach(booking => {
+      mappings.forEach(booking => {
         if (booking.service_variation_id && booking.technician_id) {
           serviceTechnicianMap.set(booking.service_variation_id, booking.technician_id)
         }
@@ -2142,7 +2179,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         l.id::text as location_id,
         l.organization_id::text as location_org_id,
         ${organizationId}::text as order_org_id,
-        (l.organization_id = ${organizationId}::uuid) as org_match
+        (l.organization_id = ${organizationId}::text) as org_match
       FROM locations l
       WHERE l.id = ${cleanLocationUuid}::uuid
     `
@@ -2153,7 +2190,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     // First, try to find existing order
     const existingOrder = await prisma.$queryRaw`
       SELECT id FROM orders
-      WHERE organization_id = ${organizationId}::uuid
+      WHERE organization_id = ${organizationId}::text
         AND order_id = ${orderId}
       LIMIT 1
     `
@@ -2254,7 +2291,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       const orderRecord = await prisma.$queryRaw`
         SELECT id FROM orders 
         WHERE order_id = ${orderId}
-          AND organization_id = ${organizationId}::uuid
+          AND organization_id = ${organizationId}::text
         LIMIT 1
       `
       orderUuid = orderRecord && orderRecord.length > 0 ? orderRecord[0].id : null
@@ -2527,7 +2564,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               order_total_card_surcharge_money_currency = ${lineItemData.order_total_card_surcharge_money_currency},
               raw_json = COALESCE(${safeStringify(lineItem)}::jsonb, order_line_items.raw_json),
               updated_at = NOW()
-            WHERE organization_id = ${organizationId}::uuid
+            WHERE organization_id = ${organizationId}::text
               AND uid = ${lineItem.uid}
           `
           
