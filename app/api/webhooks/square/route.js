@@ -1363,7 +1363,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // #endregion
     
     // Try to populate booking_id in payment if order exists
-    if (orderId) {
+    if (orderId && organizationId) {
       // First, try to get booking_id from order if it already has one
       const orderWithBooking = await prisma.$queryRaw`
         SELECT booking_id FROM orders
@@ -1374,11 +1374,13 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       
       if (orderWithBooking && orderWithBooking.length > 0) {
         // Order already has booking_id, copy to payment
+        // Use payment_id (Square ID) and organization_id to find the payment
         await prisma.$executeRaw`
           UPDATE payments
           SET booking_id = ${orderWithBooking[0].booking_id}::uuid,
               updated_at = NOW()
-          WHERE id = ${paymentId}
+          WHERE payment_id = ${paymentId}
+            AND organization_id = ${organizationId}::uuid
             AND booking_id IS NULL
         `
         console.log(`✅ Copied booking_id from order to payment`)
@@ -1588,32 +1590,62 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     
     // Update orders table if booking found
     if (bookingId) {
+      // Extract technician_id and administrator_id from booking
+      const bookingDetails = await prisma.$queryRaw`
+        SELECT technician_id, administrator_id
+        FROM bookings
+        WHERE id = ${bookingId}::uuid
+        LIMIT 1
+      `
+      
+      const technicianId = bookingDetails?.[0]?.technician_id || null
+      const administratorId = bookingDetails?.[0]?.administrator_id || null
+      
+      // Update order with booking_id, technician_id, and administrator_id
       await prisma.$executeRaw`
         UPDATE orders
         SET booking_id = ${bookingId}::uuid,
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
             updated_at = NOW()
         WHERE id = ${orderUuid}::uuid
           AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
       `
       console.log(`✅ Updated order ${orderId} with booking_id: ${bookingId}`)
+      if (technicianId) {
+        console.log(`   - technician_id: ${technicianId}`)
+      }
+      if (administratorId) {
+        console.log(`   - administrator_id: ${administratorId}`)
+      }
       
-      // Update order_line_items
+      // Update order_line_items with booking_id, technician_id, and administrator_id
       await prisma.$executeRaw`
         UPDATE order_line_items
         SET booking_id = ${bookingId}::uuid,
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
             updated_at = NOW()
         WHERE order_id = ${orderUuid}::uuid
           AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
       `
       console.log(`✅ Updated order_line_items for order ${orderId} with booking_id: ${bookingId}`)
+      if (technicianId) {
+        console.log(`   - Applied technician_id to line items`)
+      }
+      if (administratorId) {
+        console.log(`   - Applied administrator_id to line items`)
+      }
       
       // Update payments if paymentId provided
-      if (paymentId) {
+      // paymentId is Square payment ID (TEXT), need to use payment_id column
+      if (paymentId && organizationId) {
         await prisma.$executeRaw`
           UPDATE payments
           SET booking_id = ${bookingId}::uuid,
               updated_at = NOW()
-          WHERE id = ${paymentId}
+          WHERE payment_id = ${paymentId}
+            AND organization_id = ${organizationId}::uuid
             AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
         `
         console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}`)
