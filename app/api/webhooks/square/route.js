@@ -2581,7 +2581,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           
           uid: lineItem.uid || null,
           service_variation_id: serviceVariationId || null,
-          catalog_version: lineItem.catalog_version ? BigInt(lineItem.catalog_version) : null,
+          catalog_version: lineItem.catalog_version ? Number(lineItem.catalog_version) : null,
           quantity: lineItem.quantity || null,
           name: lineItem.name || null,
           variation_name: lineItem.variation_name || null,
