@@ -1,4 +1,5 @@
 const prisma = require('../../../../../lib/prisma-client')
+const { Prisma } = require('@prisma/client')
 const crypto = require('crypto')
 const QRCode = require('qrcode')
 const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
@@ -3543,6 +3544,16 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       }
     }
     
+    // Defensive check: ensure locationUuid is not null before INSERT
+    // This prevents NOT NULL constraint violations
+    if (!locationUuid) {
+      console.error(`❌ Cannot save booking ${bookingId}: locationUuid is null`)
+      console.error(`   This should have been caught earlier - location resolution may have failed silently`)
+      console.error(`   Organization ID: ${finalOrganizationId}`)
+      console.error(`   Square Location ID: ${squareLocationId || 'missing'}`)
+      return
+    }
+    
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, version, customer_id, location_id, location_type, source,
@@ -3568,16 +3579,16 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${bookingData.transition_time_minutes || bookingData.transitionTimeMinutes || 0},
         ${creatorDetails.creator_type || creatorDetails.creatorType || null},
         ${creatorDetails.customer_id || creatorDetails.customerId || null},
-        ${administratorUuid}::uuid,
+        ${administratorUuid ? Prisma.sql`${administratorUuid}::uuid` : Prisma.sql`NULL`},
         ${address.address_line_1 || address.addressLine1 || null},
         ${address.locality || null},
         ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
         ${address.postal_code || address.postalCode || null},
-        ${serviceVariationUuid}::uuid,
+        ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
         ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
         ${segment?.duration_minutes || segment?.durationMinutes || null},
         ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
-        ${technicianUuid}::uuid,
+        ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
         ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
         ${bookingData.customer_note || bookingData.customerNote || null},
         ${bookingData.seller_note || bookingData.sellerNote || null},
