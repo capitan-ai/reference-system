@@ -73,6 +73,7 @@ model GiftCardJob {
 
 model WebhookJob {
   id               String           @id @default(uuid())
+  organization_id  String           @db.Uuid // Multi-tenant isolation
   event_type       String
   event_id         String
   event_created_at DateTime?        @db.Timestamptz(6)
@@ -87,7 +88,11 @@ model WebhookJob {
   created_at       DateTime         @default(now()) @db.Timestamptz(6)
   updated_at       DateTime         @default(now()) @db.Timestamptz(6)
 
-  @@unique([event_id, event_type], map: "webhook_jobs_event_unique")
+  // Relations
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@unique([organization_id, event_id, event_type], map: "webhook_jobs_org_event_unique")
+  @@index([organization_id])
   @@index([status, scheduled_at], map: "webhook_jobs_status_scheduled_idx")
   @@map("webhook_jobs")
 }
@@ -409,6 +414,7 @@ model Organization {
   referral_rewards        ReferralReward[]
   organization_users      OrganizationUser[]
   user_roles              UserRole[] // User roles relation
+  webhook_jobs            WebhookJob[]
 
   @@index([square_merchant_id])
   @@index([slug])
