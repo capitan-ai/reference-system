@@ -2122,339 +2122,91 @@ async function processOrderWebhook(webhookData, eventType) {
       throw new Error(`Cannot process order ${orderId}: locationUuid is required but was not resolved`)
     }
     
-    let orderUuid = null
-    let orderSaveError = null
-    
     // Validate locationUuid format
     if (typeof locationUuid !== 'string' || locationUuid.trim() === '') {
       throw new Error(`Invalid locationUuid format: ${locationUuid} (type: ${typeof locationUuid})`)
     }
     
-    // Log location UUID before inserting order
+    // Clean UUID (remove any whitespace)
+    const cleanLocationUuid = String(locationUuid).trim()
+    
     console.log(`📦 Preparing to save order ${orderId}`)
-    console.log(`   locationUuid: ${locationUuid} (type: ${typeof locationUuid})`)
+    console.log(`   locationUuid: ${cleanLocationUuid}`)
     console.log(`   organizationId: ${organizationId}`)
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2124',message:'Before order insert - locationUuid value',data:{locationUuid,locationUuidType:typeof locationUuid,locationUuidLength:locationUuid?.length,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
+    // Use the same simple approach as payment webhook (no transaction)
+    // First, try to find existing order
+    const existingOrder = await prisma.$queryRaw`
+      SELECT id FROM orders
+      WHERE organization_id = ${organizationId}::uuid
+        AND order_id = ${orderId}
+      LIMIT 1
+    `
     
-    // Wrap location verification and order insert in a single transaction
-    // This ensures transaction isolation - location lookup and insert happen in same transaction
+    let orderUuid = null
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2128',message:'Starting transaction for order insert',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      
-      console.log(`🔄 Starting transaction for order insert with location_id: ${locationUuid}`)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2149',message:'About to start transaction',data:{locationUuid,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      
-      await prisma.$transaction(async (tx) => {
-        console.log(`🔍 [TX] Checking location within transaction: ${locationUuid}`)
-        // Verify location exists within the same transaction
-        const locationCheck = await tx.$queryRaw`
-          SELECT id::text as id, organization_id::text as organization_id FROM locations 
-          WHERE id = ${locationUuid}::uuid
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        
-        console.log(`🔍 [TX] Location check result: ${locationCheck?.length || 0} rows found`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2160',message:'Location check within transaction',data:{locationUuid,organizationId,orderId,found:locationCheck?.length>0,locationId:locationCheck?.[0]?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        
-        if (!locationCheck || locationCheck.length === 0) {
-          console.error(`❌ [TX] Location ${locationUuid} does not exist in transaction!`)
-          throw new Error(`Location ${locationUuid} does not exist in transaction - cannot insert order`)
-        }
-        
-        console.log(`✅ [TX] Location verified, proceeding with INSERT`)
-        
-        // Also verify location exists using a direct FK check query
-        const fkCheck = await tx.$queryRaw`
-          SELECT l.id::text as id FROM locations l WHERE l.id = ${locationUuid}::uuid
-        `
-        console.log(`🔍 [TX] Direct FK check: ${fkCheck?.length || 0} rows found`)
-        if (!fkCheck || fkCheck.length === 0) {
-          console.error(`❌ [TX] Direct FK check failed - location ${locationUuid} not found!`)
-          // Check FK constraint definition
-          const fkDef = await tx.$queryRaw`
-            SELECT
-              tc.constraint_name,
-              kcu.column_name,
-              ccu.table_name AS foreign_table_name,
-              ccu.column_name AS foreign_column_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = 'orders'
-              AND kcu.column_name = 'location_id'
-          `
-          console.error(`🔍 [TX] FK constraint definition:`, JSON.stringify(fkDef, null, 2))
-          throw new Error(`Location ${locationUuid} not found in direct FK check`)
-        }
-        
-        // Verify the exact UUID format matches
-        const locationIdFromCheck = fkCheck[0]?.id
-        console.log(`🔍 [TX] Location ID from FK check: ${locationIdFromCheck} (type: ${typeof locationIdFromCheck})`)
-        console.log(`🔍 [TX] Location UUID we're using: ${locationUuid} (type: ${typeof locationUuid})`)
-        console.log(`🔍 [TX] UUIDs match: ${locationIdFromCheck === locationUuid}`)
-        console.log(`🔍 [TX] UUID trimmed match: ${String(locationIdFromCheck).trim() === String(locationUuid).trim()}`)
-        
-        // Ensure UUID is properly formatted (no extra whitespace) - do this early
-        const cleanLocationUuid = String(locationUuid).trim()
-        console.log(`🔍 [TX] Clean location UUID: "${cleanLocationUuid}" (length: ${cleanLocationUuid.length})`)
-        
-        // Try to insert a test row to see if FK works at all
-        console.log(`🧪 [TX] Testing FK constraint with a simple query...`)
-        const testFK = await tx.$queryRaw`
-          SELECT EXISTS(
-            SELECT 1 FROM locations WHERE id = ${cleanLocationUuid}::uuid
-          ) as location_exists
-        `
-        console.log(`🧪 [TX] FK test result:`, testFK?.[0]?.location_exists)
-        
-        if (!testFK?.[0]?.location_exists) {
-          console.error(`❌ [TX] CRITICAL: Location ${cleanLocationUuid} does NOT exist according to EXISTS query!`)
-          // Try to find what locations DO exist
-          const allLocations = await tx.$queryRaw`
-            SELECT id::text as id, square_location_id, organization_id::text as org_id 
-            FROM locations 
-            WHERE organization_id = ${organizationId}::uuid
-            LIMIT 5
-          `
-          console.error(`🔍 [TX] Available locations in org:`, JSON.stringify(allLocations, null, 2))
-          throw new Error(`Location ${cleanLocationUuid} does not exist - FK constraint will fail`)
-        }
-        
-        // Final test: Try to select the location using the exact same format we'll use in INSERT
-        console.log(`🧪 [TX] Final test: Selecting location with exact INSERT format...`)
-        const finalTest = await tx.$queryRaw`
-          SELECT id FROM locations WHERE id = ${cleanLocationUuid}::uuid
-        `
-        console.log(`🧪 [TX] Final test result: ${finalTest?.length || 0} rows`)
-        if (!finalTest || finalTest.length === 0) {
-          console.error(`❌ [TX] Final test FAILED - location ${cleanLocationUuid} not found with cleaned UUID!`)
-          throw new Error(`Location not found with cleaned UUID format`)
-        }
-        
-        // Insert order with location_id within the same transaction
-        console.log(`💾 [TX] Executing INSERT with location_id: ${locationUuid}`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2177',message:'Executing INSERT within transaction',data:{locationUuid,organizationId,orderId,customerId,orderState},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
-        
-        // Try using Prisma's upsert instead of raw SQL to see if it handles FK better
-        console.log(`💾 [TX] Attempting to upsert order using Prisma client...`)
-        try {
-          // First, try to find existing order
-          const existingOrder = await tx.order.findUnique({
-            where: {
-              organization_id_order_id: {
-                organization_id: organizationId,
-                order_id: orderId
-              }
-            }
-          })
-          
-          if (existingOrder) {
-            console.log(`📝 [TX] Order exists, updating...`)
-            await tx.order.update({
-              where: { id: existingOrder.id },
-              data: {
-                location_id: locationUuid,
-                customer_id: customerId,
-                state: orderState || order.state || null,
-                version: order.version ? Number(order.version) : null,
-                reference_id: order.reference_id || null,
-                updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-                raw_json: order
-              }
-            })
+      if (existingOrder && existingOrder.length > 0) {
+        // Update existing order
+        orderUuid = existingOrder[0].id
+        console.log(`📝 Updating existing order ${orderId} with UUID ${orderUuid}`)
+        await prisma.order.update({
+          where: { id: orderUuid },
+          data: {
+            location_id: cleanLocationUuid, // Direct UUID assignment (like payment webhook)
+            customer_id: customerId,
+            state: orderState || order.state || null,
+            version: order.version ? Number(order.version) : null,
+            reference_id: order.reference_id || null,
+            updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+            raw_json: order
+          }
+        })
       } else {
-            console.log(`➕ [TX] Order doesn't exist, creating...`)
-            // Verify location exists using Prisma's native method
-            const locationExists = await tx.location.findUnique({
-              where: { id: cleanLocationUuid }
-            })
-            console.log(`🔍 [TX] Prisma location.findUnique result:`, locationExists ? 'FOUND' : 'NOT FOUND')
-            if (!locationExists) {
-              throw new Error(`Location ${cleanLocationUuid} not found using Prisma findUnique`)
-            }
-            console.log(`🔍 [TX] Location found via Prisma: id=${locationExists.id}, org_id=${locationExists.organization_id}`)
-            
-            // Try using Prisma's connect syntax instead of direct UUID
-            console.log(`🔍 [TX] Attempting create with location connection...`)
-            try {
-              await tx.order.create({
-                data: {
-                  organization_id: organizationId,
-                  order_id: orderId,
-                  location: {
-                    connect: { id: cleanLocationUuid }
-                  },
-                  customer_id: customerId,
-                  state: orderState || order.state || null,
-                  version: order.version ? Number(order.version) : null,
-                  reference_id: order.reference_id || null,
-                  created_at: order.created_at ? new Date(order.created_at) : new Date(),
-                  updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-                  raw_json: order
-                }
-              })
-              console.log(`✅ [TX] Order created successfully using location.connect`)
-            } catch (connectError) {
-              console.error(`❌ [TX] Location.connect failed:`, connectError.message)
-              console.error(`   Error code: ${connectError.code}`)
-              // Fallback to direct location_id
-              console.log(`🔄 [TX] Falling back to direct location_id assignment...`)
-              await tx.order.create({
-                data: {
-                  organization_id: organizationId,
-                  order_id: orderId,
-                  location_id: cleanLocationUuid,
-                  customer_id: customerId,
-                  state: orderState || order.state || null,
-                  version: order.version ? Number(order.version) : null,
-                  reference_id: order.reference_id || null,
-                  created_at: order.created_at ? new Date(order.created_at) : new Date(),
-                  updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-                  raw_json: order
-                }
-              })
-            }
+        // Create new order (same pattern as payment webhook)
+        console.log(`➕ Creating new order ${orderId}`)
+        const newOrder = await prisma.order.create({
+          data: {
+            organization_id: organizationId,
+            order_id: orderId,
+            location_id: cleanLocationUuid, // Direct UUID assignment (like payment webhook)
+            customer_id: customerId,
+            state: orderState || order.state || null,
+            version: order.version ? Number(order.version) : null,
+            reference_id: order.reference_id || null,
+            created_at: order.created_at ? new Date(order.created_at) : new Date(),
+            updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
+            raw_json: order
           }
-          console.log(`✅ [TX] Order created/updated successfully using Prisma client`)
-        } catch (prismaError) {
-          console.error(`❌ [TX] Prisma create/update failed:`, prismaError.message)
-          console.error(`   Error code: ${prismaError.code}`)
-          console.error(`   Error meta:`, JSON.stringify(prismaError.meta, null, 2))
-          
-          // Check FK constraint definition if it's a FK error
-          if (prismaError.code === 'P2003') {
-            console.error(`🔍 [TX] This is a foreign key constraint violation!`)
-            const fkDef = await tx.$queryRaw`
-              SELECT
-                tc.constraint_name,
-                kcu.column_name,
-                ccu.table_name AS foreign_table_name,
-                ccu.column_name AS foreign_column_name
-              FROM information_schema.table_constraints AS tc
-              JOIN information_schema.key_column_usage AS kcu
-                ON tc.constraint_name = kcu.constraint_name
-              JOIN information_schema.constraint_column_usage AS ccu
-                ON ccu.constraint_name = tc.constraint_name
-              WHERE tc.constraint_type = 'FOREIGN KEY'
-                AND tc.table_name = 'orders'
-                AND kcu.column_name = 'location_id'
-            `
-            console.error(`🔍 [TX] FK constraint definition:`, JSON.stringify(fkDef, null, 2))
-            
-            // Try to verify location exists one more time
-            const finalLocationCheck = await tx.$queryRaw`
-              SELECT id::text as id FROM locations WHERE id = ${cleanLocationUuid}::uuid
-            `
-            console.error(`🔍 [TX] Final location check after FK error: ${finalLocationCheck?.length || 0} rows`)
-          }
-          // Fallback to raw SQL with explicit UUID validation
-          console.log(`🔄 [TX] Falling back to raw SQL INSERT...`)
-          // cleanLocationUuid is already defined above
-          
-          // Use $executeRawUnsafe with parameterized query for better UUID handling
-          await tx.$executeRawUnsafe(`
-          INSERT INTO orders (
-            id,
-            organization_id,
-            order_id,
-            location_id,
-            customer_id,
-            state,
-            version,
-            reference_id,
-            created_at,
-            updated_at,
-            raw_json
-          ) VALUES (
-            gen_random_uuid(),
-              $1::uuid,
-              $2,
-              $3::uuid,
-              $4,
-              $5,
-              $6,
-              $7,
-              $8,
-              $9,
-              $10::jsonb
-          )
-          ON CONFLICT (organization_id, order_id) DO UPDATE SET
-              location_id = EXCLUDED.location_id,
-            customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-            state = COALESCE(EXCLUDED.state, orders.state),
-            version = COALESCE(EXCLUDED.version, orders.version),
-            reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-            updated_at = EXCLUDED.updated_at,
-            raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-          `,
-            organizationId,
-            orderId,
-            cleanLocationUuid,
-            customerId,
-            orderState || order.state || null,
-            order.version ? Number(order.version) : null,
-            order.reference_id || null,
-            order.created_at ? new Date(order.created_at) : new Date(),
-            order.updated_at ? new Date(order.updated_at) : new Date(),
-            safeStringify(order)
-          )
-        }
-        
+        })
+        orderUuid = newOrder.id
+      }
       console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2162',message:'Order INSERT succeeded within transaction',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-      }, {
-        isolationLevel: 'ReadCommitted',
-        timeout: 30000
-      })
     } catch (orderError) {
-      orderSaveError = orderError
       console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
+      console.error(`   Error code: ${orderError.code}`)
       console.error(`   Stack:`, orderError.stack)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2167',message:'Order INSERT failed',data:{orderId,locationUuid,organizationId,errorCode:orderError.code,errorMessage:orderError.message,isFKError:orderError.code==='23503'&&orderError.message?.includes('location_id_fkey')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       
-      // If foreign key constraint error, the location resolution failed - this should not happen
-      if (orderError.code === '23503' && orderError.message?.includes('location_id_fkey')) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2172',message:'FK constraint violation detected',data:{orderId,locationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
-        // Final check: Does location exist NOW (after error)?
+      // If foreign key constraint error, the location resolution failed
+      if (orderError.code === 'P2003' || (orderError.code === '23503' && orderError.message?.includes('location_id_fkey'))) {
+        console.error(`❌ Foreign key constraint violation: location ${cleanLocationUuid} does not exist`)
+        // Final check: Does location exist?
         try {
-          const postErrorCheck = await prisma.$queryRaw`
-            SELECT id::text as id FROM locations WHERE id = ${locationUuid}::uuid LIMIT 1
+          const locationCheck = await prisma.$queryRaw`
+            SELECT id::text as id FROM locations WHERE id = ${cleanLocationUuid}::uuid LIMIT 1
           `
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2178',message:'Post-error location check',data:{orderId,locationUuid,organizationId,locationExists:postErrorCheck?.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          if (!postErrorCheck || postErrorCheck.length === 0) {
-            console.error(`❌ Location ${locationUuid} does NOT exist after FK error - transaction isolation issue!`)
+          if (!locationCheck || locationCheck.length === 0) {
+            console.error(`❌ Location ${cleanLocationUuid} does NOT exist - location resolution failed`)
+            throw new Error(`Foreign key constraint violation: location ${cleanLocationUuid} does not exist. This indicates a bug in location resolution logic.`)
           } else {
-            console.error(`⚠️ Location ${locationUuid} EXISTS after FK error - this is very strange!`)
+            console.error(`⚠️ Location ${cleanLocationUuid} EXISTS but FK still failed - this is very strange!`)
+            throw orderError // Re-throw the original error
           }
         } catch (checkErr) {
           console.error(`❌ Error checking location after FK error:`, checkErr.message)
+          throw orderError // Re-throw the original error
         }
-        throw new Error(`Foreign key constraint violation: location ${locationUuid} does not exist. This indicates a bug in location resolution logic.`)
       }
-      // Continue processing - try to get existing order UUID
+      throw orderError
     }
 
     // Get order UUID for line items (try to get it even if save failed, in case order already exists)
