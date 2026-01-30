@@ -2510,6 +2510,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         }
         const discountName = discountNames.length > 0 ? discountNames.join(', ') : null
         
+        // Build lineItemData - explicitly exclude removed fields (recipient_name, shipping fields, fulfillment_type/state)
+        // These fields were removed from schema but may still be in old Prisma Client cache
         const lineItemData = {
           organization_id: organizationId, // ✅ ADDED: Required field
           order_id: orderUuid, // Use UUID, not square order_id
@@ -2593,6 +2595,20 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           // Raw JSON
           raw_json: lineItem,
         }
+        
+        // Explicitly exclude removed fields to prevent Prisma errors if old client is cached
+        // These fields were removed from schema but may exist in old Prisma Client
+        delete lineItemData.recipient_name
+        delete lineItemData.recipient_email
+        delete lineItemData.recipient_phone
+        delete lineItemData.shipping_address_line_1
+        delete lineItemData.shipping_address_line_2
+        delete lineItemData.shipping_locality
+        delete lineItemData.shipping_administrative_district_level_1
+        delete lineItemData.shipping_postal_code
+        delete lineItemData.shipping_country
+        delete lineItemData.fulfillment_type
+        delete lineItemData.fulfillment_state
 
         // Use uid if available, otherwise create new record
         if (lineItem.uid) {
