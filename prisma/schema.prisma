@@ -140,8 +140,8 @@ model DevicePassRegistration {
 }
 
 model SquareExistingClient {
-  id                         Int       @id @default(autoincrement())
-  organization_id            String // Multi-tenant isolation
+  id                         String    @id @default(uuid())
+  organization_id            String    @db.Uuid // Multi-tenant isolation
   square_customer_id         String    @unique // Square customer ID (also has composite unique with organization_id below for multi-tenant)
   given_name                 String?
   family_name                String?
