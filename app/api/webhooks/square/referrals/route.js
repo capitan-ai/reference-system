@@ -2578,7 +2578,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         NOW(),
         NOW()
       )
-      ON CONFLICT (square_customer_id) DO UPDATE SET
+      ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
         given_name = COALESCE(square_existing_clients.given_name, EXCLUDED.given_name),
         family_name = COALESCE(square_existing_clients.family_name, EXCLUDED.family_name),
         email_address = COALESCE(square_existing_clients.email_address, EXCLUDED.email_address),
@@ -4160,7 +4160,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             NOW(),
             NOW()
           )
-          ON CONFLICT (square_customer_id) DO UPDATE SET
+          ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
             given_name = COALESCE(square_existing_clients.given_name, EXCLUDED.given_name),
             family_name = COALESCE(square_existing_clients.family_name, EXCLUDED.family_name),
             email_address = COALESCE(square_existing_clients.email_address, EXCLUDED.email_address),

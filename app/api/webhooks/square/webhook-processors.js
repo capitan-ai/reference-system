@@ -283,7 +283,7 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
         ${organizationId}::text, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
         NOW(), NOW()
       )
-      ON CONFLICT (square_customer_id) DO UPDATE SET
+      ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
         given_name = COALESCE(EXCLUDED.given_name, square_existing_clients.given_name),
         family_name = COALESCE(EXCLUDED.family_name, square_existing_clients.family_name),
         email_address = COALESCE(EXCLUDED.email_address, square_existing_clients.email_address),
