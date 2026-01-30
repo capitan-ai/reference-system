@@ -8,6 +8,26 @@ function safeStringify(value) {
   )
 }
 
+// Helper to safely serialize data for JSON responses (converts BigInt to string)
+function serializeBigInt(data) {
+  return JSON.parse(
+    JSON.stringify(data, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    )
+  )
+}
+
+// Helper to safely log errors that might contain BigInt values
+function safeLogError(message, error) {
+  const errorInfo = {
+    message: error?.message || String(error),
+    name: error?.name,
+    code: error?.code,
+    stack: error?.stack?.split('\n').slice(0, 5).join('\n')
+  }
+  console.error(message, safeStringify(errorInfo))
+}
+
 // Import square-env using dynamic require inside function to avoid webpack static analysis
 function getSquareEnvironmentName() {
   // eslint-disable-next-line global-require
@@ -489,7 +509,11 @@ export async function POST(request) {
           fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:253',message:'booking.updated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:bookingError.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
           // #endregion
           // Re-throw to return 500 so Square will retry
-          throw bookingError
+          // Re-throw a clean error without BigInt values
+          const cleanBookingError = new Error(bookingError?.message || 'Booking webhook processing failed')
+          cleanBookingError.name = bookingError?.name || 'BookingWebhookError'
+          cleanBookingError.code = bookingError?.code
+          throw cleanBookingError
         }
       } else {
         console.warn(`⚠️ Booking updated webhook received but booking data is missing`)
@@ -530,14 +554,17 @@ export async function POST(request) {
             // Update order_line_items with technician_id and administrator_id when payment arrives
             await updateOrderLineItemsWithTechnician(orderId)
           }
-        } catch (paymentError) {
-          console.error(`❌ Error processing payment webhook:`, paymentError.message)
-          console.error(`   Stack:`, paymentError.stack)
+      } catch (paymentError) {
+        safeLogError(`❌ Error processing payment webhook:`, paymentError)
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:135',message:'payment webhook error',data:{error:paymentError.message,paymentId:paymentData?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
           // #endregion
           // Re-throw to return 500 so Square will retry
-          throw paymentError
+          // Re-throw a clean error without BigInt values
+          const cleanPaymentError = new Error(paymentError?.message || 'Payment webhook processing failed')
+          cleanPaymentError.name = paymentError?.name || 'PaymentWebhookError'
+          cleanPaymentError.code = paymentError?.code
+          throw cleanPaymentError
         }
       } else {
         console.warn(`⚠️ Payment webhook received but payment data is missing`)
@@ -553,10 +580,12 @@ export async function POST(request) {
         await processOrderWebhook(eventData.data, eventData.type, eventData.merchant_id)
         console.log(`✅ Order webhook processed successfully`)
       } catch (orderError) {
-        console.error(`❌ Error processing order webhook:`, orderError.message)
-        console.error(`   Stack:`, orderError.stack)
-        // Re-throw to return 500 so Square will retry
-        throw orderError
+        safeLogError(`❌ Error processing order webhook:`, orderError)
+        // Re-throw a clean error without BigInt values so Next.js can serialize it
+        const cleanError = new Error(orderError?.message || 'Order webhook processing failed')
+        cleanError.name = orderError?.name || 'OrderWebhookError'
+        cleanError.code = orderError?.code
+        throw cleanError
       }
     } else {
       console.log('ℹ️ Unhandled event type:', eventData.type)
@@ -599,20 +628,15 @@ export async function POST(request) {
       }
     }
 
-    return new Response(JSON.stringify({ 
+    return new Response(JSON.stringify(serializeBigInt({ 
       ok: true, 
       message: 'Webhook processed successfully',
       eventType: eventData.type 
-    }), {
+    })), {
       headers: { 'Content-Type': 'application/json' }
     })
   } catch (error) {
-    console.error('❌ Webhook processing error:', error)
-    console.error('   Error type:', error?.constructor?.name)
-    console.error('   Error message:', error?.message)
-    if (error?.stack) {
-      console.error('   Stack trace:', error.stack.split('\n').slice(0, 5).join('\n'))
-    }
+    safeLogError('❌ Webhook processing error:', error)
     
     // Enqueue failed webhook for retry via cron
     if (eventData?.type && eventData?.event_id) {
@@ -639,11 +663,11 @@ export async function POST(request) {
     }
     
     // Return 500 so Square will retry the webhook
-    return new Response(JSON.stringify({ 
+    return new Response(JSON.stringify(serializeBigInt({ 
       error: 'Processing failed',
       details: error instanceof Error ? error.message : 'Unknown error',
       eventType: eventData?.type || 'unknown'
-    }), { 
+    })), { 
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     })
@@ -1235,8 +1259,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       // #region agent log
       const errorLogData = {location:'route.js:882',message:'payment upsert - error',data:{paymentId,error:paymentError.message,errorCode:paymentError.code,errorName:paymentError.name,paymentRecordKeys:Object.keys(paymentRecord),hasPaymentId:!!paymentRecord.payment_id,paymentIdValue:paymentRecord.payment_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'};
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(errorLogData)}).catch(()=>{});
-      console.error('[DEBUG ERROR]', JSON.stringify(errorLogData));
-      console.error('[DEBUG ERROR] Full error:', paymentError);
+      console.error('[DEBUG ERROR]', safeStringify(errorLogData));
+      safeLogError('[DEBUG ERROR] Full error:', paymentError);
       // #endregion
       throw paymentError
     }
@@ -1473,14 +1497,28 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
                 bookingOrgId = await resolveOrganizationIdFromLocationId(bookingLocationId)
               }
               
+              // Resolve location UUID from Square location ID
+              let bookingLocationUuid = null
+              if (bookingLocationId) {
+                const loc = await prisma.$queryRaw`
+                  SELECT id::text as id FROM locations 
+                  WHERE square_location_id = ${bookingLocationId}
+                    AND organization_id = ${bookingOrgId}::uuid
+                  LIMIT 1
+                `
+                if (loc && loc.length > 0) {
+                  bookingLocationUuid = loc[0].id
+                }
+              }
+              
               await prisma.$executeRaw`
                 INSERT INTO bookings (
                   organization_id, booking_id, customer_id, location_id, status, version,
                   start_at, created_at, updated_at, raw_json
                 ) VALUES (
-                  ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationId}, 
+                  ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
                   ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
-                  NOW(), NOW(), ${JSON.stringify(squareBooking)}::jsonb
+                  NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
                 )
                 ON CONFLICT (organization_id, booking_id) DO UPDATE SET
                   status = EXCLUDED.status,
@@ -2026,7 +2064,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         const dbInfoBeforeLocation = await prisma.$queryRaw`
           SELECT current_database(), inet_server_addr();
         `;
-        console.log("DB INFO (before Location lookup)", dbInfoBeforeLocation);
+        console.log("DB INFO (before Location lookup)", serializeBigInt(dbInfoBeforeLocation));
         
       // STEP 1: Try to find location by square_location_id AND organization_id (correct match)
         let locationRecord = await prisma.$queryRaw`
@@ -2295,7 +2333,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         const dbInfoBeforeOrder = await prisma.$queryRaw`
           SELECT current_database(), inet_server_addr();
         `;
-        console.log("DB INFO (before Order.create())", dbInfoBeforeOrder);
+        console.log("DB INFO (before Order.create())", serializeBigInt(dbInfoBeforeOrder));
         
         const newOrder = await prisma.order.create({
           data: {
@@ -2312,15 +2350,14 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           }
         })
         orderUuid = newOrder.id
+        // Safe to log - only using .id which is a string UUID
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2232',message:'Order created successfully',data:{orderId,orderUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
         // #endregion
       }
       console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
     } catch (orderError) {
-      console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
-      console.error(`   Error code: ${orderError.code}`)
-      console.error(`   Stack:`, orderError.stack)
+      safeLogError(`❌ Error saving order ${orderId} to orders table:`, orderError)
       
       // If foreign key constraint error, the location resolution failed
       if (orderError.code === 'P2003' || (orderError.code === '23503' && orderError.message?.includes('location_id_fkey'))) {
@@ -2529,7 +2566,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           
           // Order-level fields
           order_state: order.state || null,
-          order_version: order.version || null,
+          order_version: order.version ? Number(order.version) : null, // Cast to Number (safe, Square version is small integer)
           order_created_at: order.created_at ? new Date(order.created_at) : null,
           order_updated_at: order.updated_at ? new Date(order.updated_at) : null,
           order_closed_at: order.closed_at ? new Date(order.closed_at) : null,
@@ -2615,7 +2652,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               order_total_service_charge_money_currency = ${lineItemData.order_total_service_charge_money_currency},
               order_total_card_surcharge_money_amount = ${lineItemData.order_total_card_surcharge_money_amount},
               order_total_card_surcharge_money_currency = ${lineItemData.order_total_card_surcharge_money_currency},
-              raw_json = COALESCE(${JSON.stringify(lineItem)}::jsonb, order_line_items.raw_json),
+              raw_json = COALESCE(${safeStringify(lineItem)}::jsonb, order_line_items.raw_json),
               updated_at = NOW()
             WHERE organization_id = ${organizationId}::uuid
               AND uid = ${lineItem.uid}
@@ -2642,8 +2679,9 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
 
         console.log(`✅ Saved line item: ${lineItem.uid || 'no-uid'} - ${lineItem.name || 'unnamed'}`)
       } catch (lineItemError) {
-        console.error(`❌ Error saving line item ${lineItem.uid}:`, lineItemError)
-        // Continue processing other line items
+        // Ensure error is serialized safely before logging
+        safeLogError(`❌ Error saving line item ${lineItem.uid || 'no-uid'}:`, lineItemError)
+        // Continue processing other line items - don't let one failure stop the rest
       }
     }
 
@@ -2697,8 +2735,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     await updateOrderLineItemsWithTechnician(orderId)
     
   } catch (error) {
-    console.error(`❌ Error processing order webhook (${eventType}):`, error)
-    throw error
+    safeLogError(`❌ Error processing order webhook (${eventType}):`, error)
+    // Re-throw a clean error without BigInt values so Next.js can serialize it
+    const cleanError = new Error(error?.message || 'Order webhook processing failed')
+    cleanError.name = error?.name || 'OrderWebhookError'
+    cleanError.code = error?.code
+    throw cleanError
   }
 }
 
