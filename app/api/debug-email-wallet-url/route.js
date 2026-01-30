@@ -2,6 +2,8 @@
 const { sendGiftCardIssuedEmail } = require('../../../lib/email-service-simple')
 const QRCode = require('qrcode')
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const gan = request.nextUrl.searchParams.get('gan') || 'TEST123'

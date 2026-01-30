@@ -1,6 +1,8 @@
 const { sendGiftCardIssuedEmail } = require('../../../lib/email-service-simple')
 const QRCode = require('qrcode')
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const email = request.nextUrl.searchParams.get('email') || 'umit0912@icloud.com'

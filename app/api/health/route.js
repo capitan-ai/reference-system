@@ -15,6 +15,8 @@ const {
  * - Database connectivity
  * - Prisma model availability
  */
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const health = {

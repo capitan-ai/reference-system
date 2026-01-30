@@ -2,6 +2,8 @@
 // POST /v1/log
 // Receives diagnostic logs from devices
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const logs = await request.json().catch(() => ({}))

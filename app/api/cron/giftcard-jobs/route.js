@@ -151,6 +151,8 @@ async function handle(request) {
   }
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   return handle(request)
 }

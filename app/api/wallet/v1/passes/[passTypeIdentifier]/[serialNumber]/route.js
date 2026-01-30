@@ -28,6 +28,8 @@ function verifyAuthToken(request, serialNumber) {
   return authToken === expectedToken
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request, { params }) {
   try {
     const { passTypeIdentifier, serialNumber } = params

@@ -1,5 +1,7 @@
 const sendgridClient = require('@sendgrid/client')
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const apiKey = process.env.SENDGRID_API_KEY

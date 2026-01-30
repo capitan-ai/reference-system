@@ -32,6 +32,8 @@ const { resolveGiftCardContext } = loadWithDiagnostics(
 
 const prisma = loadWithDiagnostics('Prisma client', () => getPrisma())
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request, { params }) {
   try {
     const giftCardsApi = getGiftCardsApi()

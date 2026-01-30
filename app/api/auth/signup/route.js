@@ -14,6 +14,8 @@ const supabaseAdmin = supabaseUrl && supabaseServiceKey
   ? createClient(supabaseUrl, supabaseServiceKey)
   : null
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     // Check if Supabase is configured

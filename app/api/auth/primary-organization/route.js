@@ -6,6 +6,8 @@
 import { checkOrganizationAccess } from '../../../../lib/auth/check-access'
 import { prisma } from '../../../../lib/prisma-client'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const body = await request.json()

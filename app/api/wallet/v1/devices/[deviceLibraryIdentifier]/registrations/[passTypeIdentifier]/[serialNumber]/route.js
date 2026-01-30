@@ -12,6 +12,8 @@ const { generateAuthToken } = require('../../../../../../../../../lib/wallet/pas
 const { resolveGiftCardContext } = require('../../../../../../../../../lib/wallet/giftcard-context.js')
 const { getGiftCardsApi } = require('../../../../../../../../../lib/wallet/clients.js')
 
+export const dynamic = 'force-dynamic'
+
 // Verify authentication token
 function verifyAuthToken(request, serialNumber) {
   const authHeader = request.headers.get('authorization')

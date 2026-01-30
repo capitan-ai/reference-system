@@ -1,5 +1,7 @@
 const prisma = require('../../../../../lib/prisma-client')
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     // Optional: Add admin auth here if needed

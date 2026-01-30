@@ -1,6 +1,8 @@
 // Test endpoint to verify registration system is working
 import prisma from '@/lib/prisma-client'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const checks = {

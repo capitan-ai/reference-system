@@ -4764,6 +4764,8 @@ async function processBookingCreated(bookingData, runContext = {}) {
 // Note: These functions are available via lib/webhooks/giftcard-processors.js
 // We cannot export them here as Next.js routes only allow HTTP method exports
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     // Fix 5: Validate environment variables (non-blocking, log warnings)

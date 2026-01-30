@@ -430,6 +430,8 @@ function verifySquareSignature(payload, signature, webhookSecret) {
   }
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const rawBody = await request.text()

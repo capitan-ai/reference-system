@@ -1,5 +1,7 @@
 const { sendReferralCodeEmail } = require('../../../lib/email-service-simple')
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const testEmail = request.nextUrl.searchParams.get('email') || 'test@example.com'

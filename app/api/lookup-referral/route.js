@@ -329,6 +329,8 @@ async function findCustomerByPhone(phoneNumber) {
   }
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const body = await request.json()
