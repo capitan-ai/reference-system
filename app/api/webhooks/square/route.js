@@ -1990,6 +1990,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1981',message:'Starting location lookup',data:{finalLocationId,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
       // #endregion
         
+        // Database identity check BEFORE Location lookup
+        const dbInfoBeforeLocation = await prisma.$queryRaw`
+          SELECT current_database(), inet_server_addr();
+        `;
+        console.log("DB INFO (before Location lookup)", dbInfoBeforeLocation);
+        
       // STEP 1: Try to find location by square_location_id AND organization_id (correct match)
         let locationRecord = await prisma.$queryRaw`
           SELECT id::text as id, organization_id::text as organization_id FROM locations 
@@ -2141,6 +2147,81 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     console.log(`   locationUuid: ${cleanLocationUuid}`)
     console.log(`   organizationId: ${organizationId}`)
     
+    // #region agent log - HYPOTHESIS A: UUID format/type mismatch
+    // Log exact UUID value, type, and format before create
+    const uuidInfo = {
+      value: cleanLocationUuid,
+      type: typeof cleanLocationUuid,
+      length: cleanLocationUuid.length,
+      isUUIDFormat: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanLocationUuid),
+      bytes: Buffer.from(cleanLocationUuid).toString('hex'),
+      organizationId: organizationId
+    }
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2138',message:'UUID format check before create',data:uuidInfo,timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // #region agent log - HYPOTHESIS B: Direct database query with exact UUID
+    // Query location directly with the exact UUID we'll use
+    const directLocationCheck = await prisma.$queryRaw`
+      SELECT id::text as id, organization_id::text as org_id, square_location_id 
+      FROM locations 
+      WHERE id = ${cleanLocationUuid}::uuid
+    `
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2145',message:'Direct location query with exact UUID',data:{cleanLocationUuid,found:directLocationCheck?.length>0,locationData:directLocationCheck?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    
+    // #region agent log - HYPOTHESIS C: FK constraint definition check
+    // Check FK constraint definition to see what it's actually checking
+    const fkConstraintDef = await prisma.$queryRaw`
+      SELECT
+        tc.constraint_name,
+        kcu.column_name,
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name,
+        rc.match_option,
+        rc.update_rule,
+        rc.delete_rule
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      LEFT JOIN information_schema.referential_constraints AS rc
+        ON rc.constraint_name = tc.constraint_name
+        AND rc.constraint_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_name = 'orders'
+        AND kcu.column_name = 'location_id'
+    `
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2160',message:'FK constraint definition',data:{fkConstraintDef},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+    
+    // #region agent log - HYPOTHESIS D: Test FK constraint directly with raw SQL
+    // Test if we can insert with raw SQL using the exact UUID
+    const testFKInsert = await prisma.$queryRaw`
+      SELECT EXISTS(
+        SELECT 1 FROM locations WHERE id = ${cleanLocationUuid}::uuid
+      ) as location_exists
+    `
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2175',message:'FK constraint test with EXISTS',data:{cleanLocationUuid,locationExists:testFKInsert?.[0]?.location_exists},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    
+    // #region agent log - HYPOTHESIS E: Organization ID mismatch check
+    // Check if location's organization_id matches order's organization_id
+    const orgMatchCheck = await prisma.$queryRaw`
+      SELECT 
+        l.id::text as location_id,
+        l.organization_id::text as location_org_id,
+        ${organizationId}::text as order_org_id,
+        (l.organization_id = ${organizationId}::uuid) as org_match
+      FROM locations l
+      WHERE l.id = ${cleanLocationUuid}::uuid
+    `
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2185',message:'Organization ID match check',data:{orgMatchCheck:orgMatchCheck?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
+    
     // Use the same simple approach as payment webhook (no transaction)
     // First, try to find existing order
     const existingOrder = await prisma.$queryRaw`
@@ -2156,6 +2237,9 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         // Update existing order
         orderUuid = existingOrder[0].id
         console.log(`📝 Updating existing order ${orderId} with UUID ${orderUuid}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2200',message:'About to update order',data:{orderId,orderUuid,cleanLocationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+        // #endregion
         await prisma.order.update({
           where: { id: orderUuid },
           data: {
@@ -2171,6 +2255,16 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       } else {
         // Create new order (same pattern as payment webhook)
         console.log(`➕ Creating new order ${orderId}`)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2215',message:'About to create order - exact data',data:{orderId,organizationId,cleanLocationUuid,customerId,state:orderState||order.state,locationIdType:typeof cleanLocationUuid,locationIdValue:cleanLocationUuid,locationIdLength:cleanLocationUuid.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+        // #endregion
+        
+        // Database identity check BEFORE Order.create()
+        const dbInfoBeforeOrder = await prisma.$queryRaw`
+          SELECT current_database(), inet_server_addr();
+        `;
+        console.log("DB INFO (before Order.create())", dbInfoBeforeOrder);
+        
         const newOrder = await prisma.order.create({
           data: {
             organization_id: organizationId,
@@ -2186,6 +2280,9 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           }
         })
         orderUuid = newOrder.id
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2232',message:'Order created successfully',data:{orderId,orderUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+        // #endregion
       }
       console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
     } catch (orderError) {
@@ -2196,12 +2293,22 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       // If foreign key constraint error, the location resolution failed
       if (orderError.code === 'P2003' || (orderError.code === '23503' && orderError.message?.includes('location_id_fkey'))) {
         console.error(`❌ Foreign key constraint violation: location ${cleanLocationUuid} does not exist`)
-        // Final check: Does location exist?
+        // #region agent log - Post-error investigation
+        // Final check: Does location exist? Check multiple ways
         try {
-          const locationCheck = await prisma.$queryRaw`
+          const locationCheck1 = await prisma.$queryRaw`
             SELECT id::text as id FROM locations WHERE id = ${cleanLocationUuid}::uuid LIMIT 1
           `
-          if (!locationCheck || locationCheck.length === 0) {
+          const locationCheck2 = await prisma.$queryRaw`
+            SELECT id::text as id, organization_id::text as org_id FROM locations 
+            WHERE id::text = ${cleanLocationUuid} LIMIT 1
+          `
+          const locationCheck3 = await prisma.location.findUnique({
+            where: { id: cleanLocationUuid }
+          })
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2245',message:'Post-error location checks',data:{cleanLocationUuid,check1:locationCheck1?.length>0,check2:locationCheck2?.length>0,check3:!!locationCheck3,check1Data:locationCheck1?.[0],check2Data:locationCheck2?.[0],check3Data:locationCheck3?.id,errorCode:orderError.code,errorMessage:orderError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
+          // #endregion
+          if (!locationCheck1 || locationCheck1.length === 0) {
             console.error(`❌ Location ${cleanLocationUuid} does NOT exist - location resolution failed`)
             throw new Error(`Foreign key constraint violation: location ${cleanLocationUuid} does not exist. This indicates a bug in location resolution logic.`)
           } else {
