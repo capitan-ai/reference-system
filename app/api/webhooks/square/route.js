@@ -1930,8 +1930,6 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         console.error(`❌ Error resolving organization_id from merchant_id: ${err.message}`)
         console.error(`   Stack: ${err.stack}`)
       }
-    } else {
-      console.warn(`⚠️ Order ${orderId} missing merchant_id - this should not happen for order.created/updated webhooks`)
     }
     
     // STEP 2: Fallback to location_id (if merchant_id lookup failed)
@@ -1941,6 +1939,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       if (organizationId) {
         console.log(`✅ Resolved organization_id from location (fallback): ${organizationId.substring(0, 8)}...`)
       }
+    }
+
+    if (!merchantId && !organizationId) {
+      console.warn(`⚠️ Order ${orderId} missing merchant_id AND fallback resolution failed`)
+    } else if (!merchantId && organizationId) {
+      console.info(`ℹ️ Order ${orderId} missing merchant_id (resolved via location fallback)`)
     }
 
     // Location lookup already done above (STEP 1), no need to duplicate
