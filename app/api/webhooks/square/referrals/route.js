@@ -4956,6 +4956,31 @@ export async function POST(request) {
         
         const runContext = { correlationId, merchantId, organizationId }
 
+        // Best-effort enqueue for bookings table persistence (webhook-jobs)
+        let queuePrisma = null
+        try {
+          // eslint-disable-next-line global-require
+          const { enqueueWebhookJob } = require('../../../../../lib/workflows/webhook-job-queue')
+          // eslint-disable-next-line global-require
+          const { PrismaClient } = require('@prisma/client')
+          queuePrisma = new PrismaClient()
+
+          await enqueueWebhookJob(queuePrisma, {
+            eventType: 'booking.created',
+            eventId: webhookData.event_id,
+            eventCreatedAt: webhookData.created_at,
+            payload: webhookData.data || {}
+          })
+
+          console.log(`📦 Enqueued booking.created (${webhookData.event_id}) for bookings persistence`)
+        } catch (enqueueError) {
+          console.warn(`⚠️ Failed to enqueue booking.created for persistence:`, enqueueError.message)
+        } finally {
+          if (queuePrisma) {
+            await queuePrisma.$disconnect().catch(() => {})
+          }
+        }
+
         // Try to queue the job (async processing)
         const jobQueued = await enqueueGiftCardJob(prisma, {
           correlationId,
