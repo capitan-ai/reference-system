@@ -886,7 +886,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
             updated_at
           ) VALUES (
             gen_random_uuid(),
-            ${organizationId}::uuid,
+            ${organizationId}::text,
             ${locationId},
             ${`Location ${locationId.substring(0, 8)}...`},
             NOW(),
@@ -1509,7 +1509,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
                       organization_id, booking_id, customer_id, location_id, status, version,
                       start_at, created_at, updated_at, raw_json
                     ) VALUES (
-                      ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
+                      ${bookingOrgId}::text, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
                       ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
                       NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
                     )

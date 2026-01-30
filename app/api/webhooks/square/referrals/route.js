@@ -2562,7 +2562,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         created_at,
         updated_at
       ) VALUES (
-        ${organizationId}::uuid,
+        ${organizationId}::text,
         ${customerId},
         ${givenName},
         ${familyName},
@@ -4145,7 +4145,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             created_at,
             updated_at
           ) VALUES (
-            ${organizationId}::uuid,
+            ${organizationId}::text,
             ${customerId},
             ${squareGivenName},
             ${squareFamilyName},
