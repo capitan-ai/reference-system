@@ -2603,7 +2603,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         created_at,
         updated_at
       ) VALUES (
-        ${organizationId}::text,
+        ${organizationId}::uuid,
         ${customerId},
         ${givenName},
         ${familyName},
@@ -3438,7 +3438,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
             updated_at
           ) VALUES (
             gen_random_uuid(),
-            ${finalOrganizationId}::text,
+            ${finalOrganizationId}::uuid,
             ${squareLocationId},
             ${locationMerchantId},
             ${locationName},
@@ -3463,7 +3463,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const locationRecord = await prisma.$queryRaw`
           SELECT id FROM locations 
           WHERE square_location_id = ${squareLocationId}
-            AND organization_id = ${finalOrganizationId}::text
+            AND organization_id = ${finalOrganizationId}::uuid
           LIMIT 1
         `
         locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
@@ -3489,7 +3489,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const svRecord = await prisma.$queryRaw`
           SELECT uuid::text as id FROM service_variation
           WHERE square_variation_id = ${squareServiceVariationId}
-            AND organization_id = ${finalOrganizationId}::text
+            AND organization_id = ${finalOrganizationId}::uuid
           LIMIT 1
         `
         serviceVariationUuid = svRecord && svRecord.length > 0 ? svRecord[0].id : null
@@ -3511,7 +3511,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const tmRecord = await prisma.$queryRaw`
           SELECT id::text as id FROM team_members
           WHERE square_team_member_id = ${squareTeamMemberId}
-            AND organization_id = ${finalOrganizationId}::text
+            AND organization_id = ${finalOrganizationId}::uuid
           LIMIT 1
         `
         technicianUuid = tmRecord && tmRecord.length > 0 ? tmRecord[0].id : null
@@ -3531,7 +3531,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         const adminRecord = await prisma.$queryRaw`
           SELECT id::text as id FROM team_members
           WHERE square_team_member_id = ${creatorTeamMemberId}
-            AND organization_id = ${finalOrganizationId}::text
+            AND organization_id = ${finalOrganizationId}::uuid
           LIMIT 1
         `
         administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
@@ -3555,7 +3555,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         merchant_id, created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(),
-        ${finalOrganizationId}::text,
+        ${finalOrganizationId}::uuid,
         ${bookingId},
         ${bookingData.version || 0},
         ${customerId},
@@ -3615,7 +3615,7 @@ async function ensureBookingHeaderId(bookingData, customerId, merchantId, organi
   const existing = await prisma.$queryRaw`
     SELECT id FROM bookings
     WHERE booking_id = ${baseBookingId}
-      AND organization_id = ${organizationId}::text
+      AND organization_id = ${organizationId}::uuid
     LIMIT 1
   `
 
@@ -3628,7 +3628,7 @@ async function ensureBookingHeaderId(bookingData, customerId, merchantId, organi
   const created = await prisma.$queryRaw`
     SELECT id FROM bookings
     WHERE booking_id = ${baseBookingId}
-      AND organization_id = ${organizationId}::text
+      AND organization_id = ${organizationId}::uuid
     LIMIT 1
   `
 
@@ -3668,7 +3668,7 @@ async function upsertBookingSegments(bookingUuid, bookingData, organizationId) {
       const svRecord = await prisma.$queryRaw`
         SELECT uuid::text as id FROM service_variation
         WHERE square_variation_id = ${squareServiceVariationId}
-          AND organization_id = ${organizationId}::text
+          AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
       serviceVariationUuid = svRecord?.[0]?.id || null
@@ -3679,7 +3679,7 @@ async function upsertBookingSegments(bookingUuid, bookingData, organizationId) {
       const tmRecord = await prisma.$queryRaw`
         SELECT id::text as id FROM team_members
         WHERE square_team_member_id = ${squareTeamMemberId}
-          AND organization_id = ${organizationId}::text
+          AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
       technicianUuid = tmRecord?.[0]?.id || null
@@ -3903,7 +3903,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         const locationRecord = await prisma.$queryRaw`
           SELECT id FROM locations 
           WHERE square_location_id = ${squareLocationId}
-            AND organization_id = ${organizationId}::text
+            AND organization_id = ${organizationId}::uuid
           LIMIT 1
         `
         locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
@@ -3949,7 +3949,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
             const svRecord = await prisma.$queryRaw`
               SELECT uuid::text as id FROM service_variation
               WHERE square_variation_id = ${squareServiceVariationId}
-                AND organization_id = ${organizationId}::text
+                AND organization_id = ${organizationId}::uuid
               LIMIT 1
             `
             serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
@@ -3961,7 +3961,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
             const teamMemberRecord = await prisma.$queryRaw`
               SELECT id::text as id FROM team_members
               WHERE square_team_member_id = ${squareTeamMemberId}
-                AND organization_id = ${organizationId}::text
+                AND organization_id = ${organizationId}::uuid
               LIMIT 1
             `
             technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
@@ -4229,7 +4229,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             created_at,
             updated_at
           ) VALUES (
-            ${organizationId}::text,
+            ${organizationId}::uuid,
             ${customerId},
             ${squareGivenName},
             ${squareFamilyName},

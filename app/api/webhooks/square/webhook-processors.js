@@ -33,7 +33,7 @@ async function upsertBookingSegmentsFromPayload(bookingId, organizationId, booki
   const bookingRecord = await prisma.$queryRaw`
     SELECT id FROM bookings
     WHERE booking_id = ${bookingId}
-      AND organization_id = ${organizationId}::text
+      AND organization_id = ${organizationId}::uuid
     LIMIT 1
   `
   const bookingUuid = bookingRecord?.[0]?.id
@@ -65,7 +65,7 @@ async function upsertBookingSegmentsFromPayload(bookingId, organizationId, booki
       const svRecord = await prisma.$queryRaw`
         SELECT uuid::text as id FROM service_variation
         WHERE square_variation_id = ${squareServiceVariationId}
-          AND organization_id = ${organizationId}::text
+          AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
       serviceVariationUuid = svRecord?.[0]?.id || null
@@ -76,7 +76,7 @@ async function upsertBookingSegmentsFromPayload(bookingId, organizationId, booki
       const tmRecord = await prisma.$queryRaw`
         SELECT id::text as id FROM team_members
         WHERE square_team_member_id = ${squareTeamMemberId}
-          AND organization_id = ${organizationId}::text
+          AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
       technicianUuid = tmRecord?.[0]?.id || null
@@ -208,7 +208,7 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         id, organization_id, booking_id, customer_id, location_id, status, version,
         created_at, updated_at, raw_json
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::text, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
+        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
         ${bookingCreatedAt}::timestamp, ${bookingUpdatedAt}::timestamp, ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
@@ -280,7 +280,7 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
         organization_id, square_customer_id, given_name, family_name, email_address, phone_number,
         created_at, updated_at
       ) VALUES (
-        ${organizationId}::text, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
+        ${organizationId}::uuid, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
         NOW(), NOW()
       )
       ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
@@ -349,7 +349,7 @@ export async function processPaymentUpdated(payload, eventId, eventCreatedAt) {
         amount_money_amount, amount_money_currency, total_money_amount, total_money_currency,
         event_type, created_at, updated_at
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::text, ${paymentId}, ${customerId}, ${locationUuid}::uuid, ${status},
+        gen_random_uuid(), ${organizationId}::uuid, ${paymentId}, ${customerId}, ${locationUuid}::uuid, ${status},
         ${Number(amountMoney.amount || 0)}, ${amountMoney.currency || 'USD'},
         ${Number(totalMoney.amount || 0)}, ${totalMoney.currency || 'USD'},
         'payment.updated', NOW(), NOW()
@@ -634,7 +634,7 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
     let locationUuid = null
     if (locationId && organizationId) {
       const locRecord = await prisma.$queryRaw`
-        SELECT id FROM locations WHERE square_location_id = ${locationId} AND organization_id = ${organizationId}::text LIMIT 1
+        SELECT id FROM locations WHERE square_location_id = ${locationId} AND organization_id = ${organizationId}::uuid LIMIT 1
       `
       if (locRecord?.[0]?.id) {
         locationUuid = locRecord[0].id
@@ -648,7 +648,7 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
         id, organization_id, order_id, location_id, customer_id, state,
         created_at, updated_at, raw_json
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::text, ${orderId}, ${locationUuid}::uuid, ${customerId}, ${state},
+        gen_random_uuid(), ${organizationId}::uuid, ${orderId}, ${locationUuid}::uuid, ${customerId}, ${state},
         NOW(), NOW(), ${safeStringify(orderData)}::jsonb
       )
       ON CONFLICT (organization_id, order_id) DO UPDATE SET
@@ -708,7 +708,7 @@ export async function processTeamMemberCreated(payload, eventId, eventCreatedAt)
         id, organization_id, square_team_member_id, given_name, family_name, email_address, phone_number, status,
         created_at, updated_at
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::text, ${teamMemberId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber}, ${status},
+        gen_random_uuid(), ${organizationId}::uuid, ${teamMemberId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber}, ${status},
         NOW(), NOW()
       )
       ON CONFLICT (organization_id, square_team_member_id) DO UPDATE SET
