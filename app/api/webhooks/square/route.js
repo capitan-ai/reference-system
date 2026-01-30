@@ -359,7 +359,7 @@ async function resolveOrganizationIdFromLocationId(squareLocationId) {
           // Update location with organization_id for future use
           await prisma.$executeRaw`
             UPDATE locations
-            SET organization_id = ${orgId},
+            SET organization_id = ${orgId}::uuid,
                 updated_at = NOW()
             WHERE square_location_id = ${squareLocationId}
           `
@@ -976,7 +976,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const defaultLocation = await prisma.$queryRaw`
           SELECT square_location_id 
           FROM locations 
-          WHERE organization_id = ${organizationId}
+          WHERE organization_id = ${organizationId}::uuid
           ORDER BY updated_at DESC, created_at DESC
           LIMIT 1
         `
@@ -1049,7 +1049,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
             updated_at
           ) VALUES (
             gen_random_uuid(),
-            ${organizationId},
+            ${organizationId}::uuid,
             ${locationId},
             ${`Location ${locationId.substring(0, 8)}...`},
             NOW(),
@@ -1085,7 +1085,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
             created_at,
             updated_at
           ) VALUES (
-            ${organizationId},
+            ${organizationId}::uuid,
             ${customerId},
             false,
             NOW(),
@@ -1125,7 +1125,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
               updated_at
             ) VALUES (
               gen_random_uuid(),
-              ${organizationId},
+              ${organizationId}::uuid,
               ${orderId},
               ${locationUuid}::uuid,
               NOW(),
@@ -1189,7 +1189,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const orderRecord = await prisma.$queryRaw`
           SELECT id FROM orders 
           WHERE order_id = ${orderId}
-            AND organization_id = ${organizationId}
+            AND organization_id = ${organizationId}::uuid
           LIMIT 1
         `
         // #region agent log
@@ -1220,7 +1220,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         const teamMember = await prisma.$queryRaw`
           SELECT id FROM team_members 
           WHERE square_team_member_id = ${squareTeamMemberId}
-            AND organization_id = ${organizationId}
+            AND organization_id = ${organizationId}::uuid
           LIMIT 1
         `
         if (teamMember && teamMember.length > 0) {
@@ -1365,7 +1365,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // First, try to find existing payment
     const existingPayment = await prisma.$queryRaw`
       SELECT id FROM payments
-      WHERE organization_id = ${organizationId}
+      WHERE organization_id = ${organizationId}::uuid
         AND payment_id = ${paymentId}
       LIMIT 1
     `
@@ -1555,7 +1555,7 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           SET booking_id = ${orderWithBooking[0].booking_id}::uuid,
               updated_at = NOW()
           WHERE payment_id = ${paymentId}
-            AND organization_id = ${organizationId}
+            AND organization_id = ${organizationId}::uuid
             AND booking_id IS NULL
         `
         console.log(`✅ Copied booking_id from order to payment`)
@@ -1833,7 +1833,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
           SET booking_id = ${bookingId}::uuid,
               updated_at = NOW()
           WHERE payment_id = ${paymentId}
-            AND organization_id = ${organizationId}
+            AND organization_id = ${organizationId}::uuid
             AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
         `
         console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}`)
@@ -1997,7 +1997,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
           technician_id = COALESCE(${technicianId}::uuid, technician_id),
           administrator_id = COALESCE(${administratorId}::uuid, administrator_id)
         WHERE order_id = ${orderUuid}::uuid
-          AND organization_id = ${organizationId}
+          AND organization_id = ${organizationId}::uuid
           AND service_variation_id = ${serviceVariationId}
           AND (
             technician_id IS NULL 
@@ -2017,7 +2017,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
           technician_id = COALESCE(${primaryTechnicianId}::uuid, technician_id),
           administrator_id = COALESCE(${administratorId}::uuid, administrator_id)
         WHERE order_id = ${orderUuid}::uuid
-          AND organization_id = ${organizationId}
+          AND organization_id = ${organizationId}::uuid
           AND (technician_id IS NULL OR administrator_id IS NULL)
       `
     }
@@ -2454,7 +2454,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       const orderRecord = await prisma.$queryRaw`
         SELECT id FROM orders 
         WHERE order_id = ${orderId}
-          AND organization_id = ${organizationId}
+          AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
       orderUuid = orderRecord && orderRecord.length > 0 ? orderRecord[0].id : null
@@ -2490,7 +2490,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               raw_json
             ) VALUES (
               ${newOrderUuid}::uuid,
-              ${organizationId},
+              ${organizationId}::uuid,
               ${orderId},
               ${locationUuid}::uuid,
               ${customerId},
@@ -2727,7 +2727,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               order_total_card_surcharge_money_currency = ${lineItemData.order_total_card_surcharge_money_currency},
               raw_json = COALESCE(${safeStringify(lineItem)}::jsonb, order_line_items.raw_json),
               updated_at = NOW()
-            WHERE organization_id = ${organizationId}
+            WHERE organization_id = ${organizationId}::uuid
               AND uid = ${lineItem.uid}
           `
           
