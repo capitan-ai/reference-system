@@ -11,6 +11,7 @@
 require('dotenv').config()
 const prisma = require('../lib/prisma-client')
 const { Client, Environment } = require('square')
+const { resolveLocationUuidForSquareLocationId } = require('../lib/location-resolver')
 
 const PACIFIC_AVE_SQUARE_LOCATION_ID = 'LNQKVBTQZN3EZ'
 const ORGANIZATION_ID = 'd0e24178-2f94-4033-bc91-41f22df58278'
@@ -84,41 +85,7 @@ async function resolveOrganizationId(merchantId) {
 }
 
 async function ensureLocationExists(squareLocationId, organizationId) {
-  if (!squareLocationId || !organizationId) return null
-  
-  try {
-    // Ensure location exists
-    await prisma.$executeRaw`
-      INSERT INTO locations (
-        id,
-        organization_id,
-        square_location_id,
-        name,
-        created_at,
-        updated_at
-      ) VALUES (
-        gen_random_uuid(),
-        ${organizationId}::uuid,
-        ${squareLocationId},
-        ${`Location ${squareLocationId.substring(0, 8)}...`},
-        NOW(),
-        NOW()
-      )
-      ON CONFLICT (organization_id, square_location_id) DO NOTHING
-    `
-    
-    // Get location UUID
-    const locationRecord = await prisma.$queryRaw`
-      SELECT id FROM locations 
-      WHERE square_location_id = ${squareLocationId}
-        AND organization_id = ${organizationId}::uuid
-      LIMIT 1
-    `
-    return locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-  } catch (err) {
-    console.warn(`⚠️ Location upsert warning: ${err.message}`)
-    return null
-  }
+  return resolveLocationUuidForSquareLocationId(prisma, squareLocationId, organizationId)
 }
 
 // Import savePaymentToDatabase logic directly

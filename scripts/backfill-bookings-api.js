@@ -9,6 +9,7 @@
 require('dotenv').config();
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { resolveLocationUuidForSquareLocationId } = require('../lib/location-resolver');
 
 const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN?.trim();
 const SQUARE_API_BASE = 'https://connect.squareup.com/v2';
@@ -60,12 +61,12 @@ function safeStringify(obj) {
 async function resolveOrganizationId(locationId) {
   if (locationId) {
     const loc = await prisma.$queryRaw`
-      SELECT organization_id, id FROM locations 
+      SELECT organization_id FROM locations 
       WHERE square_location_id = ${locationId}
       LIMIT 1
     `;
     if (loc && loc.length > 0) {
-      return { organizationId: loc[0].organization_id, internalLocationId: loc[0].id };
+      return { organizationId: loc[0].organization_id };
     }
   }
   
@@ -73,7 +74,7 @@ async function resolveOrganizationId(locationId) {
   const defaultOrg = await prisma.$queryRaw`
     SELECT id FROM organizations WHERE is_active = true ORDER BY created_at ASC LIMIT 1
   `;
-  return { organizationId: defaultOrg?.[0]?.id || null, internalLocationId: null };
+  return { organizationId: defaultOrg?.[0]?.id || null };
 }
 
 async function resolveTechnicianId(squareTeamMemberId) {
@@ -117,9 +118,14 @@ async function processBooking(booking) {
   const anyTeamMember = firstSegment.any_team_member || false;
   
   // Resolve IDs
-  const { organizationId, internalLocationId } = await resolveOrganizationId(locationId);
+  const { organizationId } = await resolveOrganizationId(locationId);
   if (!organizationId) {
     return { success: false, reason: 'no_org' };
+  }
+
+  const internalLocationId = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId);
+  if (!internalLocationId) {
+    return { success: false, reason: 'location_not_resolved' };
   }
   
   const internalTechnicianId = await resolveTechnicianId(squareTeamMemberId);

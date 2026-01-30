@@ -6,6 +6,9 @@
  */
 
 import prisma from '../../../../lib/prisma-client'
+import locationResolver from '../../../../lib/location-resolver'
+
+const { resolveLocationUuidForSquareLocationId } = locationResolver
 
 // Helper to clean values
 function cleanValue(val) {
@@ -40,6 +43,12 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
   const status = bookingData.status
   const version = bookingData.version
 
+  // Extract Square's created_at from booking data (use it instead of NOW())
+  const squareCreatedAt = bookingData.created_at || bookingData.createdAt
+  const squareUpdatedAt = bookingData.updated_at || bookingData.updatedAt
+  const bookingCreatedAt = squareCreatedAt ? new Date(squareCreatedAt) : new Date()
+  const bookingUpdatedAt = squareUpdatedAt ? new Date(squareUpdatedAt) : new Date()
+
   console.log(`[WEBHOOK-PROCESSOR] Processing booking ${bookingId} for customer ${customerId}`)
 
   try {
@@ -48,11 +57,11 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
     let locationUuid = null
     if (locationId) {
       const location = await prisma.$queryRaw`
-        SELECT id, organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
+        SELECT organization_id FROM locations WHERE square_location_id = ${locationId} LIMIT 1
       `
-      if (location?.[0]) {
+      if (location?.[0]?.organization_id) {
         organizationId = location[0].organization_id
-        locationUuid = location[0].id
+        locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
       }
     }
     
@@ -61,19 +70,25 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       return
     }
 
+    if (!locationUuid) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Could not resolve location UUID for ${locationId}`)
+      return
+    }
+
     // Insert or update booking (location_id is internal UUID)
+    // Use Square's created_at from booking data, not NOW()
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, customer_id, location_id, status, version,
         created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
-        NOW(), NOW(), ${safeStringify(bookingData)}::jsonb
+        ${bookingCreatedAt}::timestamp, ${bookingUpdatedAt}::timestamp, ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         status = EXCLUDED.status,
         version = EXCLUDED.version,
-        updated_at = NOW(),
+        updated_at = ${bookingUpdatedAt}::timestamp,
         raw_json = EXCLUDED.raw_json
     `
 

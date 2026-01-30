@@ -1,5 +1,8 @@
 import crypto from 'crypto'
 import prisma from '../../../../lib/prisma-client'
+import locationResolver from '../../../../lib/location-resolver'
+
+const { resolveLocationUuidForSquareLocationId } = locationResolver
 
 // Helper to safely stringify objects with BigInt values
 function safeStringify(value) {
@@ -939,19 +942,13 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       }
     }
 
+    const locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
+
     // Ensure order exists if provided
     if (orderId) {
       try {
-        // Get location UUID from square_location_id
-        const locationRecord = await prisma.$queryRaw`
-          SELECT id::text as id FROM locations 
-          WHERE square_location_id = ${locationId}
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        const locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:620',message:'order upsert - before insert',data:{orderId,locationId,squareLocationId:locationId,locationUuid,hasLocationUuid:!!locationUuid,locationRecordCount:locationRecord?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:620',message:'order upsert - before insert',data:{orderId,locationId,squareLocationId:locationId,locationUuid,hasLocationUuid:!!locationUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
         // #endregion
         // ✅ FIX: Only insert order if locationUuid exists (required foreign key)
         if (locationUuid) {
@@ -1012,15 +1009,6 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // Extract application and device details (same as backfill script)
     const appDetails = getValue(paymentData, 'applicationDetails', 'application_details') || {}
     const deviceDetails = getValue(paymentData, 'deviceDetails', 'device_details') || {}
-
-    // Get location UUID from square_location_id
-    const locationRecord = await prisma.$queryRaw`
-      SELECT id::text as id FROM locations 
-      WHERE square_location_id = ${locationId}
-        AND organization_id = ${organizationId}::uuid
-      LIMIT 1
-    `
-    const locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
 
     if (!locationUuid) {
       console.error(`❌ Cannot save payment: location UUID not found for square_location_id ${locationId}`)
@@ -1497,43 +1485,50 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
                 bookingOrgId = await resolveOrganizationIdFromLocationId(bookingLocationId)
               }
               
-              // Resolve location UUID from Square location ID
-              let bookingLocationUuid = null
-              if (bookingLocationId) {
-                const loc = await prisma.$queryRaw`
-                  SELECT id::text as id FROM locations 
-                  WHERE square_location_id = ${bookingLocationId}
-                    AND organization_id = ${bookingOrgId}::uuid
-                  LIMIT 1
-                `
-                if (loc && loc.length > 0) {
-                  bookingLocationUuid = loc[0].id
-                }
-              }
-              
-              await prisma.$executeRaw`
-                INSERT INTO bookings (
-                  organization_id, booking_id, customer_id, location_id, status, version,
-                  start_at, created_at, updated_at, raw_json
-                ) VALUES (
-                  ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
-                  ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
-                  NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
+              if (!bookingOrgId) {
+                console.error('[BOOKING-INSERT] organization_id missing', {
+                  bookingId: newBookingId,
+                  squareLocationId: bookingLocationId,
+                })
+              } else {
+                const bookingLocationUuid = await resolveLocationUuidForSquareLocationId(
+                  prisma,
+                  bookingLocationId,
+                  bookingOrgId
                 )
-                ON CONFLICT (organization_id, booking_id) DO UPDATE SET
-                  status = EXCLUDED.status,
-                  version = EXCLUDED.version,
-                  updated_at = NOW(),
-                  raw_json = EXCLUDED.raw_json
-                RETURNING id
-              `
-              
-              const insertedBooking = await prisma.$queryRaw`
-                SELECT id FROM bookings WHERE booking_id = ${newBookingId} LIMIT 1
-              `
-              if (insertedBooking && insertedBooking.length > 0) {
-                bookingId = insertedBooking[0].id
-                console.log(`✅ [RECONCILE] Saved and linked booking: ${bookingId}`)
+
+                if (!bookingLocationUuid) {
+                  console.error('[BOOKING-INSERT] Location UUID resolution failed', {
+                    bookingId: newBookingId,
+                    squareLocationId: bookingLocationId,
+                    organizationId: bookingOrgId,
+                  })
+                } else {
+                  await prisma.$executeRaw`
+                    INSERT INTO bookings (
+                      organization_id, booking_id, customer_id, location_id, status, version,
+                      start_at, created_at, updated_at, raw_json
+                    ) VALUES (
+                      ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
+                      ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
+                      NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
+                    )
+                    ON CONFLICT (organization_id, booking_id) DO UPDATE SET
+                      status = EXCLUDED.status,
+                      version = EXCLUDED.version,
+                      updated_at = NOW(),
+                      raw_json = EXCLUDED.raw_json
+                    RETURNING id
+                  `
+                  
+                  const insertedBooking = await prisma.$queryRaw`
+                    SELECT id FROM bookings WHERE booking_id = ${newBookingId} LIMIT 1
+                  `
+                  if (insertedBooking && insertedBooking.length > 0) {
+                    bookingId = insertedBooking[0].id
+                    console.log(`✅ [RECONCILE] Saved and linked booking: ${bookingId}`)
+                  }
+                }
               }
             }
           } catch (fetchError) {
@@ -1565,15 +1560,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
       if (locationId && locationId.length < 36) {
         // It's a square_location_id
         squareLocationId = locationId
-        const loc = await prisma.$queryRaw`
-          SELECT id::text as id FROM locations 
-          WHERE square_location_id = ${locationId}
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        if (loc && loc.length > 0) {
-          locationUuid = loc[0].id
-        }
+        locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
       } else {
         // It's a UUID
         locationUuid = locationId
@@ -2054,148 +2041,14 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       throw new Error(`Cannot process order ${orderId}: organization_id is required to resolve location`)
     }
     
-      try {
-        console.log(`🔍 Looking up location: square_location_id=${finalLocationId}, organization_id=${organizationId}`)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1981',message:'Starting location lookup',data:{finalLocationId,organizationId,orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-        
-        // Database identity check BEFORE Location lookup
-        const dbInfoBeforeLocation = await prisma.$queryRaw`
-          SELECT current_database(), inet_server_addr();
-        `;
-        console.log("DB INFO (before Location lookup)", serializeBigInt(dbInfoBeforeLocation));
-        
-      // STEP 1: Try to find location by square_location_id AND organization_id (correct match)
-        let locationRecord = await prisma.$queryRaw`
-          SELECT id::text as id, organization_id::text as organization_id FROM locations 
-          WHERE square_location_id = ${finalLocationId}
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        console.log(`🔍 Query result: ${locationRecord?.length || 0} rows found`)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1992',message:'Location lookup STEP 1 result',data:{finalLocationId,organizationId,orderId,rowsFound:locationRecord?.length||0,locationUuid:locationRecord?.[0]?.id,foundOrgId:locationRecord?.[0]?.organization_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-        if (locationRecord && locationRecord.length > 0) {
-        locationUuid = locationRecord[0].id
-        console.log(`✅ Found location: id=${locationUuid}, organization_id=${locationRecord[0].organization_id}`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1996',message:'Location found in STEP 1',data:{finalLocationId,organizationId,orderId,locationUuid,locationUuidType:typeof locationUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-      }
-      
-      // STEP 2: If not found, try to find by square_location_id only (might need org update)
-        if (!locationUuid) {
-          console.log(`🔍 Location not found with organization_id filter, trying without organization_id filter...`)
-          locationRecord = await prisma.$queryRaw`
-            SELECT id::text as id, organization_id::text as organization_id FROM locations 
-            WHERE square_location_id = ${finalLocationId}
-            LIMIT 1
-          `
-          console.log(`🔍 Fallback query result: ${locationRecord?.length || 0} rows found`)
-          
-          if (locationRecord && locationRecord.length > 0) {
-            const existingLocation = locationRecord[0]
-            const existingOrgId = existingLocation.organization_id ? String(existingLocation.organization_id).trim().toLowerCase() : null
-          const expectedOrgId = String(organizationId).trim().toLowerCase()
-            
-            console.log(`   Found location (without org filter): id=${existingLocation.id}`)
-            console.log(`   Existing organization_id: ${existingOrgId || 'NULL'}`)
-          console.log(`   Expected organization_id: ${expectedOrgId}`)
-            
-            locationUuid = existingLocation.id
-            
-          // Always update organization_id to match the order's organization
-          if (!existingOrgId || existingOrgId !== expectedOrgId) {
-            console.log(`📍 Updating location ${locationUuid} with correct organization_id`)
-              await prisma.$executeRaw`
-                UPDATE locations 
-                SET organization_id = ${organizationId}::uuid,
-                    updated_at = NOW()
-                WHERE id = ${locationUuid}::uuid
-              `
-              console.log(`✅ Updated location with correct organization_id`)
-            } else {
-            console.log(`✅ Location found with matching organization_id`)
-            }
-          }
-        }
-        
-      // STEP 3: If still not found, create it with the correct organization_id
-        if (!locationUuid) {
-        console.log(`📍 Creating new location for square_location_id: ${finalLocationId}`)
-          try {
-            const newLocation = await prisma.location.create({
-              data: {
-                organization_id: organizationId,
-                square_location_id: finalLocationId,
-                name: `Location ${finalLocationId.substring(0, 8)}...`
-              }
-            })
-            locationUuid = newLocation.id
-            console.log(`✅ Created new location ${locationUuid} for square_location_id ${finalLocationId}`)
-          } catch (createErr) {
-            // If creation fails due to unique constraint (race condition), retry lookup
-            if (createErr.code === 'P2002' || createErr.message?.includes('unique') || createErr.message?.includes('duplicate')) {
-              console.log(`⚠️ Location creation failed (likely race condition), retrying lookup...`)
-              const retryRecord = await prisma.$queryRaw`
-                SELECT id::text as id FROM locations 
-                WHERE square_location_id = ${finalLocationId}
-                  AND organization_id = ${organizationId}::uuid
-                LIMIT 1
-              `
-            if (retryRecord && retryRecord.length > 0) {
-              locationUuid = retryRecord[0].id
-              console.log(`✅ Found location after race condition retry: ${locationUuid}`)
-            } else {
-              // Last resort: find by square_location_id only and update org
-                const fallbackRecord = await prisma.$queryRaw`
-                  SELECT id::text as id FROM locations 
-                  WHERE square_location_id = ${finalLocationId}
-                  LIMIT 1
-                `
-              if (fallbackRecord && fallbackRecord.length > 0) {
-                locationUuid = fallbackRecord[0].id
-                // Update organization_id to match
-                await prisma.$executeRaw`
-                  UPDATE locations 
-                  SET organization_id = ${organizationId}::uuid,
-                      updated_at = NOW()
-                  WHERE id = ${locationUuid}::uuid
-                `
-                console.log(`✅ Found and updated location after race condition: ${locationUuid}`)
-              } else {
-                throw new Error(`Failed to create or find location after race condition: ${createErr.message}`)
-              }
-              }
-            } else {
-              throw createErr // Re-throw if it's a different error
-            }
-          }
-        }
-        
-      // STEP 4: Final verification - ensure location exists and belongs to correct organization
-        if (locationUuid) {
-        const verifyRecord = await prisma.$queryRaw`
-          SELECT id::text as id, organization_id::text as organization_id FROM locations 
-          WHERE id = ${locationUuid}::uuid
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        if (!verifyRecord || verifyRecord.length === 0) {
-          throw new Error(`Location ${locationUuid} does not exist or does not belong to organization ${organizationId}`)
-        }
-        console.log(`✅ Verified location UUID ${locationUuid} exists and belongs to organization ${organizationId}`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2097',message:'Location verified after resolution',data:{locationUuid,organizationId,orderId,finalLocationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        } else {
+    try {
+      locationUuid = await resolveLocationUuidForSquareLocationId(prisma, finalLocationId, organizationId)
+      if (!locationUuid) {
         throw new Error(`Failed to resolve location UUID for square_location_id: ${finalLocationId}`)
-        }
-      } catch (err) {
-        console.error(`❌ Error getting/creating location: ${err.message}`)
-        console.error(`   Stack: ${err.stack}`)
+      }
+    } catch (err) {
+      console.error(`❌ Error getting/creating location: ${err.message}`)
+      console.error(`   Stack: ${err.stack}`)
       throw new Error(`Cannot process order ${orderId}: failed to resolve location. ${err.message}`)
     }
 

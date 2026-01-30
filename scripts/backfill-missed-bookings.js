@@ -10,6 +10,7 @@
 require('dotenv').config()
 const { PrismaClient } = require('@prisma/client')
 const { Client, Environment } = require('square')
+const { resolveLocationUuidForSquareLocationId } = require('../lib/location-resolver')
 
 const prisma = new PrismaClient()
 
@@ -186,44 +187,14 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       return false
     }
     
-    // Resolve location UUID
-    let locationUuid = null
-    try {
-      // Fetch location from Square API to get merchant_id
-      const locationResponse = await locationsApi.retrieveLocation(squareLocationId)
-      const location = locationResponse.result?.location
-      // Square API returns merchantId (camelCase), not merchant_id
-      const locationMerchantId = location?.merchantId || location?.merchant_id || null
-      const locationName = location?.name || `Location ${squareLocationId.substring(0, 8)}...`
-      
-      // Ensure location exists
-      await prisma.$executeRaw`
-        INSERT INTO locations (
-          id, organization_id, square_location_id, square_merchant_id, name, created_at, updated_at
-        ) VALUES (
-          gen_random_uuid(), ${organizationId}::uuid, ${squareLocationId}, ${locationMerchantId},
-          ${locationName}, NOW(), NOW()
-        )
-        ON CONFLICT (organization_id, square_location_id) DO UPDATE SET
-          square_merchant_id = COALESCE(EXCLUDED.square_merchant_id, locations.square_merchant_id),
-          name = COALESCE(EXCLUDED.name, locations.name),
-          updated_at = NOW()
-      `
-      
-      const locationRecord = await prisma.$queryRaw`
-        SELECT id FROM locations 
-        WHERE square_location_id = ${squareLocationId}
-          AND organization_id = ${organizationId}::uuid
-        LIMIT 1
-      `
-      locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-      
-      if (!locationUuid) {
-        console.error(`   ❌ Cannot save booking: location UUID not found`)
-        return false
-      }
-    } catch (err) {
-      console.error(`   ❌ Error resolving location: ${err.message}`)
+    if (!organizationId) {
+      console.error(`   ❌ Cannot save booking: organization_id is required`)
+      return false
+    }
+
+    const locationUuid = await resolveLocationUuidForSquareLocationId(prisma, squareLocationId, organizationId)
+    if (!locationUuid) {
+      console.error(`   ❌ Cannot save booking: location UUID not found`)
       return false
     }
     

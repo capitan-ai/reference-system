@@ -13,6 +13,7 @@ require('dotenv').config()
 const { PrismaClient } = require('@prisma/client')
 const { Client, Environment } = require('square')
 const { getSquareEnvironmentName } = require('../lib/utils/square-env')
+const { resolveLocationUuidForSquareLocationId } = require('../lib/location-resolver')
 const fs = require('fs')
 const path = require('path')
 
@@ -145,7 +146,7 @@ async function saveBookingToDatabase(booking, merchantId = null, organizationId 
     if (!finalOrganizationId && finalMerchantId) {
       finalOrganizationId = await resolveOrganizationId(finalMerchantId)
     }
-    
+
     // Get location ID first (we need it to resolve organization_id)
     const squareLocationId = booking.locationId || booking.location_id || booking.location?.id || null
     
@@ -153,109 +154,18 @@ async function saveBookingToDatabase(booking, merchantId = null, organizationId 
       console.warn(`   ⚠️  Booking ${baseBookingId} missing location_id`)
       return { success: false, reason: 'no_location' }
     }
-    
-    // First, check if location exists (might have different organization_id)
-    let locationUuid = null
-    let locationOrgId = null
-    
-    const existingLocation = await prisma.$queryRaw`
-      SELECT id, organization_id FROM locations 
-      WHERE square_location_id = ${squareLocationId}
-      LIMIT 1
-    `
-    
-    if (existingLocation && existingLocation.length > 0) {
-      locationUuid = existingLocation[0].id
-      locationOrgId = existingLocation[0].organization_id
-      // Use the organization_id from the existing location
-      if (!finalOrganizationId) {
-        finalOrganizationId = locationOrgId
-      } else if (finalOrganizationId !== locationOrgId) {
-        // Location exists with different org - use the location's org
-        finalOrganizationId = locationOrgId
+
+    if (!finalOrganizationId) {
+      const locationOrg = await prisma.$queryRaw`
+        SELECT organization_id FROM locations 
+        WHERE square_location_id = ${squareLocationId}
+        LIMIT 1
+      `
+      if (locationOrg?.[0]?.organization_id) {
+        finalOrganizationId = locationOrg[0].organization_id
       }
     }
-    
-    // If location doesn't exist, create it
-    if (!locationUuid) {
-      if (!finalOrganizationId) {
-        // Try to get default organization
-        const defaultOrg = await prisma.$queryRaw`
-          SELECT id FROM organizations LIMIT 1
-        `
-        if (defaultOrg && defaultOrg.length > 0) {
-          finalOrganizationId = defaultOrg[0].id
-        } else {
-          console.warn(`   ⚠️  Cannot create location: no organization_id available`)
-          return { success: false, reason: 'no_organization_for_location' }
-        }
-      }
-      
-      try {
-        await prisma.$executeRaw`
-          INSERT INTO locations (
-            id,
-            organization_id,
-            square_location_id,
-            name,
-            created_at,
-            updated_at
-          ) VALUES (
-            gen_random_uuid(),
-            ${finalOrganizationId}::uuid,
-            ${squareLocationId},
-            ${`Location ${squareLocationId.substring(0, 8)}...`},
-            NOW(),
-            NOW()
-          )
-          ON CONFLICT (organization_id, square_location_id) DO NOTHING
-        `
-        
-        // Get the newly created location
-        const newLocation = await prisma.$queryRaw`
-          SELECT id, organization_id FROM locations 
-          WHERE square_location_id = ${squareLocationId}
-            AND organization_id = ${finalOrganizationId}::uuid
-          LIMIT 1
-        `
-        if (newLocation && newLocation.length > 0) {
-          locationUuid = newLocation[0].id
-          locationOrgId = newLocation[0].organization_id
-        }
-      } catch (error) {
-        // If conflict, try to get the existing location again
-        if (error.code === '23505') {
-          const retryLocation = await prisma.$queryRaw`
-            SELECT id, organization_id FROM locations 
-            WHERE square_location_id = ${squareLocationId}
-            LIMIT 1
-          `
-          if (retryLocation && retryLocation.length > 0) {
-            locationUuid = retryLocation[0].id
-            locationOrgId = retryLocation[0].organization_id
-            if (!finalOrganizationId) {
-              finalOrganizationId = locationOrgId
-            }
-          } else {
-            throw error
-          }
-        } else {
-          throw error
-        }
-      }
-    }
-    
-    if (!locationUuid) {
-      console.warn(`   ⚠️  Cannot resolve location UUID for ${squareLocationId}`)
-      return { success: false, reason: 'no_location_uuid' }
-    }
-    
-    // Ensure we have organization_id (use location's org)
-    if (!finalOrganizationId && locationOrgId) {
-      finalOrganizationId = locationOrgId
-    }
-    
-    // Default organization if still not found
+
     if (!finalOrganizationId) {
       const defaultOrg = await prisma.$queryRaw`
         SELECT id FROM organizations LIMIT 1
@@ -264,10 +174,16 @@ async function saveBookingToDatabase(booking, merchantId = null, organizationId 
         finalOrganizationId = defaultOrg[0].id
       }
     }
-    
+
     if (!finalOrganizationId) {
       console.warn(`   ⚠️  Cannot resolve organization_id for booking ${baseBookingId}`)
       return { success: false, reason: 'no_organization' }
+    }
+
+    const locationUuid = await resolveLocationUuidForSquareLocationId(prisma, squareLocationId, finalOrganizationId)
+    if (!locationUuid) {
+      console.warn(`   ⚠️  Cannot resolve location UUID for ${squareLocationId}`)
+      return { success: false, reason: 'no_location_uuid' }
     }
     
     // Get customer ID
