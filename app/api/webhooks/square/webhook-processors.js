@@ -175,6 +175,14 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
   const bookingCreatedAt = squareCreatedAt ? new Date(squareCreatedAt) : new Date()
   const bookingUpdatedAt = squareUpdatedAt ? new Date(squareUpdatedAt) : new Date()
 
+  // Extract start_at - REQUIRED field
+  const startAt = bookingData.start_at || bookingData.startAt
+  if (!startAt) {
+    console.error(`[WEBHOOK-PROCESSOR] ❌ Missing required start_at field for booking ${bookingId}`)
+    throw new Error(`Missing required start_at field for booking ${bookingId}`)
+  }
+  const bookingStartAt = new Date(startAt)
+
   console.log(`[WEBHOOK-PROCESSOR] Processing booking ${bookingId} for customer ${customerId}`)
 
   try {
@@ -203,17 +211,19 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
 
     // Insert or update booking (location_id is internal UUID)
     // Use Square's created_at from booking data, not NOW()
+    // Include start_at - REQUIRED field
     await prisma.$executeRaw`
       INSERT INTO bookings (
-        id, organization_id, booking_id, customer_id, location_id, status, version,
+        id, organization_id, booking_id, customer_id, location_id, start_at, status, version,
         created_at, updated_at, raw_json
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${status}, ${version || 1},
+        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${bookingStartAt}::timestamp, ${status}, ${version || 1},
         ${bookingCreatedAt}::timestamp, ${bookingUpdatedAt}::timestamp, ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         status = EXCLUDED.status,
         version = EXCLUDED.version,
+        start_at = COALESCE(EXCLUDED.start_at, bookings.start_at),
         updated_at = ${bookingUpdatedAt}::timestamp,
         raw_json = EXCLUDED.raw_json
     `
