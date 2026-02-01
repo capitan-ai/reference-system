@@ -152,7 +152,7 @@ model DevicePassRegistration {
 model SquareExistingClient {
   id                         String    @id @default(uuid())
   organization_id            String    @db.Uuid // Multi-tenant isolation
-  square_customer_id         String    // Remove @unique - now composite with organization_id
+  square_customer_id         String    @unique // Must be unique for FK references
   given_name                 String?
   family_name                String?
   email_address              String?
@@ -315,7 +315,7 @@ model GiftCardTransaction {
 model ReferralProfile {
   id                 String  @id @default(uuid())
   organization_id    String // Multi-tenant isolation
-  square_customer_id String  // Remove @unique - now composite with organization_id
+  square_customer_id String  @unique // Must be unique for FK references
   personal_code      String? // Remove @unique - now composite with organization_id
   referral_code      String? // Remove @unique - now composite with organization_id
   referral_url       String?
@@ -346,8 +346,7 @@ model ReferralProfile {
   customer     SquareExistingClient @relation(fields: [square_customer_id], references: [square_customer_id])
   rewards      ReferralReward[] // All rewards earned as referrer
 
-  // Composite unique constraints for multi-tenant isolation
-  @@unique([organization_id, square_customer_id])
+  // Note: square_customer_id already has @unique above, no need for composite unique
   @@unique([organization_id, personal_code])
   @@unique([organization_id, referral_code])
   
