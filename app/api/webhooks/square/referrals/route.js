@@ -840,21 +840,81 @@ async function generateUniquePersonalCode(customerName, customerId, maxAttempts 
   return `${namePart}${randomSuffix}`
 }
 
+/**
+ * Check if customer has previous bookings before the current booking
+ * CRITICAL: Uses start_at (service time) not created_at (booking creation time)
+ * CRITICAL: Filters by organization_id for multi-tenant isolation
+ */
+async function checkCustomerHasPreviousBookings(
+  organizationId, 
+  customerId, 
+  currentBookingId, 
+  currentBookingStartAt
+) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*) as count
+      FROM bookings
+      WHERE organization_id = ${organizationId}::text
+        AND customer_id = ${customerId}
+        AND booking_id != ${currentBookingId}
+        AND start_at < ${new Date(currentBookingStartAt)}::timestamptz
+    `
+    return parseInt(result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking previous bookings:', error.message)
+    // On error, return false to allow processing (fail open)
+    return false
+  }
+}
+
+/**
+ * Check if customer has previous payments before the current booking
+ * CRITICAL: Filters by organization_id for multi-tenant isolation
+ */
+async function checkCustomerHasPreviousPayments(
+  organizationId,
+  customerId, 
+  beforeDate
+) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*) as count
+      FROM payments
+      WHERE organization_id = ${organizationId}::text
+        AND customer_id = ${customerId}
+        AND created_at < ${new Date(beforeDate)}::timestamptz
+    `
+    return parseInt(result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking previous payments:', error.message)
+    // On error, return false to allow processing (fail open)
+    return false
+  }
+}
+
 // Find referrer by referral code
-async function findReferrerByCode(referralCode) {
+async function findReferrerByCode(referralCode, organizationId) {
   try {
     if (!referralCode || typeof referralCode !== 'string') {
       console.error(`Invalid referral code provided: ${referralCode}`)
       return null
     }
     
+    if (!organizationId) {
+      console.error('❌ findReferrerByCode requires organizationId for multi-tenant isolation')
+      return null
+    }
+    
     // Trim and normalize the code
     const normalizedCode = referralCode.trim().toUpperCase()
     console.log(`   🔍 Looking up referral code in database: "${normalizedCode}" (original: "${referralCode}")`)
+    console.log(`   🏢 Organization ID: ${organizationId}`)
     
     // Try exact match first in referral_profiles (case-insensitive)
     let referralProfile = await prisma.referralProfile.findFirst({
       where: {
+        organization_id: organizationId, // CRITICAL: Filter by organization_id
         OR: [
           { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
           { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
@@ -862,6 +922,7 @@ async function findReferrerByCode(referralCode) {
       },
       include: {
         customer: {
+          where: { organization_id: organizationId }, // CRITICAL: Filter customer by organization_id
           select: {
             square_customer_id: true,
             given_name: true,
@@ -873,7 +934,7 @@ async function findReferrerByCode(referralCode) {
       }
     })
     
-    if (referralProfile) {
+    if (referralProfile && referralProfile.customer) {
       return {
         square_customer_id: referralProfile.customer.square_customer_id,
         given_name: referralProfile.customer.given_name,
@@ -888,7 +949,8 @@ async function findReferrerByCode(referralCode) {
     let referrer = await prisma.$queryRaw`
       SELECT square_customer_id, given_name, family_name, email_address, personal_code, gift_card_id
       FROM square_existing_clients 
-      WHERE UPPER(TRIM(personal_code)) = ${normalizedCode}
+      WHERE organization_id = ${organizationId}::uuid
+        AND (UPPER(TRIM(personal_code)) = ${normalizedCode} OR UPPER(TRIM(referral_code)) = ${normalizedCode})
       LIMIT 1
     `
     
@@ -901,7 +963,8 @@ async function findReferrerByCode(referralCode) {
     referrer = await prisma.$queryRaw`
       SELECT square_customer_id, given_name, family_name, email_address, personal_code, gift_card_id
       FROM square_existing_clients 
-      WHERE personal_code = ${referralCode}
+      WHERE organization_id = ${organizationId}::uuid
+        AND (personal_code = ${referralCode} OR referral_code = ${referralCode})
       LIMIT 1
     `
     
@@ -1230,7 +1293,12 @@ async function saveGiftCardToDatabase(giftCardData) {
 
     // Upsert gift card record
     const giftCard = await prisma.giftCard.upsert({
-      where: { square_gift_card_id },
+      where: {
+        organization_id_square_gift_card_id: {
+          organization_id: orgId,
+          square_gift_card_id: square_gift_card_id
+        }
+      },
       update: {
         current_balance_cents,
         delivery_channel,
@@ -1273,6 +1341,7 @@ async function saveGiftCardTransaction(transactionData) {
   try {
     const {
       gift_card_id,
+      organization_id,
       transaction_type,
       amount_cents,
       balance_before_cents,
@@ -1284,6 +1353,23 @@ async function saveGiftCardTransaction(transactionData) {
       context_label,
       metadata
     } = transactionData
+
+    // Resolve organization_id from gift_card if not provided
+    let resolvedOrganizationId = organization_id
+    if (!resolvedOrganizationId && gift_card_id) {
+      const giftCard = await prisma.giftCard.findUnique({
+        where: { id: gift_card_id },
+        select: { organization_id: true }
+      })
+      if (giftCard) {
+        resolvedOrganizationId = giftCard.organization_id
+      }
+    }
+
+    if (!resolvedOrganizationId) {
+      console.error('❌ Cannot save gift card transaction: organization_id is required')
+      return null
+    }
 
     // Check if transaction already exists (idempotency)
     if (square_activity_id) {
@@ -1298,6 +1384,7 @@ async function saveGiftCardTransaction(transactionData) {
 
     const transaction = await prisma.giftCardTransaction.create({
       data: {
+        organization_id: resolvedOrganizationId,
         gift_card_id,
         transaction_type,
         amount_cents,
@@ -2155,7 +2242,12 @@ async function sendReferralCodeToNewClient(
     // Create/update ReferralProfile (new normalized table)
     try {
       await prisma.referralProfile.upsert({
-        where: { square_customer_id: customerId },
+        where: {
+          organization_id_square_customer_id: {
+            organization_id: organizationId,
+            square_customer_id: customerId
+          }
+        },
         update: {
           personal_code: referralCode,
           referral_code: referralCode, // Same as personal_code for now
@@ -2166,6 +2258,7 @@ async function sendReferralCodeToNewClient(
           updated_at: new Date()
         },
         create: {
+          organization_id: organizationId,
           square_customer_id: customerId,
           personal_code: referralCode,
           referral_code: referralCode,
@@ -2192,7 +2285,12 @@ async function sendReferralCodeToNewClient(
             await appendReferralNote(customerId, referralCode, referralUrl)
             
             await prisma.referralProfile.upsert({
-              where: { square_customer_id: customerId },
+              where: {
+                organization_id_square_customer_id: {
+                  organization_id: organizationId,
+                  square_customer_id: customerId
+                }
+              },
               update: {
                 personal_code: referralCode,
                 referral_code: referralCode,
@@ -2203,6 +2301,7 @@ async function sendReferralCodeToNewClient(
                 updated_at: new Date()
               },
               create: {
+                organization_id: organizationId,
                 square_customer_id: customerId,
                 personal_code: referralCode,
                 referral_code: referralCode,
@@ -2836,7 +2935,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     if (customer.used_referral_code) {
       console.log(`🎯 Customer used referral code: ${customer.used_referral_code}`)
       // Find the referrer
-      const referrer = await findReferrerByCode(customer.used_referral_code)
+      const referrer = await findReferrerByCode(customer.used_referral_code, organizationId)
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
         referrerCustomerId = referrer.square_customer_id
@@ -4391,7 +4490,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             fieldKey.includes('ref')
 
           if (looksLikeReferralField || (value && value.length <= 20 && value.split(' ').length <= 3)) {
-            const testReferrer = await findReferrerByCode(value)
+            const testReferrer = await findReferrerByCode(value, organizationId)
             if (testReferrer) {
               referralCode = value
               referralCodeSource = 'booking.custom_fields'
@@ -4437,7 +4536,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
               fieldKey.includes('ref')
 
             if (looksLikeReferralField || (value && value.length <= 20 && value.split(' ').length <= 3)) {
-              const testReferrer = await findReferrerByCode(value)
+              const testReferrer = await findReferrerByCode(value, organizationId)
               if (testReferrer) {
                 referralCode = value
                 referralCodeSource = 'appointment_segments.custom_fields'
@@ -4466,7 +4565,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
       if (attributes['referral_code']) {
         const codeValue = attributes['referral_code']
         console.log(`   🎯 Found 'referral_code' attribute with value: "${codeValue}"`)
-        const testReferrer = await findReferrerByCode(codeValue)
+        const testReferrer = await findReferrerByCode(codeValue, organizationId)
         if (testReferrer) {
           referralCode = codeValue
           referralCodeSource = 'customer.custom_attributes[referral_code]'
@@ -4496,7 +4595,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             
             // Try to match this value as a referral code by checking if it exists in our database
             // If code exists in database, it means referrer completed first payment and has personal_code
-            const testReferrer = await findReferrerByCode(value)
+            const testReferrer = await findReferrerByCode(value, organizationId)
             console.log(`   🔍 Database lookup result for "${value}":`, testReferrer ? `FOUND - ${testReferrer.given_name} ${testReferrer.family_name}` : 'NOT FOUND')
             
             if (testReferrer) {
@@ -4543,8 +4642,51 @@ async function processBookingCreated(bookingData, runContext = {}) {
       console.log(`   📋 Customer personal_code: ${customer.personal_code || 'N/A'}`)
       console.log(`   📍 Code source: ${referralCodeSource || 'unknown'}`)
 
+      // CRITICAL: Validate that this is a NEW customer (never booked before)
+      // Use start_at (service time) not created_at (booking creation time)
+      // Square allows booking creation at arbitrary times, so created_at ≠ service chronology
+      const currentBookingStartAt = bookingData.start_at || 
+                                    bookingData.startAt || 
+                                    bookingData.appointment_segments?.[0]?.start_at ||
+                                    bookingData.appointmentSegments?.[0]?.startAt ||
+                                    null
+
+      if (!currentBookingStartAt) {
+        console.warn(`⚠️ Cannot determine booking start_at, skipping referral validation`)
+        // Continue processing but log warning
+      } else {
+        // Check if customer has previous bookings (using start_at for chronological accuracy)
+        const hasPreviousBookings = await checkCustomerHasPreviousBookings(
+          organizationId, // CRITICAL: Must pass organization_id
+          customerId, 
+          bookingId, 
+          currentBookingStartAt
+        )
+
+        if (hasPreviousBookings) {
+          console.log(`❌ BLOCKED: Customer has previous bookings`)
+          console.log(`   ⚠️ Referral codes can only be used by NEW customers (never booked before)`)
+          console.log(`   📝 Referral code will NOT be saved`)
+          return // Don't process referral code
+        }
+
+        // Check if customer has previous payments
+        const hasPreviousPayments = await checkCustomerHasPreviousPayments(
+          organizationId, // CRITICAL: Must pass organization_id
+          customerId,
+          currentBookingStartAt
+        )
+
+        if (hasPreviousPayments) {
+          console.log(`❌ BLOCKED: Customer has previous payments`)
+          console.log(`   ⚠️ Referral codes can only be used by NEW customers (never paid before)`)
+          console.log(`   📝 Referral code will NOT be saved`)
+          return
+        }
+      }
+
       // Find the referrer
-      const referrer = await findReferrerByCode(referralCode)
+      const referrer = await findReferrerByCode(referralCode, organizationId)
 
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
@@ -4653,12 +4795,18 @@ async function processBookingCreated(bookingData, runContext = {}) {
           // Save used_referral_code to ReferralProfile (new normalized table)
           try {
             await prisma.referralProfile.upsert({
-              where: { square_customer_id: customerId },
+              where: {
+                organization_id_square_customer_id: {
+                  organization_id: organizationId,
+                  square_customer_id: customerId
+                }
+              },
               update: {
                 used_referral_code: referralCode,
                 updated_at: new Date()
               },
               create: {
+                organization_id: organizationId,
                 square_customer_id: customerId,
                 used_referral_code: referralCode
               }

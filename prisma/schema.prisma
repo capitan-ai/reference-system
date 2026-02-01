@@ -9,21 +9,26 @@ datasource db {
 }
 
 model RefClick {
-  id          String                @id @default(uuid())
-  refCode     String
-  refSid      String?               @db.VarChar(255)
-  customerId  String? // square_customer_id from square_existing_clients
-  firstSeenAt DateTime              @default(now())
-  ipHash      String?               @db.VarChar(64)
-  userAgent   String?               @db.VarChar(500)
-  landingUrl  String?               @db.VarChar(500)
-  utmSource   String?               @db.VarChar(100)
-  utmMedium   String?               @db.VarChar(100)
-  utmCampaign String?               @db.VarChar(100)
-  matched     Boolean               @default(false)
-  createdAt   DateTime              @default(now())
-  customer    SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
+  id             String                @id @default(uuid())
+  organization_id String?               // Multi-tenant isolation (nullable for backward compatibility)
+  refCode        String
+  refSid         String?               @db.VarChar(255)
+  customerId     String? // square_customer_id from square_existing_clients
+  firstSeenAt    DateTime              @default(now())
+  ipHash         String?               @db.VarChar(64)
+  userAgent      String?               @db.VarChar(500)
+  landingUrl     String?               @db.VarChar(500)
+  utmSource      String?               @db.VarChar(100)
+  utmMedium      String?               @db.VarChar(100)
+  utmCampaign    String?               @db.VarChar(100)
+  matched        Boolean               @default(false)
+  createdAt      DateTime              @default(now())
+  
+  // Relations
+  organization Organization?        @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer     SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
 
+  @@index([organization_id])
   @@map("ref_clicks")
 }
 
@@ -99,6 +104,7 @@ model WebhookJob {
 
 model NotificationEvent {
   id                 String                   @id @default(uuid())
+  organization_id    String?                  // Multi-tenant isolation (nullable for backward compatibility)
   channel            NotificationChannel
   templateType       NotificationTemplateType
   status             NotificationStatus       @default(queued)
@@ -114,6 +120,10 @@ model NotificationEvent {
   metadata           Json?
   createdAt          DateTime                 @default(now())
 
+  // Relations
+  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@index([organization_id])
   @@index([channel, status, createdAt], map: "notification_channel_status_idx")
   @@map("notification_events")
 }
@@ -142,18 +152,18 @@ model DevicePassRegistration {
 model SquareExistingClient {
   id                         String    @id @default(uuid())
   organization_id            String    @db.Uuid // Multi-tenant isolation
-  square_customer_id         String    @unique // Square customer ID (also has composite unique with organization_id below for multi-tenant)
+  square_customer_id         String    // Remove @unique - now composite with organization_id
   given_name                 String?
   family_name                String?
   email_address              String?
   phone_number               String?
   got_signup_bonus           Boolean?  @default(false)
   activated_as_referrer      Boolean?  @default(false)
-  personal_code              String?   @unique
+  personal_code              String?   // Remove @unique - now composite with organization_id
   created_at                 DateTime? @default(now()) @db.Timestamp(6)
   updated_at                 DateTime? @default(now()) @db.Timestamp(6)
   gift_card_id               String?
-  referral_code              String?   @unique(map: "unique_referral_code")
+  referral_code              String?   // Remove @unique - now composite with organization_id
   referral_url               String?
   total_referrals            Int?      @default(0)
   total_rewards              Int?      @default(0)
@@ -183,7 +193,11 @@ model SquareExistingClient {
   giftCards       GiftCard[]
   referralProfile ReferralProfile?
 
+  // Composite unique constraints for multi-tenant isolation
   @@unique([organization_id, square_customer_id])
+  @@unique([organization_id, personal_code])
+  @@unique([organization_id, referral_code])
+  
   @@index([organization_id])
   @@index([activated_as_referrer], map: "idx_activated_referrer")
   @@index([gift_card_id], map: "idx_gift_card_id")
@@ -211,7 +225,7 @@ model GiftCard {
   id                    String             @id @default(uuid())
   organization_id       String // Multi-tenant isolation
   square_customer_id    String
-  square_gift_card_id   String             @unique // Square gift card ID
+  square_gift_card_id   String             // Remove @unique - now composite with organization_id
   gift_card_gan         String? // Gift Account Number
   reward_type           GiftCardRewardType // FRIEND_SIGNUP_BONUS, REFERRER_REWARD
   initial_amount_cents  Int? // Initial amount when created
@@ -242,6 +256,9 @@ model GiftCard {
   transactions   GiftCardTransaction[]
   ReferralReward ReferralReward[]
 
+  // Composite unique constraint for multi-tenant isolation
+  @@unique([organization_id, square_gift_card_id])
+  
   @@index([organization_id])
   @@index([square_customer_id])
   @@index([square_gift_card_id])
@@ -257,6 +274,7 @@ model GiftCard {
 // ============================================================================
 model GiftCardTransaction {
   id                   String                  @id @default(uuid())
+  organization_id      String                  // Multi-tenant isolation
   gift_card_id         String
   transaction_type     GiftCardTransactionType
   amount_cents         Int // Amount added/used in this transaction
@@ -278,8 +296,11 @@ model GiftCardTransaction {
   created_at DateTime @default(now()) @db.Timestamptz(6)
 
   // Relations
-  giftCard GiftCard @relation(fields: [gift_card_id], references: [id])
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  giftCard      GiftCard     @relation(fields: [gift_card_id], references: [id])
 
+  @@index([organization_id])
+  @@index([organization_id, gift_card_id])
   @@index([gift_card_id])
   @@index([transaction_type])
   @@index([created_at])
@@ -294,9 +315,9 @@ model GiftCardTransaction {
 model ReferralProfile {
   id                 String  @id @default(uuid())
   organization_id    String // Multi-tenant isolation
-  square_customer_id String  @unique
-  personal_code      String? @unique
-  referral_code      String? @unique // Alternative code format (if different from personal_code)
+  square_customer_id String  // Remove @unique - now composite with organization_id
+  personal_code      String? // Remove @unique - now composite with organization_id
+  referral_code      String? // Remove @unique - now composite with organization_id
   referral_url       String?
 
   // Status flags
@@ -325,6 +346,11 @@ model ReferralProfile {
   customer     SquareExistingClient @relation(fields: [square_customer_id], references: [square_customer_id])
   rewards      ReferralReward[] // All rewards earned as referrer
 
+  // Composite unique constraints for multi-tenant isolation
+  @@unique([organization_id, square_customer_id])
+  @@unique([organization_id, personal_code])
+  @@unique([organization_id, referral_code])
+  
   @@index([organization_id])
   @@index([square_customer_id])
   @@index([personal_code])
@@ -410,6 +436,9 @@ model Organization {
   payments                Payment[]
   payment_tenders         PaymentTender[]
   gift_cards              GiftCard[]
+  gift_card_transactions  GiftCardTransaction[]
+  ref_clicks              RefClick[]
+  notification_events     NotificationEvent[]
   referral_profiles       ReferralProfile[]
   referral_rewards        ReferralReward[]
   organization_users      OrganizationUser[]
