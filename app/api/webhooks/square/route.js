@@ -2649,8 +2649,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           order_total_card_surcharge_money_amount: order.total_card_surcharge_money?.amount ?? null,
           order_total_card_surcharge_money_currency: order.total_card_surcharge_money?.currency || 'USD',
           
-          // Raw JSON
-          raw_json: lineItem,
+          // Raw JSON - serialize to handle BigInt values from Square API
+          raw_json: JSON.parse(safeStringify(lineItem)),
         }
         
         // Explicitly exclude removed fields to prevent Prisma errors if old client is cached
