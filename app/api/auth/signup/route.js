@@ -37,15 +37,44 @@ export async function POST(request) {
       )
     }
 
-    // 1. Create Supabase Auth user
-    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true // Auto-confirm email
-    })
+    // 1. Create Supabase Auth user with timeout handling
+    let authData, authError
+    try {
+      // Add timeout wrapper for Supabase Auth calls
+      const authPromise = supabaseAdmin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true // Auto-confirm email
+      })
+      
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Supabase Auth service timeout - service may be unavailable')), 10000)
+      )
+      
+      const result = await Promise.race([authPromise, timeoutPromise])
+      authData = result.data
+      authError = result.error
+    } catch (error) {
+      // Handle timeout or network errors
+      if (error.message.includes('timeout') || error.message.includes('ECONNREFUSED') || error.message.includes('ENOTFOUND')) {
+        console.error('Supabase Auth service unavailable:', error.message)
+        return Response.json({ 
+          error: 'Authentication service is currently unavailable. Please try again in a few minutes.',
+          details: 'Supabase Auth service may be recovering from maintenance. Check Supabase dashboard for service status.'
+        }, { status: 503 })
+      }
+      throw error
+    }
 
     if (authError) {
       console.error('Auth error:', authError)
+      // Provide helpful error messages for common issues
+      if (authError.message?.includes('timeout') || authError.status === 522) {
+        return Response.json({ 
+          error: 'Authentication service timeout. The service may be temporarily unavailable.',
+          details: 'Please check Supabase dashboard for service status and try again in a few minutes.'
+        }, { status: 503 })
+      }
       return Response.json({ error: authError.message }, { status: 400 })
     }
 
