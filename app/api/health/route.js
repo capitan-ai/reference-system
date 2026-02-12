@@ -6,6 +6,7 @@ const {
 const {
   isGiftCardJobAvailable
 } = require('../../../lib/workflows/giftcard-job-queue')
+const { checkDatabaseHealth } = require('../../../lib/db-health-check')
 
 /**
  * Health check endpoint
@@ -40,17 +41,19 @@ export async function GET(request) {
     }
 
     // Check 2: Database Connectivity
-    try {
-      await prisma.$queryRaw`SELECT 1`
+    const dbHealth = await checkDatabaseHealth()
+    if (dbHealth.healthy) {
       health.checks.database = {
         status: 'ok',
-        connected: true
+        connected: true,
+        ...dbHealth.details
       }
-    } catch (error) {
+    } else {
       health.checks.database = {
         status: 'error',
         connected: false,
-        error: error.message
+        error: dbHealth.error,
+        ...dbHealth.details
       }
       health.status = 'unhealthy'
     }
