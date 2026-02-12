@@ -9,23 +9,23 @@ datasource db {
 }
 
 model RefClick {
-  id             String                @id @default(uuid())
-  organization_id String?               // Multi-tenant isolation (nullable for backward compatibility)
-  refCode        String
-  refSid         String?               @db.VarChar(255)
-  customerId     String? // square_customer_id from square_existing_clients
-  firstSeenAt    DateTime              @default(now())
-  ipHash         String?               @db.VarChar(64)
-  userAgent      String?               @db.VarChar(500)
-  landingUrl     String?               @db.VarChar(500)
-  utmSource      String?               @db.VarChar(100)
-  utmMedium      String?               @db.VarChar(100)
-  utmCampaign    String?               @db.VarChar(100)
-  matched        Boolean               @default(false)
-  createdAt      DateTime              @default(now())
-  
+  id              String   @id @default(uuid())
+  organization_id String // Multi-tenant isolation
+  refCode         String
+  refSid          String?  @db.VarChar(255)
+  customerId      String? // square_customer_id from square_existing_clients
+  firstSeenAt     DateTime @default(now())
+  ipHash          String?  @db.VarChar(64)
+  userAgent       String?  @db.VarChar(500)
+  landingUrl      String?  @db.VarChar(500)
+  utmSource       String?  @db.VarChar(100)
+  utmMedium       String?  @db.VarChar(100)
+  utmCampaign     String?  @db.VarChar(100)
+  matched         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
   // Relations
-  organization Organization?        @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  organization Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   customer     SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
 
   @@index([organization_id])
@@ -102,9 +102,36 @@ model WebhookJob {
   @@map("webhook_jobs")
 }
 
+model ApplicationLog {
+  id               String                @id @default(uuid())
+  organization_id  String?               @db.Uuid // Nullable for system logs (cron)
+  log_type         String                // webhook, cron, worker, api, structured
+  log_id           String                // Unique identifier (event_id, job_id, or generated)
+  log_created_at   DateTime?             @db.Timestamptz(6) // When event occurred
+  status           ApplicationLogStatus  @default(received)
+  payload          Json                  // Complete log data
+  attempts         Int                   @default(0)
+  max_attempts     Int                   @default(0) // 0 = log entry (not retryable)
+  scheduled_at     DateTime              @default(now()) @db.Timestamptz(6)
+  locked_at        DateTime?             @db.Timestamptz(6)
+  lock_owner       String?
+  last_error       String?
+  created_at       DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime              @default(now()) @db.Timestamptz(6)
+
+  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: SetNull)
+
+  @@unique([organization_id, log_id, log_type], map: "application_logs_org_log_unique")
+  @@index([organization_id])
+  @@index([log_type])
+  @@index([status, scheduled_at], map: "application_logs_status_scheduled_idx")
+  @@index([created_at])
+  @@map("application_logs")
+}
+
 model NotificationEvent {
   id                 String                   @id @default(uuid())
-  organization_id    String?                  // Multi-tenant isolation (nullable for backward compatibility)
+  organization_id    String // Multi-tenant isolation
   channel            NotificationChannel
   templateType       NotificationTemplateType
   status             NotificationStatus       @default(queued)
@@ -121,7 +148,7 @@ model NotificationEvent {
   createdAt          DateTime                 @default(now())
 
   // Relations
-  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
 
   @@index([organization_id])
   @@index([channel, status, createdAt], map: "notification_channel_status_idx")
@@ -159,11 +186,11 @@ model SquareExistingClient {
   phone_number               String?
   got_signup_bonus           Boolean?  @default(false)
   activated_as_referrer      Boolean?  @default(false)
-  personal_code              String?   // Remove @unique - now composite with organization_id
+  personal_code              String? // Remove @unique - now composite with organization_id
   created_at                 DateTime? @default(now()) @db.Timestamp(6)
   updated_at                 DateTime? @default(now()) @db.Timestamp(6)
   gift_card_id               String?
-  referral_code              String?   // Remove @unique - now composite with organization_id
+  referral_code              String? // Remove @unique - now composite with organization_id
   referral_url               String?
   total_referrals            Int?      @default(0)
   total_rewards              Int?      @default(0)
@@ -197,7 +224,6 @@ model SquareExistingClient {
   @@unique([organization_id, square_customer_id])
   @@unique([organization_id, personal_code])
   @@unique([organization_id, referral_code])
-  
   @@index([organization_id])
   @@index([activated_as_referrer], map: "idx_activated_referrer")
   @@index([gift_card_id], map: "idx_gift_card_id")
@@ -225,7 +251,7 @@ model GiftCard {
   id                    String             @id @default(uuid())
   organization_id       String // Multi-tenant isolation
   square_customer_id    String
-  square_gift_card_id   String             // Remove @unique - now composite with organization_id
+  square_gift_card_id   String // Remove @unique - now composite with organization_id
   gift_card_gan         String? // Gift Account Number
   reward_type           GiftCardRewardType // FRIEND_SIGNUP_BONUS, REFERRER_REWARD
   initial_amount_cents  Int? // Initial amount when created
@@ -258,7 +284,6 @@ model GiftCard {
 
   // Composite unique constraint for multi-tenant isolation
   @@unique([organization_id, square_gift_card_id])
-  
   @@index([organization_id])
   @@index([square_customer_id])
   @@index([square_gift_card_id])
@@ -274,7 +299,7 @@ model GiftCard {
 // ============================================================================
 model GiftCardTransaction {
   id                   String                  @id @default(uuid())
-  organization_id      String                  // Multi-tenant isolation
+  organization_id      String // Multi-tenant isolation
   gift_card_id         String
   transaction_type     GiftCardTransactionType
   amount_cents         Int // Amount added/used in this transaction
@@ -297,7 +322,7 @@ model GiftCardTransaction {
 
   // Relations
   organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  giftCard      GiftCard     @relation(fields: [gift_card_id], references: [id])
+  giftCard     GiftCard     @relation(fields: [gift_card_id], references: [id])
 
   @@index([organization_id])
   @@index([organization_id, gift_card_id])
@@ -340,16 +365,17 @@ model ReferralProfile {
   created_at   DateTime  @default(now()) @db.Timestamptz(6)
   updated_at   DateTime  @updatedAt @db.Timestamptz(6)
   activated_at DateTime? @db.Timestamptz(6) // When activated_as_referrer became true
+  referral_checked_at DateTime? @db.Timestamptz(6) // When referral code validation was last checked (for idempotency)
 
   // Relations
   organization Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade)
   customer     SquareExistingClient @relation(fields: [square_customer_id], references: [square_customer_id])
   rewards      ReferralReward[] // All rewards earned as referrer
 
-  // Note: square_customer_id already has @unique above, no need for composite unique
+  // Composite unique constraints for multi-tenant isolation
+  @@unique([organization_id, square_customer_id])
   @@unique([organization_id, personal_code])
   @@unique([organization_id, referral_code])
-  
   @@index([organization_id])
   @@index([square_customer_id])
   @@index([personal_code])
@@ -443,6 +469,7 @@ model Organization {
   organization_users      OrganizationUser[]
   user_roles              UserRole[] // User roles relation
   webhook_jobs            WebhookJob[]
+  application_logs        ApplicationLog[]
 
   @@index([square_merchant_id])
   @@index([slug])
@@ -1031,6 +1058,13 @@ enum GiftCardJobStatus {
 
 enum WebhookJobStatus {
   queued
+  processing
+  completed
+  error
+}
+
+enum ApplicationLogStatus {
+  received
   processing
   completed
   error

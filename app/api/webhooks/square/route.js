@@ -1,4 +1,5 @@
 import crypto from 'crypto'
+import { Prisma } from '@prisma/client'
 import prisma from '../../../../lib/prisma-client'
 import locationResolver from '../../../../lib/location-resolver'
 
@@ -504,6 +505,66 @@ export async function POST(request) {
     const eventData = JSON.parse(rawBody)
     console.log('📝 Raw event data:', JSON.stringify(eventData, null, 2))
 
+    // Save webhook event to application_logs (non-blocking)
+    let webhookOrganizationId = null
+    try {
+      // Resolve organization_id from webhook payload - try multiple strategies
+      const payload = eventData.data || {}
+      
+      // Strategy 1: Try location_id from various payload structures
+      const locationId = 
+        payload.object?.location_id || 
+        payload.object?.locationId || 
+        payload.location_id || 
+        payload.locationId ||
+        eventData.location_id ||
+        eventData.locationId ||
+        null
+      
+      if (locationId) {
+        webhookOrganizationId = await resolveOrganizationIdFromLocationId(locationId)
+      }
+      
+      // Strategy 2: Fallback to merchant_id if location_id resolution failed
+      if (!webhookOrganizationId) {
+        const merchantId = 
+          eventData.merchant_id || 
+          payload.object?.merchant_id ||
+          payload.merchant_id ||
+          null
+        
+        if (merchantId) {
+          webhookOrganizationId = await resolveOrganizationId(merchantId)
+        }
+      }
+      
+      // Save to application_logs (non-blocking, don't fail webhook if this fails)
+      if (eventData.event_id) {
+        // eslint-disable-next-line global-require
+        const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
+        // eslint-disable-next-line global-require
+        const { PrismaClient } = require('@prisma/client')
+        const logPrisma = new PrismaClient()
+        
+        await saveApplicationLog(logPrisma, {
+          logType: 'webhook',
+          logId: eventData.event_id,
+          logCreatedAt: eventData.created_at ? new Date(eventData.created_at) : new Date(),
+          payload: eventData, // COMPLETE webhook payload
+          organizationId: webhookOrganizationId,
+          status: 'received',
+          maxAttempts: 0
+        }).catch((logError) => {
+          console.warn('⚠️ Failed to save webhook to application_logs:', logError.message)
+        })
+        
+        await logPrisma.$disconnect()
+      }
+    } catch (logError) {
+      // Don't fail webhook if logging fails
+      console.warn('⚠️ Error saving webhook to application_logs:', logError.message)
+    }
+
     // Простая обработка событий
     if (eventData.type === 'booking.created') {
       console.log('📅 Booking created event received')
@@ -726,6 +787,29 @@ export async function POST(request) {
       }
     }
 
+    // Update application_log status to completed (non-blocking)
+    if (eventData?.event_id) {
+      try {
+        // eslint-disable-next-line global-require
+        const { PrismaClient } = require('@prisma/client')
+        const logPrisma = new PrismaClient()
+        
+        await logPrisma.$executeRaw`
+          UPDATE application_logs
+          SET status = 'completed',
+              updated_at = NOW()
+          WHERE log_id = ${eventData.event_id}
+            AND log_type = 'webhook'
+            ${webhookOrganizationId ? Prisma.sql`AND organization_id = ${webhookOrganizationId}::uuid` : Prisma.sql`AND organization_id IS NULL`}
+        `.catch(() => {}) // Silently fail
+        
+        await logPrisma.$disconnect()
+      } catch (updateError) {
+        // Don't fail webhook if status update fails
+        console.warn('⚠️ Failed to update application_log status:', updateError.message)
+      }
+    }
+
     return new Response(JSON.stringify(serializeBigInt({ 
       ok: true, 
       message: 'Webhook processed successfully',
@@ -735,6 +819,29 @@ export async function POST(request) {
     })
   } catch (error) {
     safeLogError('❌ Webhook processing error:', error)
+    
+    // Update application_log status to error (non-blocking)
+    if (eventData?.event_id) {
+      try {
+        // eslint-disable-next-line global-require
+        const { PrismaClient } = require('@prisma/client')
+        const logPrisma = new PrismaClient()
+        
+        await logPrisma.$executeRaw`
+          UPDATE application_logs
+          SET status = 'error',
+              last_error = ${error?.message || String(error)},
+              updated_at = NOW()
+          WHERE log_id = ${eventData.event_id}
+            AND log_type = 'webhook'
+        `.catch(() => {}) // Silently fail
+        
+        await logPrisma.$disconnect()
+      } catch (updateError) {
+        // Don't fail if status update fails
+        console.warn('⚠️ Failed to update application_log error status:', updateError.message)
+      }
+    }
     
     // Enqueue failed webhook for retry via cron
     if (eventData?.type && eventData?.event_id) {

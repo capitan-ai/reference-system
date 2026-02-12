@@ -57,13 +57,36 @@ export async function GET(request, { params }) {
     try {
       // Note: gift_card_cache table was removed as it was never populated
       // Always fetch from Square API directly
-      // Try square_existing_clients table
-      const customer = await prisma.$queryRaw`
-          SELECT square_customer_id, given_name, family_name, email_address, gift_card_id
-          FROM square_existing_clients 
-          WHERE gift_card_id LIKE ${`%${gan}%`}
-          LIMIT 1
-        `
+      // First, try to find organization_id via gift_cards table for multi-tenant isolation
+      const giftCard = await prisma.giftCard.findFirst({
+        where: {
+          OR: [
+            { gift_card_gan: gan },
+            { square_gift_card_id: { contains: gan } }
+          ]
+        },
+        select: { organization_id: true }
+      })
+
+      if (!giftCard?.organization_id) {
+        console.warn(`⚠️ Could not find gift card with GAN ${gan} in gift_cards table`)
+      }
+
+      // Try square_existing_clients table with organization_id filter if available
+      const customer = giftCard?.organization_id
+        ? await prisma.$queryRaw`
+            SELECT square_customer_id, given_name, family_name, email_address, gift_card_id
+            FROM square_existing_clients 
+            WHERE organization_id = ${giftCard.organization_id}::uuid
+              AND gift_card_id LIKE ${`%${gan}%`}
+            LIMIT 1
+          `
+        : await prisma.$queryRaw`
+            SELECT square_customer_id, given_name, family_name, email_address, gift_card_id
+            FROM square_existing_clients 
+            WHERE gift_card_id LIKE ${`%${gan}%`}
+            LIMIT 1
+          `
 
         if (customer && customer.length > 0) {
           const cust = customer[0]

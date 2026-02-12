@@ -6,6 +6,7 @@
  */
 
 import prisma from '../../../../lib/prisma-client'
+import { Prisma } from '@prisma/client'
 import locationResolver from '../../../../lib/location-resolver'
 
 const { resolveLocationUuidForSquareLocationId } = locationResolver
@@ -183,6 +184,10 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
   }
   const bookingStartAt = new Date(startAt)
 
+  // Extract creator_details to check for administrator_id
+  const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
+  const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
+
   console.log(`[WEBHOOK-PROCESSOR] Processing booking ${bookingId} for customer ${customerId}`)
 
   try {
@@ -209,15 +214,102 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       return
     }
 
+    // Resolve administrator_id from creator_details.team_member_id
+    // ONLY if creator_type is TEAM_MEMBER (for booking.created webhook)
+    let administratorUuid = null
+    if (creatorType === 'TEAM_MEMBER') {
+      const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+      if (creatorTeamMemberId && organizationId) {
+        try {
+          const adminRecord = await prisma.$queryRaw`
+            SELECT id::text as id FROM team_members
+            WHERE square_team_member_id = ${creatorTeamMemberId}
+              AND organization_id = ${organizationId}::uuid
+            LIMIT 1
+          `
+          administratorUuid = adminRecord?.[0]?.id || null
+          if (administratorUuid) {
+            console.log(`[WEBHOOK-PROCESSOR] ✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorUuid}`)
+          }
+        } catch (error) {
+          console.error(`[WEBHOOK-PROCESSOR] ❌ Error resolving administrator: ${error.message}`)
+        }
+      }
+    }
+
+    // Extract and resolve technician_id and service_variation_id from appointment_segments
+    let technicianUuid = null
+    let serviceVariationUuid = null
+    let serviceVariationVersion = null
+    let durationMinutes = null
+    
+    const segments = bookingData?.appointment_segments || bookingData?.appointmentSegments || []
+    if (segments.length > 0) {
+      // Use first segment for main booking record
+      const firstSegment = segments[0]
+      const squareTeamMemberId = firstSegment?.team_member_id || firstSegment?.teamMemberId
+      const squareServiceVariationId = firstSegment?.service_variation_id || firstSegment?.serviceVariationId
+      
+      // Resolve technician_id
+      if (squareTeamMemberId && organizationId) {
+        try {
+          const tmRecord = await prisma.$queryRaw`
+            SELECT id::text as id FROM team_members
+            WHERE square_team_member_id = ${squareTeamMemberId}
+              AND organization_id = ${organizationId}::uuid
+            LIMIT 1
+          `
+          technicianUuid = tmRecord?.[0]?.id || null
+          if (technicianUuid) {
+            console.log(`[WEBHOOK-PROCESSOR] ✅ Resolved technician ${squareTeamMemberId} to UUID ${technicianUuid}`)
+          }
+        } catch (error) {
+          console.error(`[WEBHOOK-PROCESSOR] ❌ Error resolving technician: ${error.message}`)
+        }
+      }
+      
+      // Resolve service_variation_id
+      if (squareServiceVariationId && organizationId) {
+        try {
+          const svRecord = await prisma.$queryRaw`
+            SELECT uuid::text as id FROM service_variation
+            WHERE square_variation_id = ${squareServiceVariationId}
+              AND organization_id = ${organizationId}::uuid
+            LIMIT 1
+          `
+          serviceVariationUuid = svRecord?.[0]?.id || null
+          if (serviceVariationUuid) {
+            console.log(`[WEBHOOK-PROCESSOR] ✅ Resolved service variation ${squareServiceVariationId} to UUID ${serviceVariationUuid}`)
+          }
+        } catch (error) {
+          console.error(`[WEBHOOK-PROCESSOR] ❌ Error resolving service variation: ${error.message}`)
+        }
+      }
+      
+      // Extract other segment fields
+      serviceVariationVersion = firstSegment?.service_variation_version || firstSegment?.serviceVariationVersion
+        ? BigInt(firstSegment.service_variation_version || firstSegment.serviceVariationVersion)
+        : null
+      durationMinutes = firstSegment?.duration_minutes || firstSegment?.durationMinutes || null
+    }
+
     // Insert or update booking (location_id is internal UUID)
     // Use Square's created_at from booking data, not NOW()
     // Include start_at - REQUIRED field
+    // Include administrator_id if creator_type is TEAM_MEMBER
+    // Include technician_id and service_variation_id from appointment_segments
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, customer_id, location_id, start_at, status, version,
+        administrator_id, technician_id, service_variation_id, service_variation_version, duration_minutes,
         created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${bookingStartAt}::timestamp, ${status}, ${version || 1},
+        ${administratorUuid ? Prisma.sql`${administratorUuid}::uuid` : Prisma.sql`NULL`},
+        ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
+        ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
+        ${serviceVariationVersion ? serviceVariationVersion : Prisma.sql`NULL`},
+        ${durationMinutes || Prisma.sql`NULL`},
         ${bookingCreatedAt}::timestamp, ${bookingUpdatedAt}::timestamp, ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
@@ -226,6 +318,11 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         status = EXCLUDED.status,
         version = EXCLUDED.version,
         start_at = COALESCE(EXCLUDED.start_at, bookings.start_at),
+        administrator_id = COALESCE(EXCLUDED.administrator_id, bookings.administrator_id),
+        technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
+        service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
+        service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
+        duration_minutes = COALESCE(EXCLUDED.duration_minutes, bookings.duration_minutes),
         updated_at = ${bookingUpdatedAt}::timestamp,
         raw_json = EXCLUDED.raw_json
     `

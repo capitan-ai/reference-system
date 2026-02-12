@@ -2,6 +2,11 @@ import { createRequire } from 'module'
 
 const require = createRequire(import.meta.url)
 const { runWebhookJobOnce } = require('../../../../lib/workers/webhook-job-runner')
+const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
+const { PrismaClient } = require('@prisma/client')
+const { randomUUID } = require('crypto')
+
+const logPrisma = new PrismaClient()
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -80,6 +85,27 @@ async function handle(request) {
   
   console.log(`[CRON] Authorized using method: ${auth.method}`)
 
+  const cronId = `cron-webhook-jobs-${Date.now()}`
+  
+  // Save cron start to application_logs (non-blocking)
+  try {
+    await saveApplicationLog(logPrisma, {
+      logType: 'cron',
+      logId: cronId,
+      logCreatedAt: new Date(),
+      payload: {
+        cron_name: 'webhook-jobs',
+        worker_id: 'vercel-cron',
+        triggered_at: new Date().toISOString()
+      },
+      organizationId: null, // System log
+      status: 'processing',
+      maxAttempts: 0
+    }).catch(() => {}) // Silently fail
+  } catch (logError) {
+    console.warn('⚠️ Failed to save cron start to application_logs:', logError.message)
+  }
+
   try {
     // Process multiple jobs per cron run to speed up queue processing
     // Process up to 10 jobs per minute (configurable via env var)
@@ -124,6 +150,29 @@ async function handle(request) {
     const duration = Date.now() - startTime
     console.log(`[CRON] ✅ Completed: processed ${processed} webhook job(s), ${errors} error(s) in ${duration}ms`)
     
+    // Update application_log with results (non-blocking)
+    try {
+      await logPrisma.$executeRaw`
+        UPDATE application_logs
+        SET status = 'completed',
+            payload = jsonb_set(
+              payload,
+              '{results}',
+              ${JSON.stringify({
+                processed,
+                errors,
+                duration,
+                jobs: results
+              })}::jsonb
+            ),
+            updated_at = NOW()
+        WHERE log_id = ${cronId}
+          AND log_type = 'cron'
+      `.catch(() => {}) // Silently fail
+    } catch (updateError) {
+      console.warn('⚠️ Failed to update cron log:', updateError.message)
+    }
+    
     return json({
       processed: processed,
       errors: errors,
@@ -139,6 +188,31 @@ async function handle(request) {
     const duration = Date.now() - startTime
     console.error(`[CRON] ❌ Webhook jobs cron worker failed after ${duration}ms:`, error)
     console.error(`[CRON] Error stack:`, error.stack)
+    
+    // Update application_log with error (non-blocking)
+    try {
+      await logPrisma.$executeRaw`
+        UPDATE application_logs
+        SET status = 'error',
+            payload = jsonb_set(
+              payload,
+              '{results}',
+              ${JSON.stringify({
+                processed: 0,
+                errors: 1,
+                duration,
+                error: error.message
+              })}::jsonb
+            ),
+            last_error = ${error.message},
+            updated_at = NOW()
+        WHERE log_id = ${cronId}
+          AND log_type = 'cron'
+      `.catch(() => {}) // Silently fail
+    } catch (updateError) {
+      console.warn('⚠️ Failed to update cron error log:', updateError.message)
+    }
+    
     return json({ 
       error: 'Webhook job processing failed', 
       detail: error.message,

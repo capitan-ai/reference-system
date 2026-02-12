@@ -1374,7 +1374,10 @@ async function saveGiftCardTransaction(transactionData) {
     // Check if transaction already exists (idempotency)
     if (square_activity_id) {
       const existing = await prisma.giftCardTransaction.findFirst({
-        where: { square_activity_id }
+        where: { 
+          square_activity_id,
+          organization_id: resolvedOrganizationId
+        }
       })
       if (existing) {
         console.log(`ℹ️ Transaction already exists for activity ${square_activity_id}, skipping`)
@@ -1408,7 +1411,7 @@ async function saveGiftCardTransaction(transactionData) {
 }
 
 // Process and save REDEEM transactions when gift cards are used in payments
-async function processGiftCardRedemptions(paymentData) {
+async function processGiftCardRedemptions(paymentData, organizationId = null) {
   try {
     const paymentId = paymentData.id || paymentData.paymentId
     if (!paymentId) {
@@ -1416,6 +1419,14 @@ async function processGiftCardRedemptions(paymentData) {
     }
 
     console.log(`🔍 Checking for gift card redemptions in payment ${paymentId}`)
+
+    // Resolve organization_id from payment location if not provided
+    if (!organizationId) {
+      const squareLocationId = paymentData.location_id || paymentData.locationId
+      if (squareLocationId) {
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+      }
+    }
 
     // Extract gift card IDs/GANs from payment tenders
     const giftCardGans = await extractGiftCardGansFromPayment(paymentData)
@@ -1433,9 +1444,12 @@ async function processGiftCardRedemptions(paymentData) {
     // Process each gift card
     for (const gan of giftCardGans) {
       try {
-        // Find gift card in database by GAN
+        // Find gift card in database by GAN (with organization_id filter if available)
         const giftCard = await prisma.giftCard.findFirst({
-          where: { gift_card_gan: gan },
+          where: {
+            gift_card_gan: gan,
+            ...(organizationId ? { organization_id: organizationId } : {})
+          },
           include: {
             transactions: {
               where: {
@@ -1569,7 +1583,7 @@ async function processGiftCardRedemptions(paymentData) {
 }
 
 // Create gift card with unique name and activate it
-async function createGiftCard(customerId, customerName, amountCents = 1000, isReferrer = false, options = {}) {
+async function createGiftCard(customerId, customerName, amountCents = 1000, isReferrer = false, options = {}, organizationId = null) {
   try {
     const locationId = process.env.SQUARE_LOCATION_ID?.trim()
     const noteContext = isReferrer ? 'Referrer reward gift card' : 'Signup bonus gift card'
@@ -1626,6 +1640,7 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     // Save CREATE transaction to database
     try {
       const createGiftCardRecord = await saveGiftCardToDatabase({
+        organization_id: organizationId,
         square_customer_id: customerId,
         square_gift_card_id: giftCardId,
         gift_card_gan: giftCardGan, // Can be null if not yet assigned
@@ -1861,13 +1876,32 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
                                   null
 
           if (transactionType) {
-            const giftCardRecord = await prisma.giftCard.findUnique({
-              where: { square_gift_card_id: giftCardId }
-            })
+            // Resolve organization_id from saved gift card record or customer
+            let giftCardOrgId = createGiftCardRecord?.organization_id || null
+            if (!giftCardOrgId && customerId) {
+              const customerOrg = await prisma.$queryRaw`
+                SELECT organization_id FROM square_existing_clients 
+                WHERE square_customer_id = ${customerId} 
+                LIMIT 1
+              `
+              giftCardOrgId = customerOrg?.[0]?.organization_id || null
+            }
+            
+            const giftCardRecord = giftCardOrgId
+              ? await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: giftCardOrgId,
+                    square_gift_card_id: giftCardId
+                  }
+                })
+              : await prisma.giftCard.findFirst({
+                  where: { square_gift_card_id: giftCardId }
+                })
 
             if (giftCardRecord) {
               await saveGiftCardTransaction({
                 gift_card_id: giftCardRecord.id,
+                organization_id: giftCardRecord.organization_id,
                 transaction_type: transactionType,
                 amount_cents: amountCents,
                 balance_before_cents: 0,
@@ -2027,15 +2061,34 @@ async function loadGiftCard(
 
       // Save transaction to database
       try {
+        // Resolve organization_id from customer if available
+        let giftCardOrgId = null
+        if (customerId) {
+          const customerOrg = await prisma.$queryRaw`
+            SELECT organization_id FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId} 
+            LIMIT 1
+          `
+          giftCardOrgId = customerOrg?.[0]?.organization_id || null
+        }
+        
         // Find the gift card record in our database
-        const giftCardRecord = await prisma.giftCard.findUnique({
-          where: { square_gift_card_id: giftCardId }
-        })
+        const giftCardRecord = giftCardOrgId
+          ? await prisma.giftCard.findFirst({
+              where: {
+                organization_id: giftCardOrgId,
+                square_gift_card_id: giftCardId
+              }
+            })
+          : await prisma.giftCard.findFirst({
+              where: { square_gift_card_id: giftCardId }
+            })
 
         if (giftCardRecord) {
           // Save the transaction
           await saveGiftCardTransaction({
             gift_card_id: giftCardRecord.id,
+            organization_id: giftCardRecord.organization_id,
             transaction_type: transactionType,
             amount_cents: amountCents,
             balance_before_cents: balanceBeforeCents,
@@ -2221,7 +2274,8 @@ async function sendReferralCodeToNewClient(
           customerName, 
           0, // Start with $0 balance
           true, // This is a referrer gift card
-          pendingOrderInfo ? { orderInfo: pendingOrderInfo } : {}
+          pendingOrderInfo ? { orderInfo: pendingOrderInfo } : {},
+          organizationId
         )
         if (referrerGiftCard?.giftCardId) {
           referrerGiftCardId = referrerGiftCard.giftCardId
@@ -2884,7 +2938,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     }
 
     // Process gift card redemptions (for ALL payments, not just first payment)
-    await processGiftCardRedemptions(paymentData)
+    await processGiftCardRedemptions(paymentData, organizationId)
 
     // 1. Check if this is a new customer's first payment
     const customerData = await prisma.$queryRaw`
@@ -3035,7 +3089,8 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               `${referrer.given_name} ${referrer.family_name}`, 
               rewardAmountCents,
               true, // This is a referrer gift card
-              referrerGiftCardOptions
+              referrerGiftCardOptions,
+              organizationId
             )
 
             if (referrerGiftCard?.giftCardId) {
@@ -3101,12 +3156,16 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               // Create ReferralReward record for tracking
               try {
                 // Find the gift card ID from the new gift_cards table
-                const giftCardRecord = await prisma.giftCard.findUnique({
-                  where: { square_gift_card_id: referrerGiftCard.giftCardId }
+                const giftCardRecord = await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: organizationId,
+                    square_gift_card_id: referrerGiftCard.giftCardId
+                  }
                 })
                 
                 await prisma.referralReward.create({
                   data: {
+                    organization_id: organizationId,
                     referrer_customer_id: referrer.square_customer_id,
                     referred_customer_id: customerId,
                     reward_amount_cents: rewardAmountCents, // 1000 cents = $10
@@ -3238,12 +3297,16 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
 
               // Create ReferralReward record for tracking
               try {
-                const giftCardRecord = await prisma.giftCard.findUnique({
-                  where: { square_gift_card_id: referrerInfo.gift_card_id }
+                const giftCardRecord = await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: referrerOrganizationId,
+                    square_gift_card_id: referrerInfo.gift_card_id
+                  }
                 })
                 
                 await prisma.referralReward.create({
                   data: {
+                    organization_id: organizationId,
                     referrer_customer_id: referrer.square_customer_id,
                     referred_customer_id: customerId,
                     reward_amount_cents: rewardAmountCents,
@@ -3624,22 +3687,26 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     }
     
     // Resolve administrator_id from creator_details.team_member_id
+    // ONLY if creator_type is TEAM_MEMBER
     let administratorUuid = null
-    const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
-    if (creatorTeamMemberId && finalOrganizationId) {
-      try {
-        const adminRecord = await prisma.$queryRaw`
-          SELECT id::text as id FROM team_members
-          WHERE square_team_member_id = ${creatorTeamMemberId}
-            AND organization_id = ${finalOrganizationId}::uuid
-          LIMIT 1
-        `
-        administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
-        if (administratorUuid) {
-          console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorUuid}`)
+    const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
+    if (creatorType === 'TEAM_MEMBER') {
+      const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+      if (creatorTeamMemberId && finalOrganizationId) {
+        try {
+          const adminRecord = await prisma.$queryRaw`
+            SELECT id::text as id FROM team_members
+            WHERE square_team_member_id = ${creatorTeamMemberId}
+              AND organization_id = ${finalOrganizationId}::uuid
+            LIMIT 1
+          `
+          administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
+          if (administratorUuid) {
+            console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorUuid}`)
+          }
+        } catch (error) {
+          console.error(`❌ Error resolving administrator: ${error.message}`)
         }
-      } catch (error) {
-        console.error(`❌ Error resolving administrator: ${error.message}`)
       }
     }
     
@@ -4026,6 +4093,29 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       let durationMinutes = null
       let serviceVariationVersion = null
 
+      // Extract administrator_id from creator_details if creator_type is TEAM_MEMBER
+      const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
+      const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
+      if (creatorType === 'TEAM_MEMBER') {
+        const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+        if (creatorTeamMemberId) {
+          try {
+            const adminRecord = await prisma.$queryRaw`
+              SELECT id::text as id FROM team_members
+              WHERE square_team_member_id = ${creatorTeamMemberId}
+                AND organization_id = ${organizationId}::uuid
+              LIMIT 1
+            `
+            administratorId = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
+            if (administratorId) {
+              console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorId}`)
+            }
+          } catch (error) {
+            console.error(`❌ Error resolving administrator: ${error.message}`)
+          }
+        }
+      }
+
       // Process appointment segments to resolve Square IDs to UUIDs
       if (appointmentSegments.length > 0) {
         // Try to match existing booking's service variation with segments
@@ -4121,6 +4211,11 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       if (technicianId) {
         updateFields.push('technician_id = $' + (updateValues.length + 1) + '::uuid')
         updateValues.push(technicianId)
+      }
+      
+      if (administratorId) {
+        updateFields.push('administrator_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(administratorId)
       }
       
       if (durationMinutes !== null) {
@@ -4634,6 +4729,19 @@ async function processBookingCreated(bookingData, runContext = {}) {
       }
     }
 
+    // Update referral_checked_at to track that validation was performed
+    try {
+      await prisma.$executeRaw`
+        UPDATE square_existing_clients
+        SET referral_checked_at = NOW()
+        WHERE square_customer_id = ${customerId}
+          AND organization_id = ${organizationId}::uuid
+      `
+    } catch (updateError) {
+      console.warn(`⚠️ Failed to update referral_checked_at: ${updateError.message}`)
+      // Non-critical, continue processing
+    }
+
     // NOW check for referral code and give gift card
     if (referralCode) {
       console.log(`🎁 Customer used referral code: ${referralCode}`)
@@ -4787,38 +4895,35 @@ async function processBookingCreated(bookingData, runContext = {}) {
           `${customer.given_name || ''} ${customer.family_name || ''}`.trim(),
           rewardAmountCents, // $10
           false, // Friend gift card
-          friendGiftCardOptions
+          friendGiftCardOptions,
+          organizationId
         )
 
         if (friendGiftCard?.giftCardId) {
-          // Update customer with gift card
-          // Save used_referral_code to ReferralProfile (new normalized table)
+          // Update customer with gift card in a transaction for atomicity
           try {
-            await prisma.referralProfile.upsert({
-              where: {
-                organization_id_square_customer_id: {
+            await prisma.$transaction(async (tx) => {
+              // Save used_referral_code to ReferralProfile (new normalized table)
+              await tx.referralProfile.upsert({
+                where: {
+                  organization_id_square_customer_id: {
+                    organization_id: organizationId,
+                    square_customer_id: customerId
+                  }
+                },
+                update: {
+                  used_referral_code: referralCode,
+                  updated_at: new Date()
+                },
+                create: {
                   organization_id: organizationId,
-                  square_customer_id: customerId
+                  square_customer_id: customerId,
+                  used_referral_code: referralCode
                 }
-              },
-              update: {
-                used_referral_code: referralCode,
-                updated_at: new Date()
-              },
-              create: {
-                organization_id: organizationId,
-                square_customer_id: customerId,
-                used_referral_code: referralCode
-              }
-            })
-            console.log(`✅ Updated ReferralProfile with used_referral_code: ${referralCode}`)
-          } catch (profileError) {
-            console.warn(`⚠️ Failed to update ReferralProfile with used_referral_code: ${profileError.message}`)
-            // Continue - non-critical error
-          }
-          
-          // Also update square_existing_clients for backward compatibility
-          await prisma.$executeRaw`
+              })
+              
+              // Also update square_existing_clients for backward compatibility
+              await tx.$executeRaw`
             UPDATE square_existing_clients 
             SET 
               got_signup_bonus = TRUE,
@@ -4833,8 +4938,17 @@ async function processBookingCreated(bookingData, runContext = {}) {
               used_referral_code = ${referralCode},
               updated_at = NOW()
             WHERE square_customer_id = ${customerId}
-              AND organization_id = ${organizationId}::uuid
-          `
+                  AND organization_id = ${organizationId}::uuid
+              `
+            }, {
+              timeout: 30000,
+              isolationLevel: 'ReadCommitted'
+            })
+            console.log(`✅ Updated ReferralProfile and square_existing_clients with gift card info and used_referral_code: ${referralCode}`)
+          } catch (profileError) {
+            console.warn(`⚠️ Failed to update ReferralProfile and square_existing_clients: ${profileError.message}`)
+            // Continue - non-critical error, but log it
+          }
 
           console.log(`✅ Friend received $10 gift card IMMEDIATELY: ${friendGiftCard.giftCardId}`)
           console.log(`   - Customer: ${customer.given_name} ${customer.family_name}`)
@@ -4900,12 +5014,16 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
           // Create ReferralReward record for friend signup bonus
           try {
-            const giftCardRecord = await prisma.giftCard.findUnique({
-              where: { square_gift_card_id: friendGiftCard.giftCardId }
+            const giftCardRecord = await prisma.giftCard.findFirst({
+              where: {
+                organization_id: organizationId,
+                square_gift_card_id: friendGiftCard.giftCardId
+              }
             })
             
             await prisma.referralReward.create({
               data: {
+                organization_id: organizationId,
                 referrer_customer_id: referrer.square_customer_id,
                 referred_customer_id: customerId,
                 reward_amount_cents: rewardAmountCents, // 1000 cents = $10
@@ -5965,7 +6083,15 @@ export async function POST(request) {
       
       // Process gift card redemptions for ALL payment updates (not just first payment)
       // This ensures we capture REDEEM transactions even if payment processing logic skips
-      await processGiftCardRedemptions(paymentData)
+      // Resolve organization_id from payment location
+      let paymentOrgId = null
+      if (paymentData) {
+        const squareLocationId = paymentData.location_id || paymentData.locationId
+        if (squareLocationId) {
+          paymentOrgId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        }
+      }
+      await processGiftCardRedemptions(paymentData, paymentOrgId)
       
       console.log('💰 Received payment.updated event')
       
