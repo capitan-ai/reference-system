@@ -1779,7 +1779,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
                       organization_id, booking_id, customer_id, location_id, status, version,
                       start_at, created_at, updated_at, raw_json
                     ) VALUES (
-                      ${bookingOrgId}::text, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
+                      ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
                       ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
                       NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
                     )
@@ -2456,70 +2456,58 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2185',message:'Organization ID match check',data:{orgMatchCheck:orgMatchCheck?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
     // #endregion
     
-    // Use the same simple approach as payment webhook (no transaction)
-    // First, try to find existing order
-    const existingOrder = await prisma.$queryRaw`
-      SELECT id FROM orders
-      WHERE organization_id = ${organizationId}::uuid
-        AND order_id = ${orderId}
-      LIMIT 1
-    `
-    
+    // Use raw SQL upsert to handle both create and update atomically (prevents race conditions)
+    // This avoids Prisma's composite unique constraint limitations
     let orderUuid = null
     try {
-      if (existingOrder && existingOrder.length > 0) {
-        // Update existing order
-        orderUuid = existingOrder[0].id
-        console.log(`📝 Updating existing order ${orderId} with UUID ${orderUuid}`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2200',message:'About to update order',data:{orderId,orderUuid,cleanLocationUuid,organizationId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-        // #endregion
-        await prisma.order.update({
-          where: { id: orderUuid },
-          data: {
-            location_id: cleanLocationUuid, // Direct UUID assignment (like payment webhook)
-            customer_id: customerId,
-            state: orderState || order.state || null,
-            version: order.version ? Number(order.version) : null,
-            reference_id: order.reference_id || null,
-            updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-            raw_json: order
-          }
-        })
+      const createdAt = order.created_at ? new Date(order.created_at) : new Date()
+      const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
+      const orderStateValue = orderState || order.state || null
+      const versionValue = order.version ? Number(order.version) : null
+      const rawJsonValue = JSON.stringify(order)
+      
+      const upsertedOrder = await prisma.$queryRaw`
+        INSERT INTO orders (
+          organization_id,
+          order_id,
+          location_id,
+          customer_id,
+          state,
+          version,
+          reference_id,
+          created_at,
+          updated_at,
+          raw_json
+        ) VALUES (
+          ${organizationId}::uuid,
+          ${orderId},
+          ${cleanLocationUuid}::uuid,
+          ${customerId || null},
+          ${orderStateValue},
+          ${versionValue},
+          ${order.reference_id || null},
+          ${createdAt}::timestamptz,
+          ${updatedAt}::timestamptz,
+          ${rawJsonValue}::jsonb
+        )
+        ON CONFLICT (organization_id, order_id)
+        DO UPDATE SET
+          location_id = EXCLUDED.location_id,
+          customer_id = EXCLUDED.customer_id,
+          state = EXCLUDED.state,
+          version = EXCLUDED.version,
+          reference_id = EXCLUDED.reference_id,
+          updated_at = EXCLUDED.updated_at,
+          raw_json = EXCLUDED.raw_json
+        RETURNING id, order_id, organization_id, state
+      `
+      
+      if (upsertedOrder && upsertedOrder.length > 0) {
+        orderUuid = upsertedOrder[0].id
+        console.log(`✅ Upserted order ${orderId} to orders table (UUID: ${orderUuid}, state: ${orderStateValue || 'N/A'})`)
       } else {
-        // Create new order (same pattern as payment webhook)
-        console.log(`➕ Creating new order ${orderId}`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2215',message:'About to create order - exact data',data:{orderId,organizationId,cleanLocationUuid,customerId,state:orderState||order.state,locationIdType:typeof cleanLocationUuid,locationIdValue:cleanLocationUuid,locationIdLength:cleanLocationUuid.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-        // #endregion
-        
-        // Database identity check BEFORE Order.create()
-        const dbInfoBeforeOrder = await prisma.$queryRaw`
-          SELECT current_database(), inet_server_addr();
-        `;
-        console.log("DB INFO (before Order.create())", serializeBigInt(dbInfoBeforeOrder));
-        
-        const newOrder = await prisma.order.create({
-          data: {
-            organization_id: organizationId,
-            order_id: orderId,
-            location_id: cleanLocationUuid, // Direct UUID assignment (like payment webhook)
-            customer_id: customerId,
-            state: orderState || order.state || null,
-            version: order.version ? Number(order.version) : null,
-            reference_id: order.reference_id || null,
-            created_at: order.created_at ? new Date(order.created_at) : new Date(),
-            updated_at: order.updated_at ? new Date(order.updated_at) : new Date(),
-            raw_json: order
-          }
-        })
-        orderUuid = newOrder.id
-        // Safe to log - only using .id which is a string UUID
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:2232',message:'Order created successfully',data:{orderId,orderUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-        // #endregion
+        throw new Error(`Failed to upsert order ${orderId} - no result returned`)
       }
-      console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
     } catch (orderError) {
       safeLogError(`❌ Error saving order ${orderId} to orders table:`, orderError)
       

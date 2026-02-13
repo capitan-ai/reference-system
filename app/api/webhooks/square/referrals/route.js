@@ -855,7 +855,7 @@ async function checkCustomerHasPreviousBookings(
     const result = await prisma.$queryRaw`
       SELECT COUNT(*) as count
       FROM bookings
-      WHERE organization_id = ${organizationId}::text
+      WHERE organization_id = ${organizationId}::uuid
         AND customer_id = ${customerId}
         AND booking_id != ${currentBookingId}
         AND start_at < ${new Date(currentBookingStartAt)}::timestamptz
@@ -881,7 +881,7 @@ async function checkCustomerHasPreviousPayments(
     const result = await prisma.$queryRaw`
       SELECT COUNT(*) as count
       FROM payments
-      WHERE organization_id = ${organizationId}::text
+      WHERE organization_id = ${organizationId}::uuid
         AND customer_id = ${customerId}
         AND created_at < ${new Date(beforeDate)}::timestamptz
     `
