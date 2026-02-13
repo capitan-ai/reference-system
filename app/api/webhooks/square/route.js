@@ -7,9 +7,26 @@ const { resolveLocationUuidForSquareLocationId } = locationResolver
 
 // Helper to safely stringify objects with BigInt values
 function safeStringify(value) {
-  return JSON.stringify(value, (_key, val) => 
-    typeof val === 'bigint' ? val.toString() : val
-  )
+  try {
+    return JSON.stringify(value, (_key, val) => 
+      typeof val === 'bigint' ? val.toString() : val
+    )
+  } catch (error) {
+    // If stringification fails (circular reference, etc.), return a safe fallback
+    console.warn('⚠️ safeStringify failed, using fallback:', error.message)
+    try {
+      // Try again with a more aggressive replacer that handles more edge cases
+      return JSON.stringify(value, (_key, val) => {
+        if (typeof val === 'bigint') return val.toString()
+        if (val === undefined) return null
+        if (typeof val === 'function') return '[Function]'
+        if (val instanceof Error) return val.message
+        return val
+      })
+    } catch (fallbackError) {
+      return '[Unserializable value]'
+    }
+  }
 }
 
 // Helper to safely serialize data for JSON responses (converts BigInt to string)
@@ -503,7 +520,7 @@ export async function POST(request) {
 
     // Парсим JSON
     const eventData = JSON.parse(rawBody)
-    console.log('📝 Raw event data:', JSON.stringify(eventData, null, 2))
+    console.log('📝 Raw event data:', safeStringify(eventData))
 
     // Save webhook event to application_logs (non-blocking)
     let webhookOrganizationId = null
@@ -1520,7 +1537,11 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       console.error('[DEBUG ERROR]', safeStringify(errorLogData));
       safeLogError('[DEBUG ERROR] Full error:', paymentError);
       // #endregion
-      throw paymentError
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanPaymentError = new Error(paymentError?.message || 'Failed to save payment')
+      cleanPaymentError.name = paymentError?.name || 'PaymentSaveError'
+      cleanPaymentError.code = paymentError?.code
+      throw cleanPaymentError
     }
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:824',message:'payment upsert - after',data:{paymentId,paymentUuid:payment.id,success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
@@ -2180,7 +2201,11 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       if (apiError.errors) {
         console.error('Square API errors:', JSON.stringify(apiError.errors, null, 2))
       }
-      throw apiError
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanApiError = new Error(apiError?.message || 'Failed to fetch order from Square API')
+      cleanApiError.name = apiError?.name || 'SquareAPIError'
+      cleanApiError.code = apiError?.code
+      throw cleanApiError
     }
 
     // Use location_id from full order (more reliable than webhook metadata)
@@ -2464,7 +2489,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
       const orderStateValue = orderState || order.state || null
       const versionValue = order.version ? Number(order.version) : null
-      const rawJsonValue = JSON.stringify(order)
+      const rawJsonValue = safeStringify(order) // Use safeStringify to handle BigInt values
       
       const upsertedOrder = await prisma.$queryRaw`
         INSERT INTO orders (
@@ -2503,13 +2528,21 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       `
       
       if (upsertedOrder && upsertedOrder.length > 0) {
-        orderUuid = upsertedOrder[0].id
-        console.log(`✅ Upserted order ${orderId} to orders table (UUID: ${orderUuid}, state: ${orderStateValue || 'N/A'})`)
+        // Extract values safely to avoid BigInt serialization issues
+        const result = upsertedOrder[0]
+        orderUuid = result.id
+        const returnedState = result.state
+        console.log(`✅ Upserted order ${orderId} to orders table (UUID: ${orderUuid}, state: ${returnedState || orderStateValue || 'N/A'})`)
       } else {
         throw new Error(`Failed to upsert order ${orderId} - no result returned`)
       }
     } catch (orderError) {
       safeLogError(`❌ Error saving order ${orderId} to orders table:`, orderError)
+      
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanOrderError = new Error(orderError?.message || 'Failed to save order')
+      cleanOrderError.name = orderError?.name || 'OrderSaveError'
+      cleanOrderError.code = orderError?.code
       
       // If foreign key constraint error, the location resolution failed
       if (orderError.code === 'P2003' || (orderError.code === '23503' && orderError.message?.includes('location_id_fkey'))) {
@@ -2534,14 +2567,14 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
             throw new Error(`Foreign key constraint violation: location ${cleanLocationUuid} does not exist. This indicates a bug in location resolution logic.`)
           } else {
             console.error(`⚠️ Location ${cleanLocationUuid} EXISTS but FK still failed - this is very strange!`)
-            throw orderError // Re-throw the original error
+            throw cleanOrderError // Throw clean error instead of original
           }
         } catch (checkErr) {
           console.error(`❌ Error checking location after FK error:`, checkErr.message)
-          throw orderError // Re-throw the original error
+          throw cleanOrderError // Throw clean error instead of original
         }
       }
-      throw orderError
+      throw cleanOrderError // Always throw clean error to prevent BigInt serialization issues
     }
 
     // Get order UUID for line items (try to get it even if save failed, in case order already exists)
@@ -2609,12 +2642,17 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         console.log(`✅ Successfully created order with UUID: ${orderUuid}`)
       } catch (retryError) {
         console.error(`❌ Failed to create order on retry:`, retryError.message)
+        // Create a clean error without BigInt values
+        const cleanRetryError = new Error(retryError?.message || 'Failed to create order on retry')
+        cleanRetryError.name = retryError?.name || 'OrderRetryError'
+        cleanRetryError.code = retryError?.code
+        
         // If foreign key constraint error, the location resolution failed - this should not happen
         if (retryError.code === '23503' && retryError.message?.includes('location_id_fkey')) {
-          throw new Error(`Foreign key constraint violation: location ${locationUuid} does not exist. This indicates a bug in location resolution logic. Original error: ${orderSaveError?.message || 'unknown'}`)
+          throw new Error(`Foreign key constraint violation: location ${locationUuid} does not exist. This indicates a bug in location resolution logic. Original error: ${cleanRetryError.message}`)
         }
         // Still throw error so webhook fails and Square retries
-        throw new Error(`Cannot process order: failed to save order and could not create order UUID. Original error: ${orderSaveError?.message || 'unknown'}`)
+        throw new Error(`Cannot process order: failed to save order and could not create order UUID. Original error: ${cleanRetryError.message}`)
       }
     }
 
