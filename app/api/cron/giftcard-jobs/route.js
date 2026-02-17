@@ -90,6 +90,13 @@ async function handle(request) {
   
   console.log(`[CRON] Authorized using method: ${auth.method}`)
 
+  // Debug: Check Square token status
+  console.log(`[CRON] Square Token Check:`)
+  console.log(`   - SQUARE_ACCESS_TOKEN exists: ${!!process.env.SQUARE_ACCESS_TOKEN}`)
+  console.log(`   - SQUARE_ACCESS_TOKEN length: ${process.env.SQUARE_ACCESS_TOKEN?.length || 0}`)
+  console.log(`   - SQUARE_ACCESS_TOKEN preview: ${process.env.SQUARE_ACCESS_TOKEN?.substring(0, 10)}...`)
+  console.log(`   - SQUARE_ENV: ${process.env.SQUARE_ENV || 'not set'}`)
+
   const cronId = `cron-giftcard-jobs-${Date.now()}`
   
   // Save cron start to application_logs (non-blocking)

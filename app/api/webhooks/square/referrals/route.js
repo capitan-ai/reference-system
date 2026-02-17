@@ -92,67 +92,15 @@ const {
 } = require('../../../../../lib/config/location-map')
 const { getSquareEnvironmentName } = require('../../../../../lib/utils/square-env')
 
-let squareApisCache = null
-function getSquareApis() {
-  if (squareApisCache) return squareApisCache
-  // Use dynamic require so bundlers don't evaluate Square SDK at build-time
-  // eslint-disable-next-line global-require
-  const squareModule = require('square')
-  const candidates = [squareModule, squareModule?.default].filter(Boolean)
-  const pick = (selector) => {
-    for (const candidate of candidates) {
-      const value = selector(candidate)
-      if (value) return value
-    }
-    return null
-  }
-
-  const Client =
-    pick((mod) => (typeof mod?.Client === 'function' ? mod.Client : null)) ||
-    (typeof candidates[0] === 'function' ? candidates[0] : null)
-  const Environment = pick((mod) => mod?.Environment)
-  const WebhooksHelper = pick((mod) => mod?.WebhooksHelper)
-
-  if (
-    typeof Client !== 'function' ||
-    !Environment ||
-    typeof Environment.Production === 'undefined'
-  ) {
-    throw new Error('Square SDK exports missing (Client/Environment)')
-  }
-
-  const squareEnvName = getSquareEnvironmentName()
-  const resolvedEnvironment = squareEnvName === 'sandbox' ? Environment.Sandbox : Environment.Production
-  const squareClient = new Client({
-    accessToken: process.env.SQUARE_ACCESS_TOKEN?.trim(),
-    environment: resolvedEnvironment,
-  })
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`[square] Webhook handler using ${squareEnvName} environment`)
-  }
-  squareApisCache = {
-    Client,
-    Environment,
-    WebhooksHelper,
-    customersApi: squareClient.customersApi,
-    giftCardsApi: squareClient.giftCardsApi,
-    giftCardActivitiesApi: squareClient.giftCardActivitiesApi,
-    customerCustomAttributesApi: squareClient.customerCustomAttributesApi,
-    ordersApi: squareClient.ordersApi,
-    paymentsApi: squareClient.paymentsApi,
-    locationsApi: squareClient.locationsApi,
-  }
-  return squareApisCache
-}
-
-const getCustomersApi = () => getSquareApis().customersApi
-const getGiftCardsApi = () => getSquareApis().giftCardsApi
-const getGiftCardActivitiesApi = () => getSquareApis().giftCardActivitiesApi
-const getCustomerCustomAttributesApi = () => getSquareApis().customerCustomAttributesApi
-const getOrdersApi = () => getSquareApis().ordersApi
-const getPaymentsApi = () => getSquareApis().paymentsApi
-const getLocationsApi = () => getSquareApis().locationsApi
-const getWebhooksHelper = () => getSquareApis().WebhooksHelper
+const { 
+  getCustomersApi, 
+  getGiftCardsApi, 
+  getGiftCardActivitiesApi, 
+  getCustomerCustomAttributesApi, 
+  getOrdersApi, 
+  getPaymentsApi, 
+  getLocationsApi 
+} = require('../../../../../lib/utils/square-client')
 
 const DELIVERY_CHANNELS = {
   SQUARE_EGIFT_ORDER: 'square_egift_order',

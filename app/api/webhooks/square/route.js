@@ -56,56 +56,11 @@ function getSquareEnvironmentName() {
   return squareEnv.getSquareEnvironmentName()
 }
 
-// Get Square APIs
-function getSquareApis() {
-  // Use dynamic require so bundlers don't evaluate Square SDK at build-time
-  // eslint-disable-next-line global-require
-  const squareModule = require('square')
-  const candidates = [squareModule, squareModule?.default].filter(Boolean)
-  const pick = (selector) => {
-    for (const candidate of candidates) {
-      const value = selector(candidate)
-      if (value) return value
-    }
-    return null
-  }
-
-  const Client = pick((mod) => (typeof mod?.Client === 'function' ? mod.Client : null)) ||
-    (typeof candidates[0] === 'function' ? candidates[0] : null)
-  const Environment = pick((mod) => mod?.Environment)
-
-  if (typeof Client !== 'function' || !Environment) {
-    throw new Error('Square SDK exports missing (Client/Environment)')
-  }
-
-  const squareEnvName = getSquareEnvironmentName()
-  const resolvedEnvironment = squareEnvName === 'sandbox' ? Environment.Sandbox : Environment.Production
-  const squareClient = new Client({
-    accessToken: process.env.SQUARE_ACCESS_TOKEN?.trim(),
-    environment: resolvedEnvironment,
-  })
-
-  return {
-    ordersApi: squareClient.ordersApi,
-    locationsApi: squareClient.locationsApi,
-    bookingsApi: squareClient.bookingsApi,
-  }
-}
-
-// Get Square Orders API (backward compatibility)
-function getOrdersApi() {
-  return getSquareApis().ordersApi
-}
-
-// Get Square Locations API
-function getLocationsApi() {
-  return getSquareApis().locationsApi
-}
-
-// Get Square Bookings API
-function getBookingsApi() {
-  return getSquareApis().bookingsApi
-}
+const { 
+  getOrdersApi, 
+  getLocationsApi, 
+  getBookingsApi 
+} = require('../../../../lib/utils/square-client')
 
 /**
  * Derive booking_id from Square API
@@ -559,11 +514,8 @@ export async function POST(request) {
       if (eventData.event_id) {
         // eslint-disable-next-line global-require
         const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-        // eslint-disable-next-line global-require
-        const { PrismaClient } = require('@prisma/client')
-        const logPrisma = new PrismaClient()
         
-        await saveApplicationLog(logPrisma, {
+        await saveApplicationLog(prisma, {
           logType: 'webhook',
           logId: eventData.event_id,
           logCreatedAt: eventData.created_at ? new Date(eventData.created_at) : new Date(),
@@ -574,8 +526,6 @@ export async function POST(request) {
         }).catch((logError) => {
           console.warn('⚠️ Failed to save webhook to application_logs:', logError.message)
         })
-        
-        await logPrisma.$disconnect()
       }
     } catch (logError) {
       // Don't fail webhook if logging fails
@@ -779,23 +729,18 @@ export async function POST(request) {
             console.warn(`   Event data keys: ${Object.keys(eventData).filter(k => k !== 'data').join(', ')}`)
             // Don't fail the webhook - just log the warning
           } else {
-            // eslint-disable-next-line global-require
-            const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
-            // eslint-disable-next-line global-require
-            const { PrismaClient } = require('@prisma/client')
-            const queuePrisma = new PrismaClient()
-            
-            await enqueueWebhookJob(queuePrisma, {
-              eventType: eventData.type,
-              eventId: eventData.event_id,
-              eventCreatedAt: eventData.created_at,
-              payload: payload,
-              organizationId: organizationId
-            })
-            
-            console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId}`)
-            
-            await queuePrisma.$disconnect()
+          // eslint-disable-next-line global-require
+          const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
+          
+          await enqueueWebhookJob(prisma, {
+            eventType: eventData.type,
+            eventId: eventData.event_id,
+            eventCreatedAt: eventData.created_at,
+            payload: payload,
+            organizationId: organizationId
+          })
+          
+          console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId}`)
           }
         } catch (enqueueError) {
           console.error(`❌ Failed to enqueue ${eventData.type}:`, enqueueError.message)
@@ -807,11 +752,7 @@ export async function POST(request) {
     // Update application_log status to completed (non-blocking)
     if (eventData?.event_id) {
       try {
-        // eslint-disable-next-line global-require
-        const { PrismaClient } = require('@prisma/client')
-        const logPrisma = new PrismaClient()
-        
-        await logPrisma.$executeRaw`
+        await prisma.$executeRaw`
           UPDATE application_logs
           SET status = 'completed',
               updated_at = NOW()
@@ -819,8 +760,6 @@ export async function POST(request) {
             AND log_type = 'webhook'
             ${webhookOrganizationId ? Prisma.sql`AND organization_id = ${webhookOrganizationId}::uuid` : Prisma.sql`AND organization_id IS NULL`}
         `.catch(() => {}) // Silently fail
-        
-        await logPrisma.$disconnect()
       } catch (updateError) {
         // Don't fail webhook if status update fails
         console.warn('⚠️ Failed to update application_log status:', updateError.message)
@@ -840,11 +779,7 @@ export async function POST(request) {
     // Update application_log status to error (non-blocking)
     if (eventData?.event_id) {
       try {
-        // eslint-disable-next-line global-require
-        const { PrismaClient } = require('@prisma/client')
-        const logPrisma = new PrismaClient()
-        
-        await logPrisma.$executeRaw`
+        await prisma.$executeRaw`
           UPDATE application_logs
           SET status = 'error',
               last_error = ${error?.message || String(error)},
@@ -852,8 +787,6 @@ export async function POST(request) {
           WHERE log_id = ${eventData.event_id}
             AND log_type = 'webhook'
         `.catch(() => {}) // Silently fail
-        
-        await logPrisma.$disconnect()
       } catch (updateError) {
         // Don't fail if status update fails
         console.warn('⚠️ Failed to update application_log error status:', updateError.message)
@@ -926,8 +859,6 @@ export async function POST(request) {
         
         if (organizationId) {
           const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
-          const { PrismaClient } = require('@prisma/client')
-          const prisma = new PrismaClient()
           
           await enqueueWebhookJob(prisma, {
             eventType: eventData.type,
@@ -939,8 +870,6 @@ export async function POST(request) {
           })
           
           console.log(`📦 [ERROR HANDLER] Enqueued failed webhook ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId} for retry`)
-          
-          await prisma.$disconnect()
         } else {
           console.warn(`⚠️ [ERROR HANDLER] Cannot enqueue failed webhook ${eventData.type}: organization_id could not be resolved`)
           console.warn(`   Payload keys: ${Object.keys(payload).join(', ')}`)
@@ -2184,6 +2113,10 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     // #endregion
 
     console.log(`📦 Fetching full order details for order ${orderId} (state: ${orderState})`)
+    
+    const token = process.env.SQUARE_ACCESS_TOKEN?.trim() || ''
+    const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token
+    console.log(`   [DEBUG] Token length: ${cleanToken.length}, Preview: ${cleanToken.substring(0, 10)}...`)
 
     // Fetch full order details from Square API to get line items
     let order
