@@ -4382,6 +4382,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             gift_card_id,
             used_referral_code,
             referral_email_sent,
+            raw_json,
             created_at,
             updated_at
           ) VALUES (
@@ -4397,6 +4398,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             NULL,
             NULL,
             FALSE,
+            ${safeStringify(squareCustomer)}::jsonb,
             NOW(),
             NOW()
           )
@@ -4405,6 +4407,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             family_name = COALESCE(square_existing_clients.family_name, EXCLUDED.family_name),
             email_address = COALESCE(square_existing_clients.email_address, EXCLUDED.email_address),
             phone_number = COALESCE(square_existing_clients.phone_number, EXCLUDED.phone_number),
+            raw_json = COALESCE(square_existing_clients.raw_json, EXCLUDED.raw_json),
             updated_at = NOW()
         `
         
@@ -4469,6 +4472,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             family_name = COALESCE(square_existing_clients.family_name, ${squareFamilyName}),
             email_address = COALESCE(square_existing_clients.email_address, ${squareEmail}),
             phone_number = COALESCE(square_existing_clients.phone_number, ${squarePhone}),
+            raw_json = COALESCE(square_existing_clients.raw_json, ${safeStringify(squareCustomer)}::jsonb),
             updated_at = NOW()
           WHERE square_customer_id = ${customerId}
             AND organization_id = ${organizationId}::uuid

@@ -1135,12 +1135,14 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
             organization_id,
             square_customer_id,
             got_signup_bonus,
+            raw_json,
             created_at,
             updated_at
           ) VALUES (
             ${organizationId}::uuid,
             ${customerId},
             false,
+            NULL,
             NOW(),
             NOW()
           )

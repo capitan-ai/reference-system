@@ -126,8 +126,8 @@ async function upsertBookingSegmentsFromPayload(bookingId, organizationId, booki
         ${technicianUuid}::uuid,
         ${anyTeamMember},
         ${bookingVersion},
-        ${bookingCreatedAt ? new Date(bookingCreatedAt) : null}::timestamp,
-        ${bookingStartAt ? new Date(bookingStartAt) : null}::timestamp,
+        ${bookingCreatedAt ? new Date(bookingCreatedAt) : null}::timestamptz,
+        ${bookingStartAt ? new Date(bookingStartAt) : null}::timestamptz,
         true,
         NOW(),
         NOW()
@@ -298,19 +298,20 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
     // Include start_at - REQUIRED field
     // Include administrator_id if creator_type is TEAM_MEMBER
     // Include technician_id and service_variation_id from appointment_segments
+    // NOTE: Square timestamps come in UTC, explicitly cast to timestamptz to preserve timezone info
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, customer_id, location_id, start_at, status, version,
         administrator_id, technician_id, service_variation_id, service_variation_version, duration_minutes,
         created_at, updated_at, raw_json
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${bookingStartAt}::timestamp, ${status}, ${version || 1},
+        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${bookingStartAt}::timestamptz, ${status}, ${version || 1},
         ${administratorUuid ? Prisma.sql`${administratorUuid}::uuid` : Prisma.sql`NULL`},
         ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
         ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
         ${serviceVariationVersion ? serviceVariationVersion : Prisma.sql`NULL`},
         ${durationMinutes || Prisma.sql`NULL`},
-        ${bookingCreatedAt}::timestamp, ${bookingUpdatedAt}::timestamp, ${safeStringify(bookingData)}::jsonb
+        ${bookingCreatedAt}::timestamptz, ${bookingUpdatedAt}::timestamptz, ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         customer_id = COALESCE(EXCLUDED.customer_id, bookings.customer_id),
@@ -323,7 +324,7 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
         service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
         duration_minutes = COALESCE(EXCLUDED.duration_minutes, bookings.duration_minutes),
-        updated_at = ${bookingUpdatedAt}::timestamp,
+        updated_at = ${bookingUpdatedAt}::timestamptz,
         raw_json = EXCLUDED.raw_json
     `
 
@@ -387,16 +388,17 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
     await prisma.$executeRaw`
       INSERT INTO square_existing_clients (
         organization_id, square_customer_id, given_name, family_name, email_address, phone_number,
-        created_at, updated_at
+        raw_json, created_at, updated_at
       ) VALUES (
         ${organizationId}::uuid, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
-        NOW(), NOW()
+        ${JSON.stringify(customerData)}::jsonb, NOW(), NOW()
       )
       ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
         given_name = COALESCE(EXCLUDED.given_name, square_existing_clients.given_name),
         family_name = COALESCE(EXCLUDED.family_name, square_existing_clients.family_name),
         email_address = COALESCE(EXCLUDED.email_address, square_existing_clients.email_address),
         phone_number = COALESCE(EXCLUDED.phone_number, square_existing_clients.phone_number),
+        raw_json = COALESCE(EXCLUDED.raw_json, square_existing_clients.raw_json),
         updated_at = NOW()
     `
 
