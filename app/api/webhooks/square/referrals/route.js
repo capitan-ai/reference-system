@@ -99,7 +99,8 @@ const {
   getCustomerCustomAttributesApi, 
   getOrdersApi, 
   getPaymentsApi, 
-  getLocationsApi 
+  getLocationsApi,
+  getWebhooksHelper
 } = require('../../../../../lib/utils/square-client')
 
 const DELIVERY_CHANNELS = {
