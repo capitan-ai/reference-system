@@ -39,7 +39,7 @@ WITH payment_locations AS (
     p.organization_id,
     p.location_id::uuid as location_id,
     p.created_at,
-    p.total_money_amount,
+    p.amount_money_amount,
     p.customer_id,
     p.status
   FROM payments p
@@ -54,7 +54,7 @@ WITH payment_locations AS (
     p.organization_id,
     o.location_id::uuid as location_id,
     p.created_at,
-    p.total_money_amount,
+    p.amount_money_amount,
     p.customer_id,
     p.status
   FROM payments p
@@ -69,8 +69,8 @@ SELECT
   pl.location_id,
   l.name as location_name,
   DATE(pl.created_at) as date,
-  SUM(pl.total_money_amount) as revenue_cents,
-  SUM(pl.total_money_amount)::DECIMAL / 100.0 as revenue_dollars,
+  SUM(pl.amount_money_amount) as revenue_cents,
+  SUM(pl.amount_money_amount)::DECIMAL / 100.0 as revenue_dollars,
   COUNT(DISTINCT pl.payment_id) as payment_count,
   COUNT(DISTINCT pl.customer_id) FILTER (WHERE pl.customer_id IS NOT NULL) as unique_customers
 FROM payment_locations pl
@@ -120,7 +120,7 @@ GROUP BY pl.organization_id, pl.location_id, l.name, DATE(pl.created_at);
       SELECT 
         COUNT(*)::int as total_payments,
         COUNT(DISTINCT DATE(created_at))::int as unique_dates,
-        SUM(total_money_amount) as total_revenue_cents
+        SUM(amount_money_amount) as total_revenue_cents
       FROM payments
       WHERE organization_id = ${orgId}::uuid
         AND status = 'COMPLETED'
