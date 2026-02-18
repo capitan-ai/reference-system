@@ -8,7 +8,7 @@
 export const dynamic = 'force-dynamic'
 
 import { PrismaClient } from '@prisma/client'
-import { getUserFromRequest } from '@/lib/auth-utils'
+import { getUserFromRequest } from '@/lib/auth/check-access'
 
 const prisma = new PrismaClient()
 
