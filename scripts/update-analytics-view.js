@@ -68,7 +68,7 @@ SELECT
   pl.organization_id,
   pl.location_id,
   l.name as location_name,
-  DATE(pl.created_at) as date,
+  DATE(pl.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date,
   SUM(pl.amount_money_amount) as revenue_cents,
   SUM(pl.amount_money_amount)::DECIMAL / 100.0 as revenue_dollars,
   COUNT(DISTINCT pl.payment_id) as payment_count,
@@ -77,7 +77,7 @@ FROM payment_locations pl
 INNER JOIN locations l 
   ON pl.location_id = l.id
   AND pl.organization_id = l.organization_id
-GROUP BY pl.organization_id, pl.location_id, l.name, DATE(pl.created_at);
+GROUP BY pl.organization_id, pl.location_id, l.name, DATE(pl.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles');
     `
 
     console.log('\n\nUpdating view...')
