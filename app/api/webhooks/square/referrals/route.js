@@ -3914,7 +3914,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
 
     // Find existing booking(s) - there may be multiple records for multi-service bookings
     const existingBookings = await prisma.$queryRaw`
-      SELECT id, organization_id, booking_id, service_variation_id, technician_id, administrator_id
+      SELECT id, organization_id, booking_id, service_variation_id, technician_id, administrator_id, version, status
       FROM bookings
       WHERE booking_id LIKE ${`${baseBookingId}%`}
       ORDER BY created_at ASC
@@ -4002,12 +4002,14 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         console.log(`✅ Created ${segments.length} booking record(s) from booking.updated webhook`)
       }
 
+      // After creating the booking records, we should return early because we've already done the work
+      // and processBookingUpdated would otherwise try to update the records we just created.
       const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
       await upsertBookingSegments(headerBookingId, bookingData, organizationId)
       
       console.log(`✅ Successfully created booking ${baseBookingId} from booking.updated webhook`)
-          return
-        }
+      return
+    }
 
     console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
     // #region agent log
