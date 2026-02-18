@@ -111,32 +111,9 @@ export async function GET(request) {
       totals.unique_customers += Number(record.unique_customers || 0)
     })
 
-    // Calculate weighted average ticket (weighted by appointments count)
-    // Create a map of appointments by date and location for easy lookup
-    const appointmentsByDay = {}
-    appointments.forEach(record => {
-      const key = `${record.date}-${record.location_name}`
-      appointmentsByDay[key] = Number(record.accepted_appointments || 0)
-    })
-
-    // Calculate weighted ticket sum
-    let weightedTicketSum = 0
-    let totalAppointments = 0
-    revenue.forEach(record => {
-      const key = `${record.date}-${record.location_name}`
-      const dayAppointments = appointmentsByDay[key] || 0
-      const dayPayments = Number(record.payment_count || 0)
-      const dayRevenue = Number(record.revenue_dollars || 0)
-
-      if (dayPayments > 0 && dayAppointments > 0) {
-        const dailyAvgTicket = dayRevenue / dayPayments
-        weightedTicketSum += dailyAvgTicket * dayAppointments
-      }
-      totalAppointments += dayAppointments
-    })
-
-    if (totalAppointments > 0) {
-      totals.average_transaction = (weightedTicketSum / totalAppointments) * 100 // convert to cents for consistency
+    // Calculate average ticket: Total Revenue / Total Payments
+    if (totals.total_payments > 0) {
+      totals.average_transaction = (totals.total_revenue_dollars / totals.total_payments) * 100 // convert to cents for consistency
     }
 
     return Response.json({
