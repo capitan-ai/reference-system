@@ -58,15 +58,16 @@ SELECT
   bd.location_id,
   l.name as location_name,
   bd.booking_date_pacific as date,
-  COUNT(*) as appointments_count,
+  COUNT(*) FILTER (WHERE bd.status = 'ACCEPTED') as appointments_count,
   COUNT(*) FILTER (WHERE bd.status = 'ACCEPTED') as accepted_appointments,
+  COUNT(*) FILTER (WHERE bd.status IN ('CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER')) as cancelled_appointments,
+  COUNT(*) FILTER (WHERE bd.status = 'NO_SHOW') as no_show_appointments,
   COUNT(*) FILTER (WHERE bd.status = 'CANCELLED_BY_CUSTOMER') as cancelled_by_customer,
   COUNT(*) FILTER (WHERE bd.status = 'CANCELLED_BY_SELLER') as cancelled_by_seller,
-  COUNT(DISTINCT bd.customer_id) FILTER (WHERE bd.customer_id IS NOT NULL) as unique_customers,
-  -- New customers: customers whose created_at date (in square_existing_clients) 
-  -- matches the booking date (both converted to Pacific timezone)
+  COUNT(DISTINCT bd.customer_id) FILTER (WHERE bd.customer_id IS NOT NULL AND bd.status = 'ACCEPTED') as unique_customers,
   COUNT(DISTINCT bd.customer_id) FILTER (
     WHERE bd.customer_id IS NOT NULL 
+    AND bd.status = 'ACCEPTED'
     AND cd.customer_created_date_pacific = bd.booking_date_pacific
   ) as new_customers
 FROM booking_dates bd
