@@ -109,10 +109,6 @@ export async function GET(request) {
       revenueTotals.unique_customers += Number(record.unique_customers || 0)
     })
 
-    if (revenueTotals.total_payments > 0) {
-      revenueTotals.average_transaction = revenueTotals.total_revenue_cents / revenueTotals.total_payments
-    }
-
     // Build combined daily data
     const dailyData = {}
     
@@ -147,6 +143,25 @@ export async function GET(request) {
     })
 
     const combinedDaily = Object.values(dailyData)
+
+    // Calculate weighted average ticket: weighted by number of appointments
+    // For each day: daily_avg_ticket = revenue_dollars / payment_count
+    // Then: period_avg_ticket = sum(daily_avg_ticket * appointments_count) / total_appointments
+    let weightedTicketSum = 0
+    combinedDaily.forEach(day => {
+      const appointments = day.appointments.accepted
+      const daylyRevenue = day.revenue.dollars
+      const daylyPayments = day.revenue.payments
+      
+      if (daylyPayments > 0 && appointments > 0) {
+        const dailyAvgTicket = daylyRevenue / daylyPayments
+        weightedTicketSum += dailyAvgTicket * appointments
+      }
+    })
+
+    if (appointmentsTotals.total_accepted > 0) {
+      revenueTotals.average_transaction = (weightedTicketSum / appointmentsTotals.total_accepted) * 100 // convert to cents for consistency
+    }
 
     return Response.json({
       filters: {

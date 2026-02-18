@@ -80,68 +80,81 @@ export async function GET(request) {
       locationFilter = `AND location_id = '${locationId}'::uuid`
     }
 
-    // Get current period data
+    // Get current period data with weighted average calculation
     const currentData = await prisma.$queryRawUnsafe(`
       SELECT 
-        SUM(appointments_count)::int as total_appointments,
-        SUM(cancelled_appointments)::int as total_cancelled,
-        SUM(no_show_appointments)::int as total_no_show
-      FROM analytics_appointments_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        AND date BETWEEN '${periods.current.start}'::date AND '${periods.current.end}'::date
+        SUM(a.appointments_count)::int as total_appointments,
+        SUM(a.cancelled_appointments)::int as total_cancelled,
+        SUM(a.no_show_appointments)::int as total_no_show,
+        SUM(r.revenue_dollars)::numeric as total_revenue,
+        SUM(r.payment_count)::int as total_payments,
+        SUM(CASE 
+          WHEN r.payment_count > 0 AND a.appointments_count > 0 
+          THEN (r.revenue_dollars / r.payment_count) * a.appointments_count 
+          ELSE 0 
+        END)::numeric as weighted_ticket_sum
+      FROM analytics_appointments_by_location_daily a
+      FULL OUTER JOIN analytics_revenue_by_location_daily r 
+        ON a.organization_id = r.organization_id 
+        AND a.location_id = r.location_id 
+        AND a.date = r.date
+      WHERE a.organization_id = '${organizationId}'::uuid
+        AND a.date BETWEEN '${periods.current.start}'::date AND '${periods.current.end}'::date
         ${locationFilter}
     `)
 
-    const currentRevenue = await prisma.$queryRawUnsafe(`
-      SELECT 
-        SUM(revenue_dollars)::numeric as total_revenue,
-        SUM(payment_count)::int as total_payments
-      FROM analytics_revenue_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        AND date BETWEEN '${periods.current.start}'::date AND '${periods.current.end}'::date
-        ${locationFilter}
-    `)
+    const currentRevenue = currentData[0] || {}
 
-    // Get previous period data
+    // Get previous period data with weighted average calculation
     const previousData = await prisma.$queryRawUnsafe(`
       SELECT 
-        SUM(appointments_count)::int as total_appointments,
-        SUM(cancelled_appointments)::int as total_cancelled,
-        SUM(no_show_appointments)::int as total_no_show
-      FROM analytics_appointments_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        AND date BETWEEN '${periods.previous.start}'::date AND '${periods.previous.end}'::date
+        SUM(a.appointments_count)::int as total_appointments,
+        SUM(a.cancelled_appointments)::int as total_cancelled,
+        SUM(a.no_show_appointments)::int as total_no_show,
+        SUM(r.revenue_dollars)::numeric as total_revenue,
+        SUM(r.payment_count)::int as total_payments,
+        SUM(CASE 
+          WHEN r.payment_count > 0 AND a.appointments_count > 0 
+          THEN (r.revenue_dollars / r.payment_count) * a.appointments_count 
+          ELSE 0 
+        END)::numeric as weighted_ticket_sum
+      FROM analytics_appointments_by_location_daily a
+      FULL OUTER JOIN analytics_revenue_by_location_daily r 
+        ON a.organization_id = r.organization_id 
+        AND a.location_id = r.location_id 
+        AND a.date = r.date
+      WHERE a.organization_id = '${organizationId}'::uuid
+        AND a.date BETWEEN '${periods.previous.start}'::date AND '${periods.previous.end}'::date
         ${locationFilter}
     `)
 
-    const previousRevenue = await prisma.$queryRawUnsafe(`
-      SELECT 
-        SUM(revenue_dollars)::numeric as total_revenue,
-        SUM(payment_count)::int as total_payments
-      FROM analytics_revenue_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        AND date BETWEEN '${periods.previous.start}'::date AND '${periods.previous.end}'::date
-        ${locationFilter}
-    `)
+    const previousRevenue = previousData[0] || {}
 
     // Extract values with defaults
-    const currAppts = currentData[0]?.total_appointments || 0
-    const currCancelled = currentData[0]?.total_cancelled || 0
-    const currNoShow = currentData[0]?.total_no_show || 0
-    const currRevenue = Number(currentRevenue[0]?.total_revenue || 0)
-    const currPayments = currentRevenue[0]?.total_payments || 0
+    const currAppts = currentData?.total_appointments || 0
+    const currCancelled = currentData?.total_cancelled || 0
+    const currNoShow = currentData?.total_no_show || 0
+    const currRevenue = Number(currentData?.total_revenue || 0)
+    const currPayments = currentData?.total_payments || 0
+    const currWeightedTicketSum = Number(currentData?.weighted_ticket_sum || 0)
 
-    const prevAppts = previousData[0]?.total_appointments || 0
-    const prevCancelled = previousData[0]?.total_cancelled || 0
-    const prevNoShow = previousData[0]?.total_no_show || 0
-    const prevRevenue = Number(previousRevenue[0]?.total_revenue || 0)
-    const prevPayments = previousRevenue[0]?.total_payments || 0
+    const prevAppts = previousData?.total_appointments || 0
+    const prevCancelled = previousData?.total_cancelled || 0
+    const prevNoShow = previousData?.total_no_show || 0
+    const prevRevenue = Number(previousData?.total_revenue || 0)
+    const prevPayments = previousData?.total_payments || 0
+    const prevWeightedTicketSum = Number(previousData?.weighted_ticket_sum || 0)
+
+    // Calculate weighted average ticket (weighted by appointments count)
+    const currAvgTicket = currAppts > 0 ? currWeightedTicketSum / currAppts : 0
+    const prevAvgTicket = prevAppts > 0 ? prevWeightedTicketSum / prevAppts : 0
 
     // Calculate changes
     const appointmentsChange = calculatePercentageChange(currAppts, prevAppts)
     const cancelledChange = calculatePercentageChange(currCancelled, prevCancelled)
     const noShowChange = calculatePercentageChange(currNoShow, prevNoShow)
     const revenueChange = calculatePercentageChange(currRevenue, prevRevenue)
+    const avgTicketChange = calculatePercentageChange(currAvgTicket, prevAvgTicket)
 
     return Response.json({
       periods: {
@@ -179,7 +192,9 @@ export async function GET(request) {
           change_percent: parseFloat(revenueChange),
           change_direction: currRevenue >= prevRevenue ? 'up' : 'down',
           payments: currPayments,
-          average_transaction: currPayments > 0 ? (currRevenue / currPayments).toFixed(2) : 0
+          average_transaction: currAvgTicket.toFixed(2),
+          average_transaction_change_percent: parseFloat(avgTicketChange),
+          average_transaction_change_direction: currAvgTicket >= prevAvgTicket ? 'up' : 'down'
         }
       },
       summary: {

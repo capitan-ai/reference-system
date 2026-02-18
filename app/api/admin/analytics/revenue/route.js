@@ -29,8 +29,8 @@ export async function GET(request) {
       return Response.json({ error: 'organizationId is required' }, { status: 400 })
     }
 
-    // Get data from analytics view
-    let query = `
+    // Get revenue data from analytics view
+    let revenueQuery = `
       SELECT 
         date,
         location_name,
@@ -45,23 +45,54 @@ export async function GET(request) {
     const params = [organizationId]
 
     if (startDate) {
-      query += ` AND date >= $${params.length + 1}::date`
+      revenueQuery += ` AND date >= $${params.length + 1}::date`
       params.push(startDate)
     }
 
     if (endDate) {
-      query += ` AND date <= $${params.length + 1}::date`
+      revenueQuery += ` AND date <= $${params.length + 1}::date`
       params.push(endDate)
     }
 
     if (locationId) {
-      query += ` AND location_id = $${params.length + 1}::uuid`
+      revenueQuery += ` AND location_id = $${params.length + 1}::uuid`
       params.push(locationId)
     }
 
-    query += ` ORDER BY date DESC, location_name`
+    revenueQuery += ` ORDER BY date DESC, location_name`
 
-    const revenue = await prisma.$queryRawUnsafe(query, ...params)
+    const revenue = await prisma.$queryRawUnsafe(revenueQuery, ...params)
+
+    // Get appointments data for weighted average calculation
+    let appointmentsQuery = `
+      SELECT 
+        date,
+        location_name,
+        appointments_count as accepted_appointments
+      FROM analytics_appointments_by_location_daily
+      WHERE organization_id = $1::uuid
+    `
+
+    const appointmentParams = [organizationId]
+
+    if (startDate) {
+      appointmentsQuery += ` AND date >= $${appointmentParams.length + 1}::date`
+      appointmentParams.push(startDate)
+    }
+
+    if (endDate) {
+      appointmentsQuery += ` AND date <= $${appointmentParams.length + 1}::date`
+      appointmentParams.push(endDate)
+    }
+
+    if (locationId) {
+      appointmentsQuery += ` AND location_id = $${appointmentParams.length + 1}::uuid`
+      appointmentParams.push(locationId)
+    }
+
+    appointmentsQuery += ` ORDER BY date DESC, location_name`
+
+    const appointments = await prisma.$queryRawUnsafe(appointmentsQuery, ...appointmentParams)
 
     // Calculate totals
     const totals = {
@@ -80,8 +111,32 @@ export async function GET(request) {
       totals.unique_customers += Number(record.unique_customers || 0)
     })
 
-    if (totals.total_payments > 0) {
-      totals.average_transaction = totals.total_revenue_cents / totals.total_payments
+    // Calculate weighted average ticket (weighted by appointments count)
+    // Create a map of appointments by date and location for easy lookup
+    const appointmentsByDay = {}
+    appointments.forEach(record => {
+      const key = `${record.date}-${record.location_name}`
+      appointmentsByDay[key] = Number(record.accepted_appointments || 0)
+    })
+
+    // Calculate weighted ticket sum
+    let weightedTicketSum = 0
+    let totalAppointments = 0
+    revenue.forEach(record => {
+      const key = `${record.date}-${record.location_name}`
+      const dayAppointments = appointmentsByDay[key] || 0
+      const dayPayments = Number(record.payment_count || 0)
+      const dayRevenue = Number(record.revenue_dollars || 0)
+
+      if (dayPayments > 0 && dayAppointments > 0) {
+        const dailyAvgTicket = dayRevenue / dayPayments
+        weightedTicketSum += dailyAvgTicket * dayAppointments
+      }
+      totalAppointments += dayAppointments
+    })
+
+    if (totalAppointments > 0) {
+      totals.average_transaction = (weightedTicketSum / totalAppointments) * 100 // convert to cents for consistency
     }
 
     return Response.json({
