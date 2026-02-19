@@ -222,6 +222,7 @@ model SquareExistingClient {
   payments        Payment[]
   giftCards       GiftCard[]
   referralProfile ReferralProfile?
+  analytics       CustomerAnalytics?
 
   @@unique([organization_id, square_customer_id])
   @@unique([organization_id, personal_code])
@@ -235,6 +236,71 @@ model SquareExistingClient {
   @@index([gift_card_order_id], map: "idx_square_clients_gift_card_order")
   @@index([square_customer_id], map: "idx_square_customer_id")
   @@map("square_existing_clients")
+  @@schema("public")
+}
+
+model CustomerAnalytics {
+  // === COMPOSITE KEY ===
+  organization_id     String  @db.Uuid
+  square_customer_id  String
+
+  // === PERSONAL DATA (from square_existing_clients) ===
+  given_name          String?
+  family_name         String?
+  email_address       String?
+  phone_number        String?
+
+  // === CHRONOLOGY ===
+  first_booking_at    DateTime? @db.Timestamptz(6)
+  last_booking_at     DateTime? @db.Timestamptz(6)
+  last_payment_at     DateTime? @db.Timestamptz(6)
+
+  // === BOOKING VOLUMES (from bookings) ===
+  total_accepted_bookings        Int @default(0)
+  total_cancelled_by_customer    Int @default(0)
+  total_cancelled_by_seller      Int @default(0)
+  total_no_shows                 Int @default(0)
+
+  // === FINANCIALS (from payments) ===
+  total_revenue_cents            BigInt @default(0)
+  total_tips_cents               BigInt @default(0)
+  total_payments                 Int    @default(0)
+  avg_ticket_cents               BigInt @default(0)
+
+  // === NOTES (JSONB) ===
+  booking_notes                  Json?  // [{ booking_id, start_at, customer_note, seller_note, status, technician_id }]
+
+  // === PREFERENCES ===
+  preferred_technician_id        String?
+  preferred_service_variation_id String?
+  distinct_locations             Int    @default(0)
+
+  // === REFERRALS (from referral_profiles + square_existing_clients) ===
+  is_referrer                    Boolean @default(false)
+  activated_as_referrer_at       DateTime? @db.Timestamptz(6)
+  referral_source                String?    // used_referral_code
+  total_referrals                Int     @default(0)
+  total_rewards_cents            BigInt  @default(0)
+
+  // === SEGMENTATION ===
+  customer_segment               String  @default("NEW") // "NEW" | "ACTIVE" | "AT_RISK" | "LOST"
+
+  // === AUDIT ===
+  created_at                     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime @updatedAt @db.Timestamptz(6)
+
+  // === RELATIONS ===
+  organization  Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  customer      SquareExistingClient? @relation(fields: [organization_id, square_customer_id], references: [organization_id, square_customer_id])
+
+  // === CONSTRAINTS ===
+  @@id([organization_id, square_customer_id])
+  @@index([organization_id, customer_segment])
+  @@index([organization_id, first_booking_at])
+  @@index([organization_id, last_booking_at])
+  @@index([is_referrer])
+  @@index([total_revenue_cents])
+  @@map("customer_analytics")
   @@schema("public")
 }
 
@@ -411,6 +477,7 @@ model Organization {
   user_roles              UserRole[]
   webhook_jobs            WebhookJob[]
   application_logs        ApplicationLog[]
+  customer_analytics      CustomerAnalytics[]
 
   @@index([square_merchant_id])
   @@index([slug])

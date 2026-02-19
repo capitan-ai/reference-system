@@ -26,6 +26,10 @@
     {
       "path": "/api/cron/webhook-jobs",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-customer-analytics",
+      "schedule": "0 * * * *"
     }
   ],
   "headers": [
