@@ -20,26 +20,36 @@ export async function POST(request) {
 
 async function handleRefresh(request) {
   try {
-    // 1. Check if user is authenticated
-    const user = await getUserFromRequest(request)
-    if (!user || user.error) {
-      return Response.json(
-        { error: user?.error || 'Unauthorized. Authentication required.' },
-        { status: 401 }
-      )
+    // 1. Check for CRON_SECRET / x-cron-key (for Edge Function proxy)
+    const authHeader = request.headers.get('authorization')
+    const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key')
+    const cronSecret = process.env.CRON_SECRET
+
+    let isAuthorized = false
+
+    if (cronSecret && (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret || cronHeader === cronSecret)) {
+      isAuthorized = true
     }
 
-    // 2. Check if user has admin/owner/super_admin role in any organization
-    const userRole = await prisma.organizationUser.findFirst({
-      where: {
-        user_id: user.id,
-        role: { in: ['owner', 'admin', 'super_admin'] }
+    // 2. If not authorized by secret, check for user session (for direct browser calls)
+    if (!isAuthorized) {
+      const user = await getUserFromRequest(request)
+      if (user && !user.error) {
+        const userRole = await prisma.organizationUser.findFirst({
+          where: {
+            user_id: user.id,
+            role: { in: ['owner', 'admin', 'super_admin'] }
+          }
+        })
+        if (userRole) {
+          isAuthorized = true
+        }
       }
-    })
+    }
 
-    if (!userRole) {
+    if (!isAuthorized) {
       return Response.json(
-        { error: 'Forbidden. Admin or Owner access required.' },
+        { error: 'Unauthorized. Admin access or valid secret required.' },
         { status: 403 }
       )
     }
