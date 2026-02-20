@@ -1,10 +1,10 @@
 /**
  * Secure Admin Analytics Refresh Endpoint
- * Allows authenticated admins to trigger a refresh of the admin_analytics_daily table
+ * Allows authenticated admins/owners to trigger a refresh of the admin_analytics_daily table
  * without exposing the CRON_SECRET to the frontend.
  */
 
-import { isSuperAdminFromRequest } from '../../../../../lib/auth/check-access'
+import { getUserFromRequest, isSuperAdmin } from '../../../../../lib/auth/check-access'
 import { prisma } from '../../../../../lib/prisma-client'
 
 // Force dynamic rendering
@@ -20,11 +20,26 @@ export async function POST(request) {
 
 async function handleRefresh(request) {
   try {
-    // 1. Check if user is authenticated and is an admin
-    const isSuperAdmin = await isSuperAdminFromRequest(request)
-    if (!isSuperAdmin) {
+    // 1. Check if user is authenticated
+    const user = await getUserFromRequest(request)
+    if (!user || user.error) {
       return Response.json(
-        { error: 'Unauthorized. Admin access required.' },
+        { error: user?.error || 'Unauthorized. Authentication required.' },
+        { status: 401 }
+      )
+    }
+
+    // 2. Check if user has admin/owner/super_admin role in any organization
+    const userRole = await prisma.organizationUser.findFirst({
+      where: {
+        user_id: user.id,
+        role: { in: ['owner', 'admin', 'super_admin'] }
+      }
+    })
+
+    if (!userRole) {
+      return Response.json(
+        { error: 'Forbidden. Admin or Owner access required.' },
         { status: 403 }
       )
     }
@@ -34,7 +49,7 @@ async function handleRefresh(request) {
     const fromParam = searchParams.get('from')
     const toParam = searchParams.get('to')
 
-    // 2. Determine date range (same logic as cron)
+    // 3. Determine date range (same logic as cron)
     let dateFrom, dateTo
     if (fromParam && toParam) {
       dateFrom = `'${fromParam} 00:00:00'`
@@ -45,7 +60,7 @@ async function handleRefresh(request) {
       dateTo = `NOW() + interval '1 day'`
     }
 
-    // 3. Execute the "Golden Query"
+    // 4. Execute the "Golden Query"
     const refreshSQL = `
       WITH date_range AS (
         SELECT 
