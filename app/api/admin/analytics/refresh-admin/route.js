@@ -238,7 +238,15 @@ async function handleRefresh(request) {
         updated_at = NOW();
     `
 
-    await db.$executeRawUnsafe(refreshSQL)
+    console.log(`[ADMIN-API] Executing SQL refresh...`)
+    
+    try {
+      await db.$executeRawUnsafe(refreshSQL)
+      console.log(`[ADMIN-API] SQL refresh completed successfully`)
+    } catch (sqlError) {
+      console.error(`[ADMIN-API] SQL Execution Error:`, sqlError)
+      throw new Error(`Database query failed: ${sqlError.message}`)
+    }
 
     return Response.json({ success: true, message: 'Admin analytics refreshed successfully' })
   } catch (error) {
