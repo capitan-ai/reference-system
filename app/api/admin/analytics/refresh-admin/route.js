@@ -10,10 +10,17 @@ import { prisma } from '../../../../../lib/prisma-client'
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
 
+export async function GET(request) {
+  return handleRefresh(request)
+}
+
 export async function POST(request) {
+  return handleRefresh(request)
+}
+
+async function handleRefresh(request) {
   try {
     // 1. Check if user is authenticated and is an admin
-    // Note: We use isSuperAdminFromRequest but you could also use a more general isAdmin check
     const isSuperAdmin = await isSuperAdminFromRequest(request)
     if (!isSuperAdmin) {
       return Response.json(
@@ -30,8 +37,8 @@ export async function POST(request) {
     // 2. Determine date range (same logic as cron)
     let dateFrom, dateTo
     if (fromParam && toParam) {
-      dateFrom = `${fromParam} 00:00:00`
-      dateTo = `${toParam} 23:59:59`
+      dateFrom = `'${fromParam} 00:00:00'`
+      dateTo = `'${toParam} 23:59:59'`
     } else {
       const days = parseInt(daysParam || '35')
       dateFrom = `NOW() - interval '${days} days'`
@@ -213,4 +220,3 @@ export async function POST(request) {
     return Response.json({ error: error.message }, { status: 500 })
   }
 }
-
