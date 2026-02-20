@@ -4,8 +4,7 @@
  * without exposing the CRON_SECRET to the frontend.
  */
 
-import { getUserFromRequest, isSuperAdmin } from '../../../../../lib/auth/check-access'
-import { prisma } from '../../../../../lib/prisma-client'
+import { prisma as db } from '../../../../../lib/prisma-client'
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
@@ -35,7 +34,7 @@ async function handleRefresh(request) {
     if (!isAuthorized) {
       const user = await getUserFromRequest(request)
       if (user && !user.error) {
-        const userRole = await prisma.organizationUser.findFirst({
+        const userRole = await db.organizationUser.findFirst({
           where: {
             user_id: user.id,
             role: { in: ['owner', 'admin', 'super_admin'] }
@@ -239,7 +238,7 @@ async function handleRefresh(request) {
         updated_at = NOW();
     `
 
-    await prisma.$executeRawUnsafe(refreshSQL)
+    await db.$executeRawUnsafe(refreshSQL)
 
     return Response.json({ success: true, message: 'Admin analytics refreshed successfully' })
   } catch (error) {
