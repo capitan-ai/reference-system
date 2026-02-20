@@ -30,6 +30,10 @@
     {
       "path": "/api/cron/refresh-customer-analytics",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-admin-analytics",
+      "schedule": "0 * * * *"
     }
   ],
   "headers": [
