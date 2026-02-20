@@ -70,6 +70,8 @@ async function handleRefresh(request) {
       dateTo = `NOW() + interval '1 day'`
     }
 
+    console.log(`[ADMIN-API] Refreshing analytics from ${dateFrom} to ${dateTo}`)
+
     // 4. Execute the "Golden Query"
     const refreshSQL = `
       WITH date_range AS (
