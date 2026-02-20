@@ -627,22 +627,23 @@ async function sendGiftCardEmailNotification({
 
   // Send email with QR code, GAN, and PassKit URL (if available)
   const analyticsMetadata = addLocationMetadata(notificationMetadata, locationId)
-  const emailResult = await sendGiftCardIssuedEmail(
-    customerName,
-    email,
-    {
-      giftCardGan: ganForEmail,
-      amountCents: meaningfulAmount,
-      balanceCents: balanceCents ?? null,
-      activationUrl: activationUrl ?? null,
-      passKitUrl: finalPassKitUrl ?? null, // Use waited-for URL or original
-      qrDataUri,
-      isReminder
-    },
-    {
-      metadata: analyticsMetadata
-    }
-  )
+    const emailResult = await sendGiftCardIssuedEmail(
+      customerName,
+      email,
+      {
+        giftCardGan: ganForEmail,
+        amountCents: meaningfulAmount,
+        balanceCents: balanceCents ?? null,
+        activationUrl: activationUrl ?? null,
+        passKitUrl: finalPassKitUrl ?? null, // Use waited-for URL or original
+        qrDataUri,
+        isReminder
+      },
+      {
+        metadata: analyticsMetadata,
+        organizationId: notificationMetadata.organizationId // Pass from metadata
+      }
+    )
 
   if (!isReminder && ganForEmail) {
     queueWalletPassUpdate(ganForEmail, {
@@ -1587,8 +1588,9 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     }
     
     // Save CREATE transaction to database
+    let giftCardRecordFromDb = null
     try {
-      const createGiftCardRecord = await saveGiftCardToDatabase({
+      giftCardRecordFromDb = await saveGiftCardToDatabase({
         organization_id: organizationId,
         square_customer_id: customerId,
         square_gift_card_id: giftCardId,
@@ -1600,10 +1602,10 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
         is_active: true
       })
 
-      if (createGiftCardRecord) {
+      if (giftCardRecordFromDb) {
         // Create CREATE transaction record
         await saveGiftCardTransaction({
-          gift_card_id: createGiftCardRecord.id,
+          gift_card_id: giftCardRecordFromDb.id,
           transaction_type: 'CREATE',
           amount_cents: 0,
           balance_before_cents: 0,
@@ -1826,7 +1828,7 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
 
           if (transactionType) {
             // Resolve organization_id from saved gift card record or customer
-            let giftCardOrgId = createGiftCardRecord?.organization_id || null
+            let giftCardOrgId = giftCardRecordFromDb?.organization_id || null
             if (!giftCardOrgId && customerId) {
               const customerOrg = await prisma.$queryRaw`
                 SELECT organization_id FROM square_existing_clients 
@@ -4946,7 +4948,8 @@ async function processBookingCreated(bookingData, runContext = {}) {
               locationId: bookingLocationId,
               notificationMetadata: {
                 customerId,
-                referralCode
+                referralCode,
+                organizationId // Add organizationId here
               }
             })
               

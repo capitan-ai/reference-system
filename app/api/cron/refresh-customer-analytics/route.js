@@ -94,25 +94,27 @@ async function handle(request) {
     // Execute the refresh SQL directly
     const prisma = new PrismaClient()
 
-    // Time filter: last 90 days (recent mode)
-    const dateFilter = "AND b.start_at >= now() - interval '90 days'"
+    // Time filters: last 90 days (recent mode)
+    const bookingsDateFilter = "AND b_inner.start_at >= now() - interval '90 days'"
+    const paymentsDateFilter = "AND p_inner.created_at >= now() - interval '90 days'"
+    const ordersDateFilter = "AND o_inner.created_at >= now() - interval '90 days'"
 
     const refreshSQL = `
 WITH bookings_agg AS (
   SELECT
-    b.organization_id,
-    b.customer_id AS square_customer_id,
-    MIN(b.start_at) FILTER (WHERE b.status = 'ACCEPTED') AS first_booking_at,
-    MAX(b.start_at) FILTER (WHERE b.status = 'ACCEPTED') AS last_booking_at,
-    COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') AS total_accepted_bookings,
-    COUNT(*) FILTER (WHERE b.status = 'CANCELLED_BY_CUSTOMER') AS total_cancelled_by_customer,
-    COUNT(*) FILTER (WHERE b.status = 'CANCELLED_BY_SELLER') AS total_cancelled_by_seller,
-    COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') AS total_no_shows,
+    b_inner.organization_id,
+    b_inner.customer_id AS square_customer_id,
+    MIN(b_inner.start_at) FILTER (WHERE b_inner.status = 'ACCEPTED') AS first_booking_at,
+    MAX(b_inner.start_at) FILTER (WHERE b_inner.status = 'ACCEPTED') AS last_booking_at,
+    COUNT(*) FILTER (WHERE b_inner.status = 'ACCEPTED') AS total_accepted_bookings,
+    COUNT(*) FILTER (WHERE b_inner.status = 'CANCELLED_BY_CUSTOMER') AS total_cancelled_by_customer,
+    COUNT(*) FILTER (WHERE b_inner.status = 'CANCELLED_BY_SELLER') AS total_cancelled_by_seller,
+    COUNT(*) FILTER (WHERE b_inner.status = 'NO_SHOW') AS total_no_shows,
     (
       SELECT b2.technician_id
       FROM bookings b2
-      WHERE b2.customer_id = b.customer_id
-        AND b2.organization_id = b.organization_id
+      WHERE b2.customer_id = b_inner.customer_id
+        AND b2.organization_id = b_inner.organization_id
         AND b2.status = 'ACCEPTED'
         AND b2.technician_id IS NOT NULL
       GROUP BY b2.technician_id
@@ -122,42 +124,55 @@ WITH bookings_agg AS (
     (
       SELECT b2.service_variation_id
       FROM bookings b2
-      WHERE b2.customer_id = b.customer_id
-        AND b2.organization_id = b.organization_id
+      WHERE b2.customer_id = b_inner.customer_id
+        AND b2.organization_id = b_inner.organization_id
         AND b2.status = 'ACCEPTED'
         AND b2.service_variation_id IS NOT NULL
       GROUP BY b2.service_variation_id
       ORDER BY COUNT(*) DESC
       LIMIT 1
     ) AS preferred_service_variation_id,
-    COUNT(DISTINCT b.location_id) FILTER (WHERE b.status = 'ACCEPTED') AS distinct_locations,
+    COUNT(DISTINCT b_inner.location_id) FILTER (WHERE b_inner.status = 'ACCEPTED') AS distinct_locations,
     JSONB_AGG(
       JSONB_BUILD_OBJECT(
-        'booking_id', b.id,
-        'start_at', b.start_at,
-        'status', b.status,
-        'customer_note', b.customer_note,
-        'seller_note', b.seller_note,
-        'technician_id', b.technician_id
-      ) ORDER BY b.start_at DESC
-    ) FILTER (WHERE b.customer_note IS NOT NULL OR b.seller_note IS NOT NULL) AS booking_notes
-  FROM bookings b
-  WHERE b.customer_id IS NOT NULL
-    ${dateFilter}
-  GROUP BY b.organization_id, b.customer_id
+        'booking_id', b_inner.id,
+        'start_at', b_inner.start_at,
+        'status', b_inner.status,
+        'customer_note', b_inner.customer_note,
+        'seller_note', b_inner.seller_note,
+        'technician_id', b_inner.technician_id
+      ) ORDER BY b_inner.start_at DESC
+    ) FILTER (WHERE b_inner.customer_note IS NOT NULL OR b_inner.seller_note IS NOT NULL) AS booking_notes
+  FROM bookings b_inner
+  WHERE b_inner.customer_id IS NOT NULL
+    ${bookingsDateFilter}
+  GROUP BY b_inner.organization_id, b_inner.customer_id
 ),
 payments_agg AS (
   SELECT
-    p.organization_id,
-    p.customer_id AS square_customer_id,
-    SUM(p.amount_money_amount) FILTER (WHERE p.status = 'COMPLETED') AS total_revenue_cents,
-    SUM(p.tip_money_amount) FILTER (WHERE p.status = 'COMPLETED') AS total_tips_cents,
-    COUNT(*) FILTER (WHERE p.status = 'COMPLETED') AS total_payments,
-    MAX(p.created_at) FILTER (WHERE p.status = 'COMPLETED') AS last_payment_at
-  FROM payments p
-  WHERE p.customer_id IS NOT NULL
-    ${dateFilter}
-  GROUP BY p.organization_id, p.customer_id
+    p_inner.organization_id,
+    p_inner.customer_id AS square_customer_id,
+    SUM(p_inner.total_money_amount) FILTER (WHERE p_inner.status = 'COMPLETED') AS total_revenue_cents,
+    SUM(p_inner.tip_money_amount) FILTER (WHERE p_inner.status = 'COMPLETED') AS total_tips_cents,
+    COUNT(*) FILTER (WHERE p_inner.status = 'COMPLETED') AS total_payments,
+    MAX(p_inner.created_at) FILTER (WHERE p_inner.status = 'COMPLETED') AS last_payment_at
+  FROM payments p_inner
+  WHERE p_inner.customer_id IS NOT NULL
+    ${paymentsDateFilter}
+  GROUP BY p_inner.organization_id, p_inner.customer_id
+),
+orders_agg AS (
+  -- Fallback visit data from orders (for POS/walk-in customers without bookings)
+  SELECT
+    o_inner.organization_id,
+    o_inner.customer_id AS square_customer_id,
+    MIN(o_inner.created_at) FILTER (WHERE o_inner.state = 'COMPLETED') AS first_order_at,
+    MAX(o_inner.created_at) FILTER (WHERE o_inner.state = 'COMPLETED') AS last_order_at,
+    COUNT(*) FILTER (WHERE o_inner.state = 'COMPLETED') AS total_completed_orders
+  FROM orders o_inner
+  WHERE o_inner.customer_id IS NOT NULL
+    ${ordersDateFilter}
+  GROUP BY o_inner.organization_id, o_inner.customer_id
 ),
 referral_agg AS (
   SELECT
@@ -182,14 +197,15 @@ square_clients AS (
 ),
 merged_data AS (
   SELECT
-    COALESCE(b.organization_id, p.organization_id, r.organization_id, sc.organization_id) AS organization_id,
-    COALESCE(b.square_customer_id, p.square_customer_id, r.square_customer_id, sc.square_customer_id) AS square_customer_id,
+    sc.organization_id,
+    sc.square_customer_id,
     sc.given_name,
     sc.family_name,
     sc.email_address,
     sc.phone_number,
-    b.first_booking_at,
-    b.last_booking_at,
+    -- Use bookings as primary, orders as fallback for visit dates
+    COALESCE(b.first_booking_at, oa.first_order_at) AS first_booking_at,
+    COALESCE(b.last_booking_at, oa.last_order_at) AS last_booking_at,
     p.last_payment_at,
     COALESCE(b.total_accepted_bookings, 0) AS total_accepted_bookings,
     COALESCE(b.total_cancelled_by_customer, 0) AS total_cancelled_by_customer,
@@ -212,22 +228,27 @@ merged_data AS (
     r.referral_source,
     COALESCE(r.total_referrals, 0) AS total_referrals,
     COALESCE(r.total_rewards_cents, 0) AS total_rewards_cents,
+    -- Segment calculation (uses bookings OR orders as visit evidence)
     CASE
-      WHEN b.first_booking_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
-      WHEN b.last_booking_at >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
-      WHEN b.last_booking_at >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
+      WHEN COALESCE(b.first_booking_at, oa.first_order_at) IS NULL THEN 'NEVER_BOOKED'
+      WHEN COALESCE(b.first_booking_at, oa.first_order_at) >= NOW() - INTERVAL '30 days' THEN 'NEW'
+      WHEN COALESCE(b.last_booking_at, oa.last_order_at) >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
+      WHEN COALESCE(b.last_booking_at, oa.last_order_at) >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
       ELSE 'LOST'
     END AS customer_segment
-  FROM bookings_agg b
-  FULL OUTER JOIN payments_agg p
-    ON b.organization_id = p.organization_id
-    AND b.square_customer_id = p.square_customer_id
+  FROM square_clients sc
+  LEFT JOIN bookings_agg b
+    ON sc.organization_id = b.organization_id
+    AND sc.square_customer_id = b.square_customer_id
+  LEFT JOIN orders_agg oa
+    ON sc.organization_id = oa.organization_id
+    AND sc.square_customer_id = oa.square_customer_id
+  LEFT JOIN payments_agg p
+    ON sc.organization_id = p.organization_id
+    AND sc.square_customer_id = p.square_customer_id
   LEFT JOIN referral_agg r
-    ON COALESCE(b.organization_id, p.organization_id) = r.organization_id
-    AND COALESCE(b.square_customer_id, p.square_customer_id) = r.square_customer_id
-  LEFT JOIN square_clients sc
-    ON COALESCE(b.organization_id, p.organization_id, r.organization_id) = sc.organization_id
-    AND COALESCE(b.square_customer_id, p.square_customer_id, r.square_customer_id) = sc.square_customer_id
+    ON sc.organization_id = r.organization_id
+    AND sc.square_customer_id = r.square_customer_id
 )
 INSERT INTO customer_analytics (
   organization_id,
