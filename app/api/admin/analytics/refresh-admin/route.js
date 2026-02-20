@@ -4,7 +4,8 @@
  * without exposing the CRON_SECRET to the frontend.
  */
 
-import { prisma as db } from '../../../../../lib/prisma-client'
+import { getUserFromRequest } from '../../../../../lib/auth/check-access'
+import db from '../../../../../lib/prisma-client'
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic'
@@ -238,15 +239,7 @@ async function handleRefresh(request) {
         updated_at = NOW();
     `
 
-    console.log(`[ADMIN-API] Executing SQL refresh...`)
-    
-    try {
-      await db.$executeRawUnsafe(refreshSQL)
-      console.log(`[ADMIN-API] SQL refresh completed successfully`)
-    } catch (sqlError) {
-      console.error(`[ADMIN-API] SQL Execution Error:`, sqlError)
-      throw new Error(`Database query failed: ${sqlError.message}`)
-    }
+    await db.$executeRawUnsafe(refreshSQL)
 
     return Response.json({ success: true, message: 'Admin analytics refreshed successfully' })
   } catch (error) {
