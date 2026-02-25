@@ -1,254 +1,156 @@
 require('dotenv').config()
 const prisma = require('../lib/prisma-client')
 
-/**
- * Refresh customer_analytics table
- * 
- * Modes:
- * - "full" — recalculate all customers (slow, for nightly backups)
- * - "recent" — update last 90 days (fast, for hourly cron)
- * - "org" — recalculate specific organization
- */
-async function refreshCustomerAnalytics(mode = 'recent', organizationId = null) {
-  console.log(`\n📊 Refreshing customer_analytics (mode: ${mode})...\n`)
+async function refreshCustomerAnalytics(mode = 'full', organizationId = null) {
+  console.log(`\n📊 Refreshing Enterprise Customer Analytics (mode: ${mode})...\n`)
   console.log('='.repeat(80))
 
   const startTime = Date.now()
 
   try {
-    // Determine the time filter based on mode
-    let dateFilter = mode === 'full' ? '' : "AND b.start_at >= now() - interval '90 days'"
-    let orgFilter = organizationId ? `AND b.organization_id = '${organizationId}'::uuid` : ''
+    const bookingsDateFilter = mode === 'full' ? '' : "AND b.start_at >= now() - interval '90 days'"
+    const paymentsDateFilter = mode === 'full' ? '' : "AND p.created_at >= now() - interval '90 days'"
+    const ordersDateFilter = mode === 'full' ? '' : "AND o.created_at >= now() - interval '90 days'"
+    
+    const orgFilterB = organizationId ? `AND b.organization_id = '${organizationId}'::uuid` : ''
+    const orgFilterP = organizationId ? `AND p.organization_id = '${organizationId}'::uuid` : ''
+    const orgFilterO = organizationId ? `AND o.organization_id = '${organizationId}'::uuid` : ''
 
-    // Main refresh query: calculate all aggregates
     const refreshSQL = `
-WITH bookings_agg AS (
-  -- Aggregate all booking metrics per customer
+WITH
+-- 1. Classify all line items (one pass) using word boundaries
+li_classified AS (
   SELECT
-    b.organization_id,
-    b.customer_id AS square_customer_id,
-    
-    MIN(b.start_at) FILTER (WHERE b.status = 'ACCEPTED') AS first_booking_at,
-    MAX(b.start_at) FILTER (WHERE b.status = 'ACCEPTED') AS last_booking_at,
-    
-    COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') AS total_accepted_bookings,
-    COUNT(*) FILTER (WHERE b.status = 'CANCELLED_BY_CUSTOMER') AS total_cancelled_by_customer,
-    COUNT(*) FILTER (WHERE b.status = 'CANCELLED_BY_SELLER') AS total_cancelled_by_seller,
-    COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') AS total_no_shows,
-    
-    -- Top technician (by booking count)
-    (
-      SELECT b2.technician_id
-      FROM bookings b2
-      WHERE b2.customer_id = b.customer_id
-        AND b2.organization_id = b.organization_id
-        AND b2.status = 'ACCEPTED'
-        AND b2.technician_id IS NOT NULL
-      GROUP BY b2.technician_id
-      ORDER BY COUNT(*) DESC
-      LIMIT 1
-    ) AS preferred_technician_id,
-    
-    -- Top service (by booking count)
-    (
-      SELECT b2.service_variation_id
-      FROM bookings b2
-      WHERE b2.customer_id = b.customer_id
-        AND b2.organization_id = b.organization_id
-        AND b2.status = 'ACCEPTED'
-        AND b2.service_variation_id IS NOT NULL
-      GROUP BY b2.service_variation_id
-      ORDER BY COUNT(*) DESC
-      LIMIT 1
-    ) AS preferred_service_variation_id,
-    
-    -- Distinct locations
-    COUNT(DISTINCT b.location_id) FILTER (WHERE b.status = 'ACCEPTED') AS distinct_locations,
-    
-    -- Notes (JSONB array of booking notes)
-    JSONB_AGG(
-      JSONB_BUILD_OBJECT(
-        'booking_id', b.id,
-        'start_at', b.start_at,
-        'status', b.status,
-        'customer_note', b.customer_note,
-        'seller_note', b.seller_note,
-        'technician_id', b.technician_id
-      ) ORDER BY b.start_at DESC
-    ) FILTER (WHERE b.customer_note IS NOT NULL OR b.seller_note IS NOT NULL) AS booking_notes
-  
-  FROM bookings b
-  WHERE b.customer_id IS NOT NULL
-    ${dateFilter}
-    ${orgFilter}
-  GROUP BY b.organization_id, b.customer_id
+    organization_id, customer_id, order_id,
+    COUNT(*) FILTER (WHERE name ~* '\\m(manicure|pedicure|gel|removal|extension|polish)\\M') AS salon_items,
+    COUNT(*) FILTER (WHERE name ~* '\\m(class|training|course|level up|workshop)\\M') AS training_items,
+    COUNT(*) FILTER (WHERE name ~* '\\m(cream|oil|product|kit)\\M') AS retail_items
+  FROM order_line_items
+  WHERE customer_id IS NOT NULL
+  GROUP BY 1,2,3
 ),
+-- 2. Aggregate orders (POS visits)
+orders_agg AS (
+  SELECT
+    o.organization_id, o.customer_id,
+    -- Dates of ANY visit (salon, training or retail)
+    MIN(o.created_at) FILTER (WHERE COALESCE(lic.salon_items,0) + COALESCE(lic.training_items,0) + COALESCE(lic.retail_items,0) > 0) AS first_any_o,
+    MAX(o.created_at) FILTER (WHERE COALESCE(lic.salon_items,0) + COALESCE(lic.training_items,0) + COALESCE(lic.retail_items,0) > 0) AS last_any_o,
+    -- Counters (COMPLETED only for visits)
+    COUNT(DISTINCT o.order_id) FILTER (WHERE o.state = 'COMPLETED' AND COALESCE(lic.salon_items,0) > 0) AS service_order_count,
+    COUNT(DISTINCT o.order_id) FILTER (WHERE o.state = 'COMPLETED' AND COALESCE(lic.training_items,0) > 0 AND COALESCE(lic.salon_items,0) = 0) AS training_order_count,
+    COUNT(DISTINCT o.order_id) FILTER (WHERE o.state = 'COMPLETED' AND COALESCE(lic.retail_items,0) > 0 AND COALESCE(lic.salon_items,0) = 0 AND COALESCE(lic.training_items,0) = 0) AS retail_order_count,
+    -- For Type classification (including OPEN orders)
+    COUNT(DISTINCT o.order_id) FILTER (WHERE o.state IN ('COMPLETED', 'OPEN') AND COALESCE(lic.training_items,0) > 0) AS type_training_count,
+    COUNT(DISTINCT o.order_id) FILTER (WHERE o.state IN ('COMPLETED', 'OPEN') AND COALESCE(lic.salon_items,0) > 0) AS type_salon_count
+  FROM orders o
+  LEFT JOIN li_classified lic ON lic.order_id = o.id
+  WHERE o.customer_id IS NOT NULL
+    ${ordersDateFilter}
+    ${orgFilterO}
+  GROUP BY 1,2
+),
+-- 3. Aggregate payments
 payments_agg AS (
-  -- Aggregate all payment metrics per customer
   SELECT
-    p.organization_id,
-    p.customer_id AS square_customer_id,
-    
-    SUM(p.amount_money_amount) FILTER (WHERE p.status = 'COMPLETED') AS total_revenue_cents,
-    SUM(p.tip_money_amount) FILTER (WHERE p.status = 'COMPLETED') AS total_tips_cents,
-    COUNT(*) FILTER (WHERE p.status = 'COMPLETED') AS total_payments,
-    MAX(p.created_at) FILTER (WHERE p.status = 'COMPLETED') AS last_payment_at
-  
-  FROM payments p
-  WHERE p.customer_id IS NOT NULL
-    ${dateFilter}
-    ${orgFilter}
-  GROUP BY p.organization_id, p.customer_id
+    organization_id, customer_id,
+    SUM(total_money_amount) FILTER (WHERE status = 'COMPLETED') AS gross_revenue_cents,
+    MAX(created_at) FILTER (WHERE status = 'COMPLETED') AS last_pay_at
+  FROM payments
+  WHERE customer_id IS NOT NULL
+    ${paymentsDateFilter}
+    ${orgFilterP}
+  GROUP BY 1,2
 ),
-referral_agg AS (
-  -- Referral info (from referral_profiles or square_existing_clients)
+-- 4. Aggregate bookings
+bookings_agg AS (
   SELECT
-    rp.organization_id,
-    rp.square_customer_id,
-    rp.used_referral_code AS referral_source,
-    rp.activated_as_referrer AS is_referrer,
-    rp.activated_at AS activated_as_referrer_at,
-    rp.total_referrals_count AS total_referrals,
-    rp.total_rewards_cents
-  FROM referral_profiles rp
+    organization_id, customer_id,
+    MIN(start_at) AS first_b, MAX(start_at) AS last_b,
+    COUNT(*) AS b_count
+  FROM bookings
+  WHERE status IN ('ACCEPTED','COMPLETED') AND customer_id IS NOT NULL
+    ${bookingsDateFilter}
+    ${orgFilterB}
+  GROUP BY 1,2
 ),
-square_clients AS (
-  -- Get customer personal data
-  SELECT
-    organization_id,
-    square_customer_id,
-    given_name,
-    family_name,
-    email_address,
-    phone_number
-  FROM square_existing_clients
+-- 5. Collect all unique customer keys from ALL sources
+keys AS (
+  SELECT organization_id, customer_id FROM bookings_agg
+  UNION
+  SELECT organization_id, customer_id FROM orders_agg
+  UNION
+  SELECT organization_id, customer_id FROM payments_agg
+  UNION
+  SELECT organization_id, square_customer_id FROM square_existing_clients
 ),
-merged_data AS (
+-- 6. Final calculation
+final_data AS (
   SELECT
-    COALESCE(b.organization_id, p.organization_id, r.organization_id, sc.organization_id) AS organization_id,
-    COALESCE(b.square_customer_id, p.square_customer_id, r.square_customer_id, sc.square_customer_id) AS square_customer_id,
-    
-    sc.given_name,
-    sc.family_name,
-    sc.email_address,
-    sc.phone_number,
-    
-    b.first_booking_at,
-    b.last_booking_at,
-    p.last_payment_at,
-    
-    COALESCE(b.total_accepted_bookings, 0) AS total_accepted_bookings,
-    COALESCE(b.total_cancelled_by_customer, 0) AS total_cancelled_by_customer,
-    COALESCE(b.total_cancelled_by_seller, 0) AS total_cancelled_by_seller,
-    COALESCE(b.total_no_shows, 0) AS total_no_shows,
-    
-    COALESCE(p.total_revenue_cents, 0) AS total_revenue_cents,
-    COALESCE(p.total_tips_cents, 0) AS total_tips_cents,
-    COALESCE(p.total_payments, 0) AS total_payments,
+    k.organization_id, k.customer_id,
+    -- NULL-safe Visit Dates
+    CASE WHEN b.first_b IS NULL THEN oa.first_any_o WHEN oa.first_any_o IS NULL THEN b.first_b ELSE LEAST(b.first_b, oa.first_any_o) END AS first_visit_at,
+    CASE WHEN b.last_b IS NULL THEN oa.last_any_o WHEN oa.last_any_o IS NULL THEN b.last_b ELSE GREATEST(b.last_b, oa.last_any_o) END AS last_visit_at,
+    -- Visit Counts (COMPLETED only)
+    (COALESCE(b.b_count,0) + COALESCE(oa.service_order_count,0) + COALESCE(oa.training_order_count,0)) AS total_visits,
+    COALESCE(b.b_count,0) AS booking_visits,
+    COALESCE(oa.service_order_count,0) AS service_order_visits,
+    COALESCE(oa.training_order_count,0) AS training_visits,
+    COALESCE(oa.retail_order_count,0) AS retail_visits,
+    -- Customer Type (STUDENT priority, includes OPEN orders)
     CASE
-      WHEN COALESCE(p.total_payments, 0) > 0
-      THEN ROUND(COALESCE(p.total_revenue_cents, 0)::numeric / p.total_payments)::bigint
-      ELSE 0
-    END AS avg_ticket_cents,
-    
-    b.booking_notes,
-    b.preferred_technician_id,
-    b.preferred_service_variation_id,
-    COALESCE(b.distinct_locations, 0) AS distinct_locations,
-    
-    COALESCE(r.is_referrer, false) AS is_referrer,
-    r.activated_as_referrer_at,
-    r.referral_source,
-    COALESCE(r.total_referrals, 0) AS total_referrals,
-    COALESCE(r.total_rewards_cents, 0) AS total_rewards_cents,
-    
-    -- Segment calculation
-    CASE
-      WHEN b.first_booking_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
-      WHEN b.last_booking_at >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
-      WHEN b.last_booking_at >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
-      ELSE 'LOST'
-    END AS customer_segment
-  
-  FROM bookings_agg b
-  FULL OUTER JOIN payments_agg p
-    ON b.organization_id = p.organization_id
-    AND b.square_customer_id = p.square_customer_id
-  LEFT JOIN referral_agg r
-    ON COALESCE(b.organization_id, p.organization_id) = r.organization_id
-    AND COALESCE(b.square_customer_id, p.square_customer_id) = r.square_customer_id
-  LEFT JOIN square_clients sc
-    ON COALESCE(b.organization_id, p.organization_id, r.organization_id) = sc.organization_id
-    AND COALESCE(b.square_customer_id, p.square_customer_id, r.square_customer_id) = sc.square_customer_id
+      WHEN COALESCE(oa.type_training_count,0) > 0 THEN 'STUDENT'
+      WHEN COALESCE(oa.type_salon_count,0) > 0 OR COALESCE(b.b_count,0) > 0 THEN 'SALON_CLIENT'
+      WHEN COALESCE(p.gross_revenue_cents,0) > 0 THEN 'RETAIL'
+      ELSE 'POTENTIAL'
+    END AS customer_type,
+    COALESCE(p.gross_revenue_cents,0) AS gross_revenue_cents,
+    p.last_pay_at AS last_payment_at
+  FROM keys k
+  LEFT JOIN bookings_agg b ON b.organization_id=k.organization_id AND b.customer_id=k.customer_id
+  LEFT JOIN orders_agg oa ON oa.organization_id=k.organization_id AND oa.customer_id=k.customer_id
+  LEFT JOIN payments_agg p ON p.organization_id=k.organization_id AND p.customer_id=k.customer_id
 )
+-- 7. Idempotent UPSERT
 INSERT INTO customer_analytics (
-  organization_id,
-  square_customer_id,
-  given_name,
-  family_name,
-  email_address,
-  phone_number,
-  first_booking_at,
-  last_booking_at,
-  last_payment_at,
-  total_accepted_bookings,
-  total_cancelled_by_customer,
-  total_cancelled_by_seller,
-  total_no_shows,
-  total_revenue_cents,
-  total_tips_cents,
-  total_payments,
-  avg_ticket_cents,
-  booking_notes,
-  preferred_technician_id,
-  preferred_service_variation_id,
-  distinct_locations,
-  is_referrer,
-  activated_as_referrer_at,
-  referral_source,
-  total_referrals,
-  total_rewards_cents,
-  customer_segment,
-  created_at,
-  updated_at
+  organization_id, square_customer_id, first_visit_at, last_visit_at,
+  total_visits, booking_visits, service_order_visits, training_visits, retail_visits,
+  customer_type, gross_revenue_cents, last_payment_at, updated_at, customer_segment
 )
-SELECT *, NOW(), NOW() FROM merged_data
+SELECT
+  fd.organization_id, fd.customer_id, fd.first_visit_at, fd.last_visit_at,
+  fd.total_visits, fd.booking_visits, fd.service_order_visits, fd.training_visits, fd.retail_visits,
+  fd.customer_type, fd.gross_revenue_cents, fd.last_payment_at, NOW(),
+  -- Segment calculation (uses the merged last_visit_at)
+  CASE
+    WHEN fd.first_visit_at IS NULL THEN 'NEVER_BOOKED'
+    WHEN fd.first_visit_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
+    WHEN fd.last_visit_at >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
+    WHEN fd.last_visit_at >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
+    ELSE 'LOST'
+  END
+FROM final_data fd
 ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
-  given_name = EXCLUDED.given_name,
-  family_name = EXCLUDED.family_name,
-  email_address = EXCLUDED.email_address,
-  phone_number = EXCLUDED.phone_number,
-  first_booking_at = EXCLUDED.first_booking_at,
-  last_booking_at = EXCLUDED.last_booking_at,
+  first_visit_at = EXCLUDED.first_visit_at,
+  last_visit_at = EXCLUDED.last_visit_at,
+  total_visits = EXCLUDED.total_visits,
+  booking_visits = EXCLUDED.booking_visits,
+  service_order_visits = EXCLUDED.service_order_visits,
+  training_visits = EXCLUDED.training_visits,
+  retail_visits = EXCLUDED.retail_visits,
+  customer_type = EXCLUDED.customer_type,
+  gross_revenue_cents = EXCLUDED.gross_revenue_cents,
   last_payment_at = EXCLUDED.last_payment_at,
-  total_accepted_bookings = EXCLUDED.total_accepted_bookings,
-  total_cancelled_by_customer = EXCLUDED.total_cancelled_by_customer,
-  total_cancelled_by_seller = EXCLUDED.total_cancelled_by_seller,
-  total_no_shows = EXCLUDED.total_no_shows,
-  total_revenue_cents = EXCLUDED.total_revenue_cents,
-  total_tips_cents = EXCLUDED.total_tips_cents,
-  total_payments = EXCLUDED.total_payments,
-  avg_ticket_cents = EXCLUDED.avg_ticket_cents,
-  booking_notes = EXCLUDED.booking_notes,
-  preferred_technician_id = EXCLUDED.preferred_technician_id,
-  preferred_service_variation_id = EXCLUDED.preferred_service_variation_id,
-  distinct_locations = EXCLUDED.distinct_locations,
-  is_referrer = EXCLUDED.is_referrer,
-  activated_as_referrer_at = EXCLUDED.activated_as_referrer_at,
-  referral_source = EXCLUDED.referral_source,
-  total_referrals = EXCLUDED.total_referrals,
-  total_rewards_cents = EXCLUDED.total_rewards_cents,
   customer_segment = EXCLUDED.customer_segment,
   updated_at = NOW();
     `
 
-    console.log('Executing refresh query...')
+    console.log('Executing Enterprise Refresh query...')
     const result = await prisma.$executeRawUnsafe(refreshSQL)
     
     const elapsed = Date.now() - startTime
     console.log(`✅ Refresh completed in ${(elapsed / 1000).toFixed(2)}s`)
     console.log(`   Mode: ${mode}`)
-    if (organizationId) console.log(`   Organization: ${organizationId}`)
     console.log('='.repeat(80))
 
   } catch (error) {
@@ -260,9 +162,6 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
   }
 }
 
-// Parse command-line arguments
-const mode = process.argv[2] || 'recent' // 'full' | 'recent'
+const mode = process.argv[2] || 'full'
 const orgId = process.argv[3] || null
-
 refreshCustomerAnalytics(mode, orgId)
-
