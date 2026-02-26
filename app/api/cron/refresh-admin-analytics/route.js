@@ -153,23 +153,43 @@ export async function GET(request) {
           COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted,
           COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') as appointments_no_show,
           COUNT(*) FILTER (WHERE b.status LIKE 'CANCELLED%') as appointments_cancelled,
-          COUNT(*) FILTER (
-            WHERE b.status LIKE 'CANCELLED%' 
-            AND (b.start_at - b.updated_at) < interval '24 hours'
-          ) as late_cancellations
+          0 as bookings_created_count
         FROM bookings b
         CROSS JOIN date_range dr
         LEFT JOIN team_members tm_sys 
           ON tm_sys.organization_id = b.organization_id 
           AND tm_sys.is_system = true
-        WHERE b.start_at >= dr.start_limit 
-          AND b.start_at < dr.end_limit
+        WHERE b.start_at >= dr.start_limit AND b.start_at < dr.end_limit
+        GROUP BY 1, 2, 3, 4
+      ),
+
+      -- NEW: Bookings Created Aggregation (by created_at date)
+      created_agg AS (
+        SELECT
+          b.organization_id,
+          COALESCE(b.administrator_id, tm_sys.id) as team_member_id,
+          b.location_id,
+          DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
+          COUNT(*) as bookings_created_count
+        FROM bookings b
+        CROSS JOIN date_range dr
+        LEFT JOIN team_members tm_sys 
+          ON tm_sys.organization_id = b.organization_id 
+          AND tm_sys.is_system = true
+        WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
+          AND (b.creator_type = 'TEAM_MEMBER' 
+               OR (b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER')
+               -- Fallback: if creator_id exists in team_members, count it
+               OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id')
+          )
         GROUP BY 1, 2, 3, 4
       ),
 
       -- Unified Keys
       keys AS (
         SELECT organization_id, team_member_id, location_id, date_pacific FROM visits_agg
+        UNION DISTINCT
+        SELECT organization_id, team_member_id, location_id, date_pacific FROM created_agg
         UNION DISTINCT
         SELECT organization_id, team_member_id, location_id, date_pacific FROM creator_money_agg
         UNION DISTINCT
@@ -181,6 +201,7 @@ export async function GET(request) {
         organization_id, team_member_id, location_id, date_pacific,
         given_name, family_name, role,
         appointments_total, appointments_accepted, appointments_no_show, appointments_cancelled, late_cancellations,
+        bookings_created_count,
         creator_payments_count, creator_revenue_cents, creator_avg_ticket_cents,
         cashier_payments_count, cashier_revenue_cents, cashier_tips_cents, cashier_avg_ticket_cents,
         updated_at
@@ -193,6 +214,7 @@ export async function GET(request) {
         COALESCE(v.appointments_no_show, 0),
         COALESCE(v.appointments_cancelled, 0),
         COALESCE(v.late_cancellations, 0),
+        COALESCE(c.bookings_created_count, 0),
         COALESCE(cr.creator_payments_count, 0),
         COALESCE(cr.creator_revenue_cents, 0),
         CASE WHEN COALESCE(cr.creator_payments_count, 0) > 0 
@@ -212,6 +234,11 @@ export async function GET(request) {
         AND v.team_member_id = k.team_member_id 
         AND v.location_id = k.location_id 
         AND v.date_pacific = k.date_pacific
+      LEFT JOIN created_agg c
+        ON c.organization_id = k.organization_id 
+        AND c.team_member_id = k.team_member_id 
+        AND c.location_id = k.location_id 
+        AND c.date_pacific = k.date_pacific
       LEFT JOIN creator_money_agg cr
         ON cr.organization_id = k.organization_id 
         AND cr.team_member_id = k.team_member_id 
@@ -232,6 +259,7 @@ export async function GET(request) {
         appointments_no_show = EXCLUDED.appointments_no_show,
         appointments_cancelled = EXCLUDED.appointments_cancelled,
         late_cancellations = EXCLUDED.late_cancellations,
+        bookings_created_count = EXCLUDED.bookings_created_count,
         creator_payments_count = EXCLUDED.creator_payments_count,
         creator_revenue_cents = EXCLUDED.creator_revenue_cents,
         creator_avg_ticket_cents = EXCLUDED.creator_avg_ticket_cents,

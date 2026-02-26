@@ -905,8 +905,41 @@ async function findReferrerByCode(referralCode, organizationId) {
     `
     
     if (referrer && referrer.length > 0) {
-      console.log(`   ✅ Found referrer with code "${normalizedCode}": ${referrer[0].given_name} ${referrer[0].family_name}`)
-      return referrer[0]
+      const foundReferrer = referrer[0]
+      console.log(`   ✅ Found referrer with code "${normalizedCode}": ${foundReferrer.given_name} ${foundReferrer.family_name}`)
+      
+      // CRITICAL: Lazy-create ReferralProfile if it doesn't exist to avoid FK violations in rewards
+      try {
+        console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id}...`)
+        await prisma.referralProfile.upsert({
+          where: {
+            organization_id_square_customer_id: {
+              organization_id: organizationId,
+              square_customer_id: foundReferrer.square_customer_id
+            }
+          },
+          update: {
+            personal_code: foundReferrer.personal_code || normalizedCode,
+            referral_code: foundReferrer.personal_code || normalizedCode,
+            activated_as_referrer: true,
+            updated_at: new Date()
+          },
+          create: {
+            organization_id: organizationId,
+            square_customer_id: foundReferrer.square_customer_id,
+            personal_code: foundReferrer.personal_code || normalizedCode,
+            referral_code: foundReferrer.personal_code || normalizedCode,
+            activated_as_referrer: true,
+            activated_at: new Date()
+          }
+        })
+        console.log(`   ✅ ReferralProfile synced successfully`)
+      } catch (syncError) {
+        console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
+        // Continue anyway, but this might cause FK errors later
+      }
+      
+      return foundReferrer
     }
     
     // If not found, try case-sensitive match
@@ -919,8 +952,40 @@ async function findReferrerByCode(referralCode, organizationId) {
     `
     
     if (referrer && referrer.length > 0) {
-      console.log(`   ✅ Found referrer with exact match "${referralCode}": ${referrer[0].given_name} ${referrer[0].family_name}`)
-      return referrer[0]
+      const foundReferrer = referrer[0]
+      console.log(`   ✅ Found referrer with exact match "${referralCode}": ${foundReferrer.given_name} ${foundReferrer.family_name}`)
+      
+      // CRITICAL: Lazy-create ReferralProfile if it doesn't exist
+      try {
+        console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id} (exact match)...`)
+        await prisma.referralProfile.upsert({
+          where: {
+            organization_id_square_customer_id: {
+              organization_id: organizationId,
+              square_customer_id: foundReferrer.square_customer_id
+            }
+          },
+          update: {
+            personal_code: foundReferrer.personal_code || referralCode,
+            referral_code: foundReferrer.personal_code || referralCode,
+            activated_as_referrer: true,
+            updated_at: new Date()
+          },
+          create: {
+            organization_id: organizationId,
+            square_customer_id: foundReferrer.square_customer_id,
+            personal_code: foundReferrer.personal_code || referralCode,
+            referral_code: foundReferrer.personal_code || referralCode,
+            activated_as_referrer: true,
+            activated_at: new Date()
+          }
+        })
+        console.log(`   ✅ ReferralProfile synced successfully`)
+      } catch (syncError) {
+        console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
+      }
+      
+      return foundReferrer
     }
     
     console.log(`   ❌ No referrer found with code "${referralCode}" or "${normalizedCode}"`)
@@ -3457,7 +3522,15 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let finalOrganizationId = organizationId
     
-    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
+    if (!finalOrganizationId && finalMerchantId) {
+      finalOrganizationId = await resolveOrganizationId(finalMerchantId)
+      if (finalOrganizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${finalOrganizationId}`)
+      }
+    }
+
+    // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
     if (!finalOrganizationId) {
       const squareLocationId = 
         bookingData.location_id || 
@@ -3475,15 +3548,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       }
     }
     
-    // STEP 2: Fallback to merchant_id (if location lookup failed)
-    if (!finalOrganizationId && finalMerchantId) {
-      finalOrganizationId = await resolveOrganizationId(finalMerchantId)
-      if (finalOrganizationId) {
-        console.log(`✅ Resolved organization_id from merchant_id: ${finalOrganizationId}`)
-      }
-    }
-    
-    // STEP 3: Fallback to customer (if both location and merchant failed)
+    // STEP 2: Fallback to customer (if both location and merchant failed)
     if (!finalOrganizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -3944,27 +4009,30 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       // Extract merchantId from webhook data at this scope so it's available for saveBookingToDatabase
       const merchantId = bookingData.merchant_id || bookingData.merchantId || null
       
-      // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
-      const squareLocationId = bookingData.location_id || bookingData.locationId
-      if (squareLocationId) {
-        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
-        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+      // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
+      let organizationId = runContext?.organizationId || null
+      
+      // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
+      if (!organizationId && merchantId) {
+        organizationId = await resolveOrganizationId(merchantId)
         if (organizationId) {
-          console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+          console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
         }
       }
-      
-      // STEP 2: Fallback to merchant_id (if location lookup failed)
+
+      // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
       if (!organizationId) {
-        if (merchantId) {
-          organizationId = await resolveOrganizationId(merchantId)
+        const squareLocationId = bookingData.location_id || bookingData.locationId
+        if (squareLocationId) {
+          console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+          organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
           if (organizationId) {
-            console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+            console.log(`✅ Resolved organization_id from location: ${organizationId}`)
           }
         }
       }
       
-      // STEP 3: Fallback to customer (if both location and merchant failed)
+      // STEP 2: Fallback to customer (if both location and merchant failed)
       if (!organizationId && customerId) {
         try {
           const customerOrg = await prisma.$queryRaw`
@@ -4278,7 +4346,15 @@ async function processBookingCreated(bookingData, runContext = {}) {
     // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = runContext?.organizationId || null
     
-    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
+    if (!organizationId && merchantId) {
+      organizationId = await resolveOrganizationId(merchantId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+      }
+    }
+
+    // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
     if (!organizationId) {
       const squareLocationId = bookingData.location_id || bookingData.locationId
       if (squareLocationId) {
@@ -4290,15 +4366,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
       }
     }
     
-    // STEP 2: Fallback to merchant_id (if location lookup failed)
-    if (!organizationId && merchantId) {
-      organizationId = await resolveOrganizationId(merchantId)
-      if (organizationId) {
-        console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
-      }
-    }
-    
-    // STEP 3: Fallback to customer (if both location and merchant failed)
+    // STEP 2: Fallback to customer (if both location and merchant failed)
     if (!organizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -5344,7 +5412,9 @@ export async function POST(request) {
 
     // Process customer.created events (new customer detected)
     if (webhookData.type === 'customer.created') {
-      const customerData = webhookData.data.object.customer
+      const customerData = webhookData.data?.object?.customer || 
+                          webhookData.data?.customer || 
+                          webhookData.customer
       
       if (customerData && (customerData.id || customerData.customerId || customerData.customer_id)) {
         const customerResourceId = customerData.id || customerData.customerId || customerData.customer_id
@@ -5361,6 +5431,21 @@ export async function POST(request) {
         let organizationId = null
         if (merchantId) {
           organizationId = await resolveOrganizationId(merchantId)
+        }
+
+        // STEP 1: Fallback to location_id if merchant_id resolution failed
+        if (!organizationId) {
+          const locationId = 
+            webhookData.location_id || 
+            webhookData.locationId || 
+            customerData?.location_id || 
+            customerData?.locationId ||
+            null
+            
+          if (locationId) {
+            console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+            organizationId = await resolveOrganizationIdFromLocationId(locationId)
+          }
         }
 
         const runContext = { correlationId, merchantId, organizationId }
@@ -5469,7 +5554,9 @@ export async function POST(request) {
 
     // Process booking.created events (when customer actually books)
     if (webhookData.type === 'booking.created') {
-      const bookingData = webhookData.data.object.booking
+      const bookingData = webhookData.data?.object?.booking || 
+                         webhookData.data?.booking || 
+                         webhookData.booking
       
       console.log('🚀 About to process booking.created')
       console.log('   bookingData.customer_id:', bookingData?.customer_id)
@@ -5487,13 +5574,29 @@ export async function POST(request) {
         // Extract merchant_id from webhook event
         const merchantId = webhookData.merchant_id || webhookData.merchantId || bookingData.merchantId || bookingData.merchant_id || null
         
-        // Resolve organization_id from merchant_id
-        let organizationId = null
-        if (merchantId) {
-          organizationId = await resolveOrganizationId(merchantId)
-        }
+    // Resolve organization_id from merchant_id
+    let organizationId = null
+    if (merchantId) {
+      organizationId = await resolveOrganizationId(merchantId)
+    }
+    
+    // STEP 1: Fallback to location_id if merchant_id resolution failed
+    if (!organizationId) {
+      const locationId = 
+        webhookData.location_id || 
+        webhookData.locationId || 
+        bookingData?.location_id || 
+        bookingData?.locationId ||
+        bookingData?.location?.id ||
+        null
         
-        const runContext = { correlationId, merchantId, organizationId }
+      if (locationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+        organizationId = await resolveOrganizationIdFromLocationId(locationId)
+      }
+    }
+
+    const runContext = { correlationId, merchantId, organizationId }
 
         // Best-effort enqueue for bookings table persistence (webhook-jobs)
         let queuePrisma = null
@@ -5924,7 +6027,10 @@ export async function POST(request) {
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4579',message:'payment.updated handler entered',data:{hasWebhookData:!!webhookData,hasData:!!webhookData?.data,hasObject:!!webhookData?.data?.object,hasPayment:!!webhookData?.data?.object?.payment},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'})}).catch(()=>{});
       // #endregion
-      const paymentData = webhookData.data.object.payment
+      const paymentData = webhookData.data?.object?.payment || 
+                         webhookData.data?.payment || 
+                         webhookData.payment
+      
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:4581',message:'paymentData extracted',data:{hasPaymentData:!!paymentData,paymentId:paymentData?.id||paymentData?.paymentId||'null',locationId:paymentData?.location_id||paymentData?.locationId||'null'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'})}).catch(()=>{});
       // #endregion
@@ -6134,15 +6240,48 @@ export async function POST(request) {
     // Process order.created and order.updated events
     if (webhookData.type === 'order.created' || webhookData.type === 'order.updated') {
       console.log(`📦 Order ${webhookData.type === 'order.created' ? 'created' : 'updated'} event received`)
+      
+      // Extract merchant_id from webhook event
+      const merchantId = webhookData.merchant_id || webhookData.merchantId || null
+      
+      // Resolve organization_id from merchant_id
+      let organizationId = null
+      if (merchantId) {
+        organizationId = await resolveOrganizationId(merchantId)
+      }
+
+      // STEP 1: Fallback to location_id if merchant_id resolution failed
+      if (!organizationId) {
+        const orderData = webhookData.data?.object?.order_created || 
+                         webhookData.data?.object?.order_updated ||
+                         webhookData.data?.object?.order ||
+                         webhookData.data?.order ||
+                         webhookData.order
+        
+        const locationId = 
+          webhookData.location_id || 
+          webhookData.locationId || 
+          orderData?.location_id || 
+          orderData?.locationId ||
+          null
+          
+        if (locationId) {
+          console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+          organizationId = await resolveOrganizationIdFromLocationId(locationId)
+        }
+      }
+
       try {
         const processOrder = await getProcessOrderWebhook()
         if (processOrder) {
-          await processOrder(webhookData.data, webhookData.type)
+          // Pass organizationId in context if available
+          await processOrder(webhookData.data, webhookData.type, { organizationId })
           console.log(`✅ Order webhook processed successfully`)
         return Response.json({
           success: true,
             message: `Order ${webhookData.type} processed`,
-            eventType: webhookData.type
+            eventType: webhookData.type,
+            organizationId
           })
         } else {
           console.error('❌ processOrderWebhook function not available')

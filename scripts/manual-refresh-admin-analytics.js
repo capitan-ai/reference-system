@@ -1,79 +1,13 @@
-/**
- * Secure Admin Analytics Refresh Endpoint
- * Allows authenticated admins/owners to trigger a refresh of the admin_analytics_daily table
- * without exposing the CRON_SECRET to the frontend.
- */
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
-import { getUserFromRequest } from '../../../../../lib/auth/check-access'
-import db from '../../../../../lib/prisma-client'
+async function main() {
+  const dateFrom = "NOW() - interval '35 days'";
+  const dateTo = "NOW() + interval '1 day'";
 
-// Force dynamic rendering
-export const dynamic = 'force-dynamic'
+  console.log(`\n--- Refreshing Admin Analytics from ${dateFrom} to ${dateTo} ---`);
 
-export async function GET(request) {
-  return handleRefresh(request)
-}
-
-export async function POST(request) {
-  return handleRefresh(request)
-}
-
-async function handleRefresh(request) {
-  try {
-    // 1. Check for CRON_SECRET / x-cron-key (for Edge Function proxy)
-    const authHeader = request.headers.get('authorization')
-    const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key')
-    const cronSecret = process.env.CRON_SECRET
-
-    let isAuthorized = false
-
-    if (cronSecret && (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret || cronHeader === cronSecret)) {
-      isAuthorized = true
-    }
-
-    // 2. If not authorized by secret, check for user session (for direct browser calls)
-    if (!isAuthorized) {
-      const user = await getUserFromRequest(request)
-      if (user && !user.error) {
-        const userRole = await db.organizationUser.findFirst({
-          where: {
-            user_id: user.id,
-            role: { in: ['owner', 'admin', 'super_admin'] }
-          }
-        })
-        if (userRole) {
-          isAuthorized = true
-        }
-      }
-    }
-
-    if (!isAuthorized) {
-      return Response.json(
-        { error: 'Unauthorized. Admin access or valid secret required.' },
-        { status: 403 }
-      )
-    }
-
-    const { searchParams } = new URL(request.url)
-    const daysParam = searchParams.get('days')
-    const fromParam = searchParams.get('from')
-    const toParam = searchParams.get('to')
-
-    // 3. Determine date range (same logic as cron)
-    let dateFrom, dateTo
-    if (fromParam && toParam) {
-      dateFrom = `'${fromParam} 00:00:00'`
-      dateTo = `'${toParam} 23:59:59'`
-    } else {
-      const days = parseInt(daysParam || '35')
-      dateFrom = `NOW() - interval '${days} days'`
-      dateTo = `NOW() + interval '1 day'`
-    }
-
-    console.log(`[ADMIN-API] Refreshing analytics from ${dateFrom} to ${dateTo}`)
-
-    // 4. Execute the "Golden Query"
-    const refreshSQL = `
+  const refreshSQL = `
       WITH date_range AS (
         SELECT 
           (${dateFrom})::timestamptz as start_limit,
@@ -150,42 +84,29 @@ async function handleRefresh(request) {
           COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted,
           COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') as appointments_no_show,
           COUNT(*) FILTER (WHERE b.status LIKE 'CANCELLED%') as appointments_cancelled,
-          0 as bookings_created_count
+          COUNT(*) FILTER (
+            WHERE b.status LIKE 'CANCELLED%' 
+            AND (b.start_at - b.updated_at) < interval '24 hours'
+          ) as late_cancellations,
+          -- NEW: Bookings Created Count (by created_at)
+          COUNT(*) FILTER (
+            WHERE b.created_at >= dr.start_limit 
+            AND b.created_at < dr.end_limit
+            AND (b.creator_type = 'TEAM_MEMBER' OR (b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER'))
+          ) as bookings_created_count
         FROM bookings b
         CROSS JOIN date_range dr
         LEFT JOIN team_members tm_sys 
           ON tm_sys.organization_id = b.organization_id 
           AND tm_sys.is_system = true
-        WHERE b.start_at >= dr.start_limit AND b.start_at < dr.end_limit
-        GROUP BY 1, 2, 3, 4
-      ),
-
-      -- NEW: Bookings Created Aggregation (by created_at date)
-      created_agg AS (
-        SELECT
-          b.organization_id,
-          COALESCE(b.administrator_id, tm_sys.id) as team_member_id,
-          b.location_id,
-          DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
-          COUNT(*) as bookings_created_count
-        FROM bookings b
-        CROSS JOIN date_range dr
-        LEFT JOIN team_members tm_sys 
-          ON tm_sys.organization_id = b.organization_id 
-          AND tm_sys.is_system = true
-        WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
-          AND (b.creator_type = 'TEAM_MEMBER' 
-               OR (b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER')
-               OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id')
-          )
+        WHERE (b.start_at >= dr.start_limit AND b.start_at < dr.end_limit)
+           OR (b.created_at >= dr.start_limit AND b.created_at < dr.end_limit)
         GROUP BY 1, 2, 3, 4
       ),
 
       -- Unified Keys
       keys AS (
         SELECT organization_id, team_member_id, location_id, date_pacific FROM visits_agg
-        UNION DISTINCT
-        SELECT organization_id, team_member_id, location_id, date_pacific FROM created_agg
         UNION DISTINCT
         SELECT organization_id, team_member_id, location_id, date_pacific FROM creator_money_agg
         UNION DISTINCT
@@ -210,7 +131,7 @@ async function handleRefresh(request) {
         COALESCE(v.appointments_no_show, 0),
         COALESCE(v.appointments_cancelled, 0),
         COALESCE(v.late_cancellations, 0),
-        COALESCE(c.bookings_created_count, 0),
+        COALESCE(v.bookings_created_count, 0),
         COALESCE(cr.creator_payments_count, 0),
         COALESCE(cr.creator_revenue_cents, 0),
         CASE WHEN COALESCE(cr.creator_payments_count, 0) > 0 
@@ -230,11 +151,6 @@ async function handleRefresh(request) {
         AND v.team_member_id = k.team_member_id 
         AND v.location_id = k.location_id 
         AND v.date_pacific = k.date_pacific
-      LEFT JOIN created_agg c
-        ON c.organization_id = k.organization_id 
-        AND c.team_member_id = k.team_member_id 
-        AND c.location_id = k.location_id 
-        AND c.date_pacific = k.date_pacific
       LEFT JOIN creator_money_agg cr
         ON cr.organization_id = k.organization_id 
         AND cr.team_member_id = k.team_member_id 
@@ -264,13 +180,17 @@ async function handleRefresh(request) {
         cashier_tips_cents = EXCLUDED.cashier_tips_cents,
         cashier_avg_ticket_cents = EXCLUDED.cashier_avg_ticket_cents,
         updated_at = NOW();
-    `
+    `;
 
-    await db.$executeRawUnsafe(refreshSQL)
-
-    return Response.json({ success: true, message: 'Admin analytics refreshed successfully' })
+  try {
+    const result = await prisma.$executeRawUnsafe(refreshSQL);
+    console.log(`✅ Admin analytics refreshed successfully. Rows affected: ${result}`);
   } catch (error) {
-    console.error(`[ADMIN-API] Error refreshing admin analytics: ${error.message}`)
-    return Response.json({ error: error.message }, { status: 500 })
+    console.error(`❌ Error refreshing admin analytics: ${error.message}`);
+  } finally {
+    await prisma.$disconnect();
   }
 }
+
+main();
+

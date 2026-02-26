@@ -2422,10 +2422,36 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     try {
       const createdAt = order.created_at ? new Date(order.created_at) : new Date()
       const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
+      const closedAt = order.closed_at ? new Date(order.closed_at) : null
       const orderStateValue = orderState || order.state || null
       const versionValue = order.version ? Number(order.version) : null
       const rawJsonValue = safeStringify(order) // Use safeStringify to handle BigInt values
+      const sourceName = order.source?.name || null
+
+      // Extract totals and net amounts
+      const totalMoney = order.total_money || order.totalMoney || {}
+      const totalTaxMoney = order.total_tax_money || order.totalTaxMoney || {}
+      const totalTipMoney = order.total_tip_money || order.totalTipMoney || {}
+      const totalDiscountMoney = order.total_discount_money || order.totalDiscountMoney || {}
+      const totalServiceChargeMoney = order.total_service_charge_money || order.totalServiceChargeMoney || {}
+      const netAmountDueMoney = order.net_amount_due_money || order.netAmountDueMoney || {}
       
+      // Extract return amounts
+      const returnAmounts = order.return_amounts || order.returnAmounts || {}
+      const returnTotalMoney = returnAmounts.total_money || returnAmounts.totalMoney || {}
+      const returnTotalTaxMoney = returnAmounts.tax_money || returnAmounts.taxMoney || {}
+      const returnTotalTipMoney = returnAmounts.tip_money || returnAmounts.tipMoney || {}
+      const returnTotalDiscountMoney = returnAmounts.discount_money || returnAmounts.discountMoney || {}
+      const returnTotalServiceChargeMoney = returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}
+
+      // Extract net amounts (full structure)
+      const netAmounts = order.net_amounts || order.netAmounts || {}
+      const netTotalMoney = netAmounts.total_money || netAmounts.totalMoney || {}
+      const netTotalTaxMoney = netAmounts.tax_money || netAmounts.taxMoney || {}
+      const netTotalTipMoney = netAmounts.tip_money || netAmounts.tipMoney || {}
+      const netTotalDiscountMoney = netAmounts.discount_money || netAmounts.discountMoney || {}
+      const netTotalServiceChargeMoney = netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}
+
       const upsertedOrder = await prisma.$queryRaw`
         INSERT INTO orders (
           organization_id,
@@ -2435,6 +2461,35 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           state,
           version,
           reference_id,
+          source_name,
+          closed_at,
+          total_money_amount,
+          total_money_currency,
+          total_tax_money_amount,
+          total_tax_money_currency,
+          total_tip_money_amount,
+          total_tip_money_currency,
+          total_discount_money_amount,
+          total_discount_money_currency,
+          total_service_charge_money_amount,
+          total_service_charge_money_currency,
+          net_amount_due_money_amount,
+          net_amount_due_money_currency,
+          return_total_money_amount,
+          return_total_money_currency,
+          return_total_tax_money_amount,
+          return_total_tax_money_currency,
+          return_total_tip_money_amount,
+          return_total_tip_money_currency,
+          return_total_discount_money_amount,
+          return_total_discount_money_currency,
+          return_total_service_charge_money_amount,
+          return_total_service_charge_money_currency,
+          net_total_money_amount, net_total_money_currency,
+          net_total_tax_money_amount, net_total_tax_money_currency,
+          net_total_tip_money_amount, net_total_tip_money_currency,
+          net_total_discount_money_amount, net_total_discount_money_currency,
+          net_total_service_charge_money_amount, net_total_service_charge_money_currency,
           created_at,
           updated_at,
           raw_json
@@ -2446,6 +2501,30 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           ${orderStateValue},
           ${versionValue},
           ${order.reference_id || null},
+          ${sourceName},
+          ${closedAt}::timestamptz,
+          ${Number(totalMoney.amount || 0)},
+          ${totalMoney.currency || 'USD'},
+          ${Number(totalTaxMoney.amount || 0)},
+          ${totalTaxMoney.currency || 'USD'},
+          ${Number(totalTipMoney.amount || 0)},
+          ${totalTipMoney.currency || 'USD'},
+          ${Number(totalDiscountMoney.amount || 0)},
+          ${totalDiscountMoney.currency || 'USD'},
+          ${Number(totalServiceChargeMoney.amount || 0)},
+          ${totalServiceChargeMoney.currency || 'USD'},
+          ${Number(netAmountDueMoney.amount || 0)},
+          ${netAmountDueMoney.currency || 'USD'},
+          ${Number(returnTotalMoney.amount || 0)}, ${returnTotalMoney.currency || 'USD'},
+          ${Number(returnTotalTaxMoney.amount || 0)}, ${returnTotalTaxMoney.currency || 'USD'},
+          ${Number(returnTotalTipMoney.amount || 0)}, ${returnTotalTipMoney.currency || 'USD'},
+          ${Number(returnTotalDiscountMoney.amount || 0)}, ${returnTotalDiscountMoney.currency || 'USD'},
+          ${Number(returnTotalServiceChargeMoney.amount || 0)}, ${returnTotalServiceChargeMoney.currency || 'USD'},
+          ${Number(netTotalMoney.amount || 0)}, ${netTotalMoney.currency || 'USD'},
+          ${Number(netTotalTaxMoney.amount || 0)}, ${netTotalTaxMoney.currency || 'USD'},
+          ${Number(netTotalTipMoney.amount || 0)}, ${netTotalTipMoney.currency || 'USD'},
+          ${Number(netTotalDiscountMoney.amount || 0)}, ${netTotalDiscountMoney.currency || 'USD'},
+          ${Number(netTotalServiceChargeMoney.amount || 0)}, ${netTotalServiceChargeMoney.currency || 'USD'},
           ${createdAt}::timestamptz,
           ${updatedAt}::timestamptz,
           ${rawJsonValue}::jsonb
@@ -2457,6 +2536,40 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           state = EXCLUDED.state,
           version = EXCLUDED.version,
           reference_id = EXCLUDED.reference_id,
+          source_name = EXCLUDED.source_name,
+          closed_at = EXCLUDED.closed_at,
+          total_money_amount = EXCLUDED.total_money_amount,
+          total_money_currency = EXCLUDED.total_money_currency,
+          total_tax_money_amount = EXCLUDED.total_tax_money_amount,
+          total_tax_money_currency = EXCLUDED.total_tax_money_currency,
+          total_tip_money_amount = EXCLUDED.total_tip_money_amount,
+          total_tip_money_currency = EXCLUDED.total_tip_money_currency,
+          total_discount_money_amount = EXCLUDED.total_discount_money_amount,
+          total_discount_money_currency = EXCLUDED.total_discount_money_currency,
+          total_service_charge_money_amount = EXCLUDED.total_service_charge_money_amount,
+          total_service_charge_money_currency = EXCLUDED.total_service_charge_money_currency,
+          net_amount_due_money_amount = EXCLUDED.net_amount_due_money_amount,
+          net_amount_due_money_currency = EXCLUDED.net_amount_due_money_currency,
+          return_total_money_amount = EXCLUDED.return_total_money_amount,
+          return_total_money_currency = EXCLUDED.return_total_money_currency,
+          return_total_tax_money_amount = EXCLUDED.return_total_tax_money_amount,
+          return_total_tax_money_currency = EXCLUDED.return_total_tax_money_currency,
+          return_total_tip_money_amount = EXCLUDED.return_total_tip_money_amount,
+          return_total_tip_money_currency = EXCLUDED.return_total_tip_money_currency,
+          return_total_discount_money_amount = EXCLUDED.return_total_discount_money_amount,
+          return_total_discount_money_currency = EXCLUDED.return_total_discount_money_currency,
+          return_total_service_charge_money_amount = EXCLUDED.return_total_service_charge_money_amount,
+          return_total_service_charge_money_currency = EXCLUDED.return_total_service_charge_money_currency,
+          net_total_money_amount = EXCLUDED.net_total_money_amount,
+          net_total_money_currency = EXCLUDED.net_total_money_currency,
+          net_total_tax_money_amount = EXCLUDED.net_total_tax_money_amount,
+          net_total_tax_money_currency = EXCLUDED.net_total_tax_money_currency,
+          net_total_tip_money_amount = EXCLUDED.net_total_tip_money_amount,
+          net_total_tip_money_currency = EXCLUDED.net_total_tip_money_currency,
+          net_total_discount_money_amount = EXCLUDED.net_total_discount_money_amount,
+          net_total_discount_money_currency = EXCLUDED.net_total_discount_money_currency,
+          net_total_service_charge_money_amount = EXCLUDED.net_total_service_charge_money_amount,
+          net_total_service_charge_money_currency = EXCLUDED.net_total_service_charge_money_currency,
           updated_at = EXCLUDED.updated_at,
           raw_json = EXCLUDED.raw_json
         RETURNING id, order_id, organization_id, state
@@ -2538,6 +2651,35 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       
       try {
         const newOrderUuid = crypto.randomUUID()
+        const createdAt = order.created_at ? new Date(order.created_at) : new Date()
+        const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
+        const closedAt = order.closed_at ? new Date(order.closed_at) : null
+        const sourceName = order.source?.name || null
+
+        // Extract totals and net amounts
+        const totalMoney = order.total_money || order.totalMoney || {}
+        const totalTaxMoney = order.total_tax_money || order.totalTaxMoney || {}
+        const totalTipMoney = order.total_tip_money || order.totalTipMoney || {}
+        const totalDiscountMoney = order.total_discount_money || order.totalDiscountMoney || {}
+        const totalServiceChargeMoney = order.total_service_charge_money || order.totalServiceChargeMoney || {}
+        const netAmountDueMoney = order.net_amount_due_money || order.netAmountDueMoney || {}
+
+        // Extract return amounts
+        const returnAmounts = order.return_amounts || order.returnAmounts || {}
+        const returnTotalMoney = returnAmounts.total_money || returnAmounts.totalMoney || {}
+        const returnTotalTaxMoney = returnAmounts.tax_money || returnAmounts.taxMoney || {}
+        const returnTotalTipMoney = returnAmounts.tip_money || returnAmounts.tipMoney || {}
+        const returnTotalDiscountMoney = returnAmounts.discount_money || returnAmounts.discountMoney || {}
+        const returnTotalServiceChargeMoney = returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}
+
+        // Extract net amounts (full structure)
+        const netAmounts = order.net_amounts || order.netAmounts || {}
+        const netTotalMoney = netAmounts.total_money || netAmounts.totalMoney || {}
+        const netTotalTaxMoney = netAmounts.tax_money || netAmounts.taxMoney || {}
+        const netTotalTipMoney = netAmounts.tip_money || netAmounts.tipMoney || {}
+      const netTotalDiscountMoney = netAmounts.discount_money || netAmounts.discountMoney || {}
+      const netTotalServiceChargeMoney = netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}
+
           await prisma.$executeRaw`
             INSERT INTO orders (
               id,
@@ -2548,6 +2690,33 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               state,
               version,
               reference_id,
+              source_name,
+              closed_at,
+              total_money_amount,
+              total_money_currency,
+              total_tax_money_amount,
+              total_tax_money_currency,
+              total_tip_money_amount,
+              total_tip_money_currency,
+              total_discount_money_amount,
+              total_discount_money_currency,
+              total_service_charge_money_amount,
+              total_service_charge_money_currency,
+              net_amount_due_money_amount,
+              net_amount_due_money_currency,
+              return_total_money_amount,
+              return_total_money_currency,
+              return_total_tax_money_amount,
+              return_total_tax_money_currency,
+              return_total_tip_money_amount,
+              return_total_tip_money_currency,
+              return_total_discount_money_amount,
+              return_total_discount_money_currency,
+              return_total_service_charge_money_amount,
+              return_total_service_charge_money_currency,
+              net_total_money_amount, net_total_money_currency,
+              net_total_tax_money_amount, net_total_tax_money_currency,
+              net_total_tip_money_amount, net_total_tip_money_currency,
               created_at,
               updated_at,
               raw_json
@@ -2560,8 +2729,30 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               ${orderState || order.state || null},
               ${order.version ? Number(order.version) : null},
               ${order.reference_id || null},
-              ${order.created_at ? new Date(order.created_at) : new Date()},
-              ${order.updated_at ? new Date(order.updated_at) : new Date()},
+              ${sourceName},
+              ${closedAt}::timestamptz,
+              ${Number(totalMoney.amount || 0)},
+              ${totalMoney.currency || 'USD'},
+              ${Number(totalTaxMoney.amount || 0)},
+              ${totalTaxMoney.currency || 'USD'},
+              ${Number(totalTipMoney.amount || 0)},
+              ${totalTipMoney.currency || 'USD'},
+              ${Number(totalDiscountMoney.amount || 0)},
+              ${totalDiscountMoney.currency || 'USD'},
+              ${Number(totalServiceChargeMoney.amount || 0)},
+              ${totalServiceChargeMoney.currency || 'USD'},
+              ${Number(netAmountDueMoney.amount || 0)},
+              ${netAmountDueMoney.currency || 'USD'},
+              ${Number(returnTotalMoney.amount || 0)}, ${returnTotalMoney.currency || 'USD'},
+              ${Number(returnTotalTaxMoney.amount || 0)}, ${returnTotalTaxMoney.currency || 'USD'},
+              ${Number(returnTotalTipMoney.amount || 0)}, ${returnTotalTipMoney.currency || 'USD'},
+              ${Number(returnTotalDiscountMoney.amount || 0)}, ${returnTotalDiscountMoney.currency || 'USD'},
+              ${Number(returnTotalServiceChargeMoney.amount || 0)}, ${returnTotalServiceChargeMoney.currency || 'USD'},
+              ${Number(netTotalMoney.amount || 0)}, ${netTotalMoney.currency || 'USD'},
+              ${Number(netTotalTaxMoney.amount || 0)}, ${netTotalTaxMoney.currency || 'USD'},
+              ${Number(netTotalTipMoney.amount || 0)}, ${netTotalTipMoney.currency || 'USD'},
+              ${createdAt}::timestamptz,
+              ${updatedAt}::timestamptz,
               ${safeStringify(order)}::jsonb
             )
             ON CONFLICT (organization_id, order_id) DO UPDATE SET
@@ -2570,6 +2761,36 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               state = COALESCE(EXCLUDED.state, orders.state),
               version = COALESCE(EXCLUDED.version, orders.version),
               reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              source_name = EXCLUDED.source_name,
+              closed_at = EXCLUDED.closed_at,
+              total_money_amount = EXCLUDED.total_money_amount,
+              total_money_currency = EXCLUDED.total_money_currency,
+              total_tax_money_amount = EXCLUDED.total_tax_money_amount,
+              total_tax_money_currency = EXCLUDED.total_tax_money_currency,
+              total_tip_money_amount = EXCLUDED.total_tip_money_amount,
+              total_tip_money_currency = EXCLUDED.total_tip_money_currency,
+              total_discount_money_amount = EXCLUDED.total_discount_money_amount,
+              total_discount_money_currency = EXCLUDED.total_discount_money_currency,
+              total_service_charge_money_amount = EXCLUDED.total_service_charge_money_amount,
+              total_service_charge_money_currency = EXCLUDED.total_service_charge_money_currency,
+              net_amount_due_money_amount = EXCLUDED.net_amount_due_money_amount,
+              net_amount_due_money_currency = EXCLUDED.net_amount_due_money_currency,
+              return_total_money_amount = EXCLUDED.return_total_money_amount,
+              return_total_money_currency = EXCLUDED.return_total_money_currency,
+              return_total_tax_money_amount = EXCLUDED.return_total_tax_money_amount,
+              return_total_tax_money_currency = EXCLUDED.return_total_tax_money_currency,
+              return_total_tip_money_amount = EXCLUDED.return_total_tip_money_amount,
+              return_total_tip_money_currency = EXCLUDED.return_total_tip_money_currency,
+              return_total_discount_money_amount = EXCLUDED.return_total_discount_money_amount,
+              return_total_discount_money_currency = EXCLUDED.return_total_discount_money_currency,
+              return_total_service_charge_money_amount = EXCLUDED.return_total_service_charge_money_amount,
+              return_total_service_charge_money_currency = EXCLUDED.return_total_service_charge_money_currency,
+              net_total_money_amount = EXCLUDED.net_total_money_amount,
+              net_total_money_currency = EXCLUDED.net_total_money_currency,
+              net_total_tax_money_amount = EXCLUDED.net_total_tax_money_amount,
+              net_total_tax_money_currency = EXCLUDED.net_total_tax_money_currency,
+              net_total_tip_money_amount = EXCLUDED.net_total_tip_money_amount,
+              net_total_tip_money_currency = EXCLUDED.net_total_tip_money_currency,
               updated_at = EXCLUDED.updated_at,
               raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
           `

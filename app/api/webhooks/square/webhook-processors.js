@@ -726,6 +726,32 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
   const locationId = orderData.location_id || orderData.locationId
   const state = orderData.state
   const customerId = orderData.customer_id || orderData.customerId
+  const closedAt = orderData.closed_at || orderData.closedAt
+  const sourceName = orderData.source?.name
+
+  // Extract totals and net amounts
+  const totalMoney = orderData.total_money || orderData.totalMoney || {}
+  const totalTaxMoney = orderData.total_tax_money || orderData.totalTaxMoney || {}
+  const totalTipMoney = orderData.total_tip_money || orderData.totalTipMoney || {}
+  const totalDiscountMoney = orderData.total_discount_money || orderData.totalDiscountMoney || {}
+  const totalServiceChargeMoney = orderData.total_service_charge_money || orderData.totalServiceChargeMoney || {}
+  const netAmountDueMoney = orderData.net_amount_due_money || orderData.netAmountDueMoney || {}
+
+  // Extract return amounts
+  const returnAmounts = orderData.return_amounts || orderData.returnAmounts || {}
+  const returnTotalMoney = returnAmounts.total_money || returnAmounts.totalMoney || {}
+  const returnTotalTaxMoney = returnAmounts.tax_money || returnAmounts.taxMoney || {}
+  const returnTotalTipMoney = returnAmounts.tip_money || returnAmounts.tipMoney || {}
+  const returnTotalDiscountMoney = returnAmounts.discount_money || returnAmounts.discountMoney || {}
+  const returnTotalServiceChargeMoney = returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}
+
+  // Extract net amounts (full structure)
+  const netAmounts = orderData.net_amounts || orderData.netAmounts || {}
+  const netTotalMoney = netAmounts.total_money || netAmounts.totalMoney || {}
+  const netTotalTaxMoney = netAmounts.tax_money || netAmounts.taxMoney || {}
+  const netTotalTipMoney = netAmounts.tip_money || netAmounts.tipMoney || {}
+  const netTotalDiscountMoney = netAmounts.discount_money || netAmounts.discountMoney || {}
+  const netTotalServiceChargeMoney = netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}
 
   console.log(`[WEBHOOK-PROCESSOR] Processing order ${orderId} state: ${state}`)
 
@@ -757,14 +783,82 @@ export async function processOrderUpdated(payload, eventId, eventCreatedAt) {
     await prisma.$executeRaw`
       INSERT INTO orders (
         id, organization_id, order_id, location_id, customer_id, state,
+        closed_at, source_name,
+        total_money_amount, total_money_currency,
+        total_tax_money_amount, total_tax_money_currency,
+        total_tip_money_amount, total_tip_money_currency,
+        total_discount_money_amount, total_discount_money_currency,
+        total_service_charge_money_amount, total_service_charge_money_currency,
+        net_amount_due_money_amount, net_amount_due_money_currency,
+        return_total_money_amount, return_total_money_currency,
+        return_total_tax_money_amount, return_total_tax_money_currency,
+        return_total_tip_money_amount, return_total_tip_money_currency,
+        return_total_discount_money_amount, return_total_discount_money_currency,
+        return_total_service_charge_money_amount, return_total_service_charge_money_currency,
+        net_total_money_amount, net_total_money_currency,
+        net_total_tax_money_amount, net_total_tax_money_currency,
+        net_total_tip_money_amount, net_total_tip_money_currency,
+        net_total_discount_money_amount, net_total_discount_money_currency,
+        net_total_service_charge_money_amount, net_total_service_charge_money_currency,
         created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(), ${organizationId}::uuid, ${orderId}, ${locationUuid}::uuid, ${customerId}, ${state},
+        ${closedAt ? new Date(closedAt) : null}::timestamptz, ${sourceName},
+        ${Number(totalMoney.amount || 0)}, ${totalMoney.currency || 'USD'},
+        ${Number(totalTaxMoney.amount || 0)}, ${totalTaxMoney.currency || 'USD'},
+        ${Number(totalTipMoney.amount || 0)}, ${totalTipMoney.currency || 'USD'},
+        ${Number(totalDiscountMoney.amount || 0)}, ${totalDiscountMoney.currency || 'USD'},
+        ${Number(totalServiceChargeMoney.amount || 0)}, ${totalServiceChargeMoney.currency || 'USD'},
+        ${Number(netAmountDueMoney.amount || 0)}, ${netAmountDueMoney.currency || 'USD'},
+        ${Number(returnTotalMoney.amount || 0)}, ${returnTotalMoney.currency || 'USD'},
+        ${Number(returnTotalTaxMoney.amount || 0)}, ${returnTotalTaxMoney.currency || 'USD'},
+        ${Number(returnTotalTipMoney.amount || 0)}, ${returnTotalTipMoney.currency || 'USD'},
+        ${Number(returnTotalDiscountMoney.amount || 0)}, ${returnTotalDiscountMoney.currency || 'USD'},
+        ${Number(returnTotalServiceChargeMoney.amount || 0)}, ${returnTotalServiceChargeMoney.currency || 'USD'},
+        ${Number(netTotalMoney.amount || 0)}, ${netTotalMoney.currency || 'USD'},
+        ${Number(netTotalTaxMoney.amount || 0)}, ${netTotalTaxMoney.currency || 'USD'},
+        ${Number(netTotalTipMoney.amount || 0)}, ${netTotalTipMoney.currency || 'USD'},
+        ${Number(netTotalDiscountMoney.amount || 0)}, ${netTotalDiscountMoney.currency || 'USD'},
+        ${Number(netTotalServiceChargeMoney.amount || 0)}, ${netTotalServiceChargeMoney.currency || 'USD'},
         NOW(), NOW(), ${safeStringify(orderData)}::jsonb
       )
       ON CONFLICT (organization_id, order_id) DO UPDATE SET
         state = EXCLUDED.state,
         customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+        closed_at = EXCLUDED.closed_at,
+        source_name = EXCLUDED.source_name,
+        total_money_amount = EXCLUDED.total_money_amount,
+        total_money_currency = EXCLUDED.total_money_currency,
+        total_tax_money_amount = EXCLUDED.total_tax_money_amount,
+        total_tax_money_currency = EXCLUDED.total_tax_money_currency,
+        total_tip_money_amount = EXCLUDED.total_tip_money_amount,
+        total_tip_money_currency = EXCLUDED.total_tip_money_currency,
+        total_discount_money_amount = EXCLUDED.total_discount_money_amount,
+        total_discount_money_currency = EXCLUDED.total_discount_money_currency,
+        total_service_charge_money_amount = EXCLUDED.total_service_charge_money_amount,
+        total_service_charge_money_currency = EXCLUDED.total_service_charge_money_currency,
+        net_amount_due_money_amount = EXCLUDED.net_amount_due_money_amount,
+        net_amount_due_money_currency = EXCLUDED.net_amount_due_money_currency,
+        return_total_money_amount = EXCLUDED.return_total_money_amount,
+        return_total_money_currency = EXCLUDED.return_total_money_currency,
+        return_total_tax_money_amount = EXCLUDED.return_total_tax_money_amount,
+        return_total_tax_money_currency = EXCLUDED.return_total_tax_money_currency,
+        return_total_tip_money_amount = EXCLUDED.return_total_tip_money_amount,
+        return_total_tip_money_currency = EXCLUDED.return_total_tip_money_currency,
+        return_total_discount_money_amount = EXCLUDED.return_total_discount_money_amount,
+        return_total_discount_money_currency = EXCLUDED.return_total_discount_money_currency,
+        return_total_service_charge_money_amount = EXCLUDED.return_total_service_charge_money_amount,
+        return_total_service_charge_money_currency = EXCLUDED.return_total_service_charge_money_currency,
+        net_total_money_amount = EXCLUDED.net_total_money_amount,
+        net_total_money_currency = EXCLUDED.net_total_money_currency,
+        net_total_tax_money_amount = EXCLUDED.net_total_tax_money_amount,
+        net_total_tax_money_currency = EXCLUDED.net_total_tax_money_currency,
+        net_total_tip_money_amount = EXCLUDED.net_total_tip_money_amount,
+        net_total_tip_money_currency = EXCLUDED.net_total_tip_money_currency,
+        net_total_discount_money_amount = EXCLUDED.net_total_discount_money_amount,
+        net_total_discount_money_currency = EXCLUDED.net_total_discount_money_currency,
+        net_total_service_charge_money_amount = EXCLUDED.net_total_service_charge_money_amount,
+        net_total_service_charge_money_currency = EXCLUDED.net_total_service_charge_money_currency,
         updated_at = NOW(),
         raw_json = EXCLUDED.raw_json
     `
