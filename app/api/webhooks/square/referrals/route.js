@@ -2,6 +2,7 @@ const prisma = require('../../../../../lib/prisma-client')
 const { Prisma } = require('@prisma/client')
 const crypto = require('crypto')
 const QRCode = require('qrcode')
+const { saveApplicationLog } = require('../../../../../lib/workflows/application-log-queue')
 const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
 const { sendReferralCodeSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
@@ -113,11 +114,17 @@ const DELIVERY_CHANNELS = {
 // Helper: Resolve organization_id from square_merchant_id
 // ============================================================================
 async function resolveOrganizationId(squareMerchantId) {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:116',message:'resolveOrganizationId called',data:{squareMerchantId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+  // #endregion
   if (!squareMerchantId) {
     return null
   }
   
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:122',message:'querying organizations',data:{squareMerchantId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     const org = await prisma.$queryRaw`
       SELECT id FROM organizations 
       WHERE square_merchant_id = ${squareMerchantId}
@@ -125,12 +132,18 @@ async function resolveOrganizationId(squareMerchantId) {
     `
     
     if (org && org.length > 0) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:130',message:'organization found',data:{orgId:org[0].id},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
       return org[0].id
     }
     
     console.warn(`⚠️ Organization not found for square_merchant_id: ${squareMerchantId}`)
     return null
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:138',message:'error in resolveOrganizationId',data:{error:error.message,stack:error.stack},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     console.error(`❌ Error resolving organization_id: ${error.message}`)
     return null
   }
@@ -217,12 +230,18 @@ async function fetchAndUpdateLocationFromSquare(squareLocationId) {
 // Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
 // ============================================================================
 async function resolveOrganizationIdFromLocationId(squareLocationId) {
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:232',message:'resolveOrganizationIdFromLocationId called',data:{squareLocationId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+  // #endregion
   if (!squareLocationId) {
     return null
   }
   
   try {
     // STEP 1: Fast database lookup (most common case)
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:240',message:'querying locations',data:{squareLocationId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     const location = await prisma.$queryRaw`
       SELECT organization_id, square_merchant_id
       FROM locations
@@ -235,6 +254,9 @@ async function resolveOrganizationIdFromLocationId(squareLocationId) {
       
       // If we have organization_id, return it immediately (fastest path)
       if (loc.organization_id) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:252',message:'location found with orgId',data:{orgId:loc.organization_id},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+        // #endregion
         return loc.organization_id
       }
       
@@ -277,6 +299,9 @@ async function resolveOrganizationIdFromLocationId(squareLocationId) {
     
     return null
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:297',message:'error in resolveOrganizationIdFromLocationId',data:{error:error.message,stack:error.stack},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     console.error(`❌ Error resolving organization_id from location_id: ${error.message}`)
     return null
   }
@@ -861,6 +886,14 @@ async function findReferrerByCode(referralCode, organizationId) {
     console.log(`   🔍 Looking up referral code in database: "${normalizedCode}" (original: "${referralCode}")`)
     console.log(`   🏢 Organization ID: ${organizationId}`)
     
+    await saveApplicationLog(prisma, {
+      organization_id: organizationId,
+      log_type: 'REFERRAL_LOOKUP',
+      log_id: `lookup-${normalizedCode}-${Date.now()}`,
+      status: 'processing',
+      payload: { referralCode, normalizedCode, organizationId }
+    })
+    
     // Try exact match first in referral_profiles (case-insensitive)
     let referralProfile = await prisma.referralProfile.findFirst({
       where: {
@@ -885,6 +918,20 @@ async function findReferrerByCode(referralCode, organizationId) {
     })
     
     if (referralProfile && referralProfile.customer) {
+      console.log(`   ✅ Found referrer in referral_profiles: ${referralProfile.customer.given_name} ${referralProfile.customer.family_name}`)
+      
+      await saveApplicationLog(prisma, {
+        organization_id: organizationId,
+        log_type: 'REFERRAL_LOOKUP',
+        log_id: `found-profile-${referralProfile.customer.square_customer_id}-${Date.now()}`,
+        status: 'completed',
+        payload: { 
+          source: 'referral_profiles',
+          customerId: referralProfile.customer.square_customer_id,
+          name: `${referralProfile.customer.given_name} ${referralProfile.customer.family_name}`
+        }
+      })
+
       return {
         square_customer_id: referralProfile.customer.square_customer_id,
         given_name: referralProfile.customer.given_name,
@@ -911,6 +958,15 @@ async function findReferrerByCode(referralCode, organizationId) {
       // CRITICAL: Lazy-create ReferralProfile if it doesn't exist to avoid FK violations in rewards
       try {
         console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id}...`)
+        
+        await saveApplicationLog(prisma, {
+          organization_id: organizationId,
+          log_type: 'REFERRAL_PROFILE_SYNC',
+          log_id: `sync-start-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'processing',
+          payload: { customerId: foundReferrer.square_customer_id, source: 'legacy_lookup' }
+        })
+
         await prisma.referralProfile.upsert({
           where: {
             organization_id_square_customer_id: {
@@ -934,8 +990,24 @@ async function findReferrerByCode(referralCode, organizationId) {
           }
         })
         console.log(`   ✅ ReferralProfile synced successfully`)
+        
+        await saveApplicationLog(prisma, {
+          organization_id: organizationId,
+          log_type: 'REFERRAL_PROFILE_SYNC',
+          log_id: `sync-success-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'completed',
+          payload: { customerId: foundReferrer.square_customer_id, status: 'synced' }
+        })
       } catch (syncError) {
         console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
+        
+        await saveApplicationLog(prisma, {
+          organization_id: organizationId,
+          log_type: 'REFERRAL_PROFILE_SYNC',
+          log_id: `sync-error-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'error',
+          payload: { customerId: foundReferrer.square_customer_id, error: syncError.message }
+        })
         // Continue anyway, but this might cause FK errors later
       }
       
@@ -989,6 +1061,15 @@ async function findReferrerByCode(referralCode, organizationId) {
     }
     
     console.log(`   ❌ No referrer found with code "${referralCode}" or "${normalizedCode}"`)
+    
+    await saveApplicationLog(prisma, {
+      organization_id: organizationId,
+      log_type: 'REFERRAL_LOOKUP',
+      log_id: `not-found-${normalizedCode}-${Date.now()}`,
+      status: 'completed',
+      payload: { referralCode, normalizedCode, found: false }
+    })
+
     return null
   } catch (error) {
     console.error(`Error finding referrer by code ${referralCode}:`, error.message)
@@ -6244,6 +6325,10 @@ export async function POST(request) {
       // Extract merchant_id from webhook event
       const merchantId = webhookData.merchant_id || webhookData.merchantId || null
       
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:6250',message:'order event received',data:{type:webhookData.type,merchantId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
+
       // Resolve organization_id from merchant_id
       let organizationId = null
       if (merchantId) {
@@ -6265,6 +6350,10 @@ export async function POST(request) {
           orderData?.locationId ||
           null
           
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'referrals/route.js:6274',message:'falling back to locationId',data:{locationId},timestamp:Date.now(),runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
+        // #endregion
+
         if (locationId) {
           console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
           organizationId = await resolveOrganizationIdFromLocationId(locationId)
