@@ -139,3 +139,4 @@ A: Yes, the table is additive only. Old queries still work.
 
 Next: Run the 3 steps above in production!
 
+

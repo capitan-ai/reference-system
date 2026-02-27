@@ -434,8 +434,6 @@ model Organization {
   admin_analytics_daily   AdminAnalyticsDaily[]
   application_logs        ApplicationLog[]
   bookings                Booking[]
-  catalog_items           catalog_items[]
-  catalog_variations      catalog_variations[]
   customer_analytics      CustomerAnalytics[]
   gift_cards              GiftCard[]
   locations               Location[]
@@ -449,6 +447,7 @@ model Organization {
   service_variations      ServiceVariation[]
   square_existing_clients SquareExistingClient[]
   team_members            TeamMember[]
+  training_records        TrainingRecord[]
   user_roles              UserRole[]
   webhook_jobs            WebhookJob[]
 
@@ -670,24 +669,25 @@ model BookingSegment {
 }
 
 model Order {
-  location_id      String?      @db.Uuid
+  location_id      String?          @db.Uuid
   customer_id      String?
   state            String?
   version          Int?
   reference_id     String?
-  created_at       DateTime     @default(now())
-  updated_at       DateTime     @updatedAt
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @updatedAt
   team_member_id   String?
   order_id         String
-  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  organization_id  String       @db.Uuid
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id  String           @db.Uuid
   raw_json         Json?
-  booking_id       String?      @db.Uuid
-  technician_id    String?      @db.Uuid
-  administrator_id String?      @db.Uuid
-  booking          Booking?     @relation(fields: [booking_id], references: [id])
-  location         Location?    @relation(fields: [location_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
-  organization     Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  booking_id       String?          @db.Uuid
+  technician_id    String?          @db.Uuid
+  administrator_id String?          @db.Uuid
+  booking          Booking?         @relation(fields: [booking_id], references: [id])
+  location         Location?        @relation(fields: [location_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  organization     Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  training_records TrainingRecord[]
 
   @@unique([organization_id, order_id], map: "orders_organization_order_id_unique")
   @@index([location_id])
@@ -1423,47 +1423,24 @@ model verified_phone_sessions {
   @@schema("public")
 }
 
-model catalog_items {
-  id                       String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  square_item_id           String               @unique
-  name                     String
-  description              String?
-  product_type             String?
-  abbreviation             String?
-  label_color              String?
-  is_deleted               Boolean?             @default(false)
-  created_at               DateTime?            @default(now()) @db.Timestamptz(6)
-  updated_at               DateTime?            @default(now()) @db.Timestamptz(6)
-  organization_id          String               @db.Uuid
-  present_at_all_locations Boolean?             @default(true)
-  present_at_location_ids  String[]             @default([])
-  organizations            Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  catalog_variations       catalog_variations[]
+model TrainingRecord {
+  id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String       @db.Uuid
+  square_customer_id String?
+  order_id           String       @db.Uuid
+  square_order_id    String
+  item_name          String
+  amount_cents       Int
+  currency           String       @default("USD")
+  order_status       String
+  created_at         DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+  order              Order        @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  organization       Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
 
-  @@index([organization_id], map: "idx_catalog_items_organization_id")
-  @@schema("public")
-}
-
-model catalog_variations {
-  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  square_variation_id   String        @unique
-  item_id               String        @db.Uuid
-  name                  String
-  pricing_type          String?
-  price_amount          Int?
-  price_currency        String?       @default("USD")
-  service_duration      BigInt?
-  available_for_booking Boolean?      @default(true)
-  team_member_ids       String[]      @default([])
-  is_deleted            Boolean?      @default(false)
-  created_at            DateTime?     @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime?     @default(now()) @db.Timestamptz(6)
-  organization_id       String        @db.Uuid
-  catalog_items         catalog_items @relation(fields: [item_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  organizations         Organization  @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@index([item_id], map: "idx_catalog_variations_item_id")
-  @@index([organization_id], map: "idx_catalog_variations_organization_id")
+  @@index([square_customer_id])
+  @@index([organization_id])
+  @@map("training_records")
   @@schema("public")
 }
 

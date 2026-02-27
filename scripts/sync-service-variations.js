@@ -126,3 +126,4 @@ syncAll()
     await prisma.$disconnect()
   })
 
+

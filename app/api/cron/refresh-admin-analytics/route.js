@@ -142,7 +142,7 @@ export async function GET(request) {
         GROUP BY 1, 2, 3, 4
       ),
 
-      -- Visits Aggregation (Creator-based)
+      -- Visits Aggregation (Creator-based, by start_at date)
       visits_agg AS (
         SELECT
           b.organization_id,
@@ -153,6 +153,8 @@ export async function GET(request) {
           COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted,
           COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') as appointments_no_show,
           COUNT(*) FILTER (WHERE b.status LIKE 'CANCELLED%') as appointments_cancelled,
+          -- Count bookings created ON THIS DAY (start_at) for backward compatibility if needed, 
+          -- but the primary source will be created_agg
           0 as bookings_created_count
         FROM bookings b
         CROSS JOIN date_range dr
@@ -164,13 +166,16 @@ export async function GET(request) {
       ),
 
       -- NEW: Bookings Created Aggregation (by created_at date)
+      -- This ensures that if a booking is created today for next month, 
+      -- it shows up in today's performance stats.
       created_agg AS (
         SELECT
           b.organization_id,
           COALESCE(b.administrator_id, tm_sys.id) as team_member_id,
           b.location_id,
           DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
-          COUNT(*) as bookings_created_count
+          COUNT(*) as bookings_created_count,
+          COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted_created_count
         FROM bookings b
         CROSS JOIN date_range dr
         LEFT JOIN team_members tm_sys 
@@ -179,7 +184,6 @@ export async function GET(request) {
         WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
           AND (b.creator_type = 'TEAM_MEMBER' 
                OR (b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER')
-               -- Fallback: if creator_id exists in team_members, count it
                OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id')
           )
         GROUP BY 1, 2, 3, 4
@@ -209,8 +213,10 @@ export async function GET(request) {
       SELECT
         k.organization_id, k.team_member_id, k.location_id, k.date_pacific,
         tm.given_name, tm.family_name, tm.role::text,
-        COALESCE(v.appointments_total, 0),
-        COALESCE(v.appointments_accepted, 0),
+        -- Use creation-based counts for appointments_total and accepted
+        -- to correctly reflect admin productivity on the day they worked
+        COALESCE(c.bookings_created_count, 0) as appointments_total,
+        COALESCE(c.appointments_accepted_created_count, 0) as appointments_accepted,
         COALESCE(v.appointments_no_show, 0),
         COALESCE(v.appointments_cancelled, 0),
         COALESCE(v.late_cancellations, 0),

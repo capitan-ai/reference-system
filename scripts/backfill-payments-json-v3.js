@@ -5,6 +5,7 @@ const prisma = new PrismaClient();
 
 async function main() {
   const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN?.trim();
+  const CONCURRENCY = 10; // Number of parallel requests
   
   if (!SQUARE_ACCESS_TOKEN) {
     console.error('❌ SQUARE_ACCESS_TOKEN is missing in .env');
@@ -12,7 +13,7 @@ async function main() {
   }
 
   try {
-    console.log('--- Starting Payment raw_json Backfill ---');
+    console.log('--- Starting PARALLEL Payment raw_json Backfill ---');
     
     // Find payments without raw_json
     const payments = await prisma.$queryRaw`
@@ -31,11 +32,9 @@ async function main() {
 
     let successCount = 0;
     let failCount = 0;
+    let processedCount = 0;
 
-    for (let i = 0; i < payments.length; i++) {
-      const { payment_id } = payments[i];
-      console.log(`[${i + 1}/${payments.length}] Fetching Square data for payment: ${payment_id}`);
-
+    async function processPayment(payment_id) {
       try {
         const response = await fetch(`https://connect.squareup.com/v2/payments/${payment_id}`, {
           headers: {
@@ -56,7 +55,6 @@ async function main() {
           `;
           
           successCount++;
-          console.log(`  ✅ Updated ${payment_id}`);
         } else {
           const errorData = await response.json();
           console.error(`  ❌ Failed to fetch ${payment_id}:`, JSON.stringify(errorData));
@@ -65,11 +63,23 @@ async function main() {
       } catch (err) {
         console.error(`  ❌ Error processing ${payment_id}:`, err.message);
         failCount++;
+      } finally {
+        processedCount++;
+        if (processedCount % 100 === 0) {
+          console.log(`Progress: ${processedCount}/${payments.length} (${successCount} success, ${failCount} fail)`);
+        }
       }
+    }
 
-      // Rate limiting: Square allows 5 requests per second for many endpoints.
-      // We'll wait 250ms between requests to be safe.
-      await new Promise(resolve => setTimeout(resolve, 250));
+    // Process in chunks of CONCURRENCY
+    for (let i = 0; i < payments.length; i += CONCURRENCY) {
+      const chunk = payments.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map(p => processPayment(p.payment_id)));
+      
+      // Small delay between chunks to stay within rate limits (5 req/sec is the official limit for some endpoints, 
+      // but often it's higher. 10 at a time with 500ms delay = 20 req/sec, which might be too high.
+      // Let's do 10 at a time with 1000ms delay = 10 req/sec).
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
     console.log('\n--- Backfill Summary ---');
@@ -85,4 +95,3 @@ async function main() {
 }
 
 main();
-

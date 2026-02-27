@@ -4086,12 +4086,10 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
     }
 
       // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
-      let organizationId = null
+      let organizationId = runContext?.organizationId || null
+      
       // Extract merchantId from webhook data at this scope so it's available for saveBookingToDatabase
       const merchantId = bookingData.merchant_id || bookingData.merchantId || null
-      
-      // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
-      let organizationId = runContext?.organizationId || null
       
       // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
       if (!organizationId && merchantId) {

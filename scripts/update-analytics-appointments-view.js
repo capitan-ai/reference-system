@@ -88,3 +88,4 @@ GROUP BY bd.organization_id, bd.location_id, l.name, bd.booking_date_pacific;
 
 updateAnalyticsView()
 
+

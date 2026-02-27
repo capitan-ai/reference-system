@@ -22,7 +22,9 @@ async function main() {
           COUNT(*) - COUNT(raw_json) as payments_without_json
         FROM payments;
       `;
-      console.log('Payment Stats:', JSON.stringify(stats, null, 2));
+      console.log('Payment Stats:', JSON.stringify(stats, (key, value) =>
+        typeof value === 'bigint' ? value.toString() : value
+      , 2));
       
       if (stats[0].payments_with_json > 0) {
         console.log('\nSample raw_json content:');
