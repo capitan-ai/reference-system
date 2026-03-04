@@ -2468,7 +2468,6 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           updated_at = EXCLUDED.updated_at,
           raw_json = EXCLUDED.raw_json
         RETURNING id, order_id, organization_id, state
-      `        RETURNING id, order_id, organization_id, state
       `
       
       if (upsertedOrder && upsertedOrder.length > 0) {
@@ -2549,35 +2548,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         const newOrderUuid = crypto.randomUUID()
         const createdAt = order.created_at ? new Date(order.created_at) : new Date()
         const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
-        const closedAt = order.closed_at ? new Date(order.closed_at) : null
-        const sourceName = order.source?.name || null
 
-        // Extract totals and net amounts
-        const totalMoney = order.total_money || order.totalMoney || {}
-        const totalTaxMoney = order.total_tax_money || order.totalTaxMoney || {}
-        const totalTipMoney = order.total_tip_money || order.totalTipMoney || {}
-        const totalDiscountMoney = order.total_discount_money || order.totalDiscountMoney || {}
-        const totalServiceChargeMoney = order.total_service_charge_money || order.totalServiceChargeMoney || {}
-        const netAmountDueMoney = order.net_amount_due_money || order.netAmountDueMoney || {}
-
-        // Extract return amounts
-        const returnAmounts = order.return_amounts || order.returnAmounts || {}
-        const returnTotalMoney = returnAmounts.total_money || returnAmounts.totalMoney || {}
-        const returnTotalTaxMoney = returnAmounts.tax_money || returnAmounts.taxMoney || {}
-        const returnTotalTipMoney = returnAmounts.tip_money || returnAmounts.tipMoney || {}
-        const returnTotalDiscountMoney = returnAmounts.discount_money || returnAmounts.discountMoney || {}
-        const returnTotalServiceChargeMoney = returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}
-
-        // Extract net amounts (full structure)
-        const netAmounts = order.net_amounts || order.netAmounts || {}
-        const netTotalMoney = netAmounts.total_money || netAmounts.totalMoney || {}
-        const netTotalTaxMoney = netAmounts.tax_money || netAmounts.taxMoney || {}
-        const netTotalTipMoney = netAmounts.tip_money || netAmounts.tipMoney || {}
-      const netTotalDiscountMoney = netAmounts.discount_money || netAmounts.discountMoney || {}
-      const netTotalServiceChargeMoney = netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}
-
-          await prisma.$executeRaw`
-            await prisma.$executeRaw`
+        await prisma.$executeRaw`
             INSERT INTO orders (
               id,
               organization_id,
@@ -2611,7 +2583,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
               updated_at = EXCLUDED.updated_at,
               raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
-          `        orderUuid = newOrderUuid
+          `
+        orderUuid = newOrderUuid
         console.log(`✅ Successfully created order with UUID: ${orderUuid}`)
       } catch (retryError) {
         console.error(`❌ Failed to create order on retry:`, retryError.message)
