@@ -562,9 +562,9 @@ export async function POST(request) {
         } catch (bookingError) {
           console.error(`❌ Error processing booking.updated webhook:`, bookingError.message)
           console.error(`   Stack:`, bookingError.stack)
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:253',message:'booking.updated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:bookingError.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:253',message:'booking.updated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:typeof bookingError.stack === 'string' ? bookingError.stack.substring(0,200) : null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
           // Re-throw to return 500 so Square will retry
           // Re-throw a clean error without BigInt values
           const cleanBookingError = new Error(bookingError?.message || 'Booking webhook processing failed')
@@ -614,7 +614,7 @@ export async function POST(request) {
       } catch (paymentError) {
         safeLogError(`❌ Error processing payment webhook:`, paymentError)
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:135',message:'payment webhook error',data:{error:paymentError.message,paymentId:paymentData?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:135',message:'payment webhook error',data:{error:paymentError.message,paymentId:paymentData?.id,stack:typeof paymentError.stack === 'string' ? paymentError.stack.substring(0,200) : null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
           // #endregion
           // Re-throw to return 500 so Square will retry
           // Re-throw a clean error without BigInt values
@@ -2150,10 +2150,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     const customerId = order.customer_id || order.customerId || null
     const lineItems = order.line_items || order.lineItems || []
     // Use merchant_id from order API response, fallback to webhook merchant_id
-    const merchantId = order.merchant_id || order.merchantId || webhookMerchantId || null
+    // Ensure merchantId is a string before calling substring
+    const rawMerchantId = order.merchant_id || order.merchantId || webhookMerchantId || null
+    const merchantId = typeof rawMerchantId === 'string' ? rawMerchantId : null
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:locationId?.substring(0,16)||'missing',orderLocationId:orderLocationId?.substring(0,16)||'missing',finalLocationId:finalLocationId?.substring(0,16)||'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:typeof locationId === 'string' ? locationId.substring(0,16) : 'missing',orderLocationId:typeof orderLocationId === 'string' ? orderLocationId.substring(0,16) : 'missing',finalLocationId:typeof finalLocationId === 'string' ? finalLocationId.substring(0,16) : 'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
     // #endregion
 
     // Resolve organization_id - For order.created/updated, merchant_id is ALWAYS present
@@ -2170,9 +2172,9 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (org && org.length > 0) {
           organizationId = org[0].id
-          console.log(`✅ Resolved organization_id from merchant_id: ${organizationId.substring(0, 8)}...`)
+          console.log(`✅ Resolved organization_id from merchant_id: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
         } else {
-          console.warn(`⚠️ No organization found for merchant_id: ${merchantId?.substring(0, 16)}...`)
+          console.warn(`⚠️ No organization found for merchant_id: ${typeof merchantId === 'string' ? merchantId.substring(0, 16) : 'unknown'}...`)
         }
       } catch (err) {
         console.error(`❌ Error resolving organization_id from merchant_id: ${err.message}`)
@@ -2185,7 +2187,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       console.log(`📍 Fallback: Resolving organization_id from location_id: ${finalLocationId}`)
       organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
       if (organizationId) {
-        console.log(`✅ Resolved organization_id from location (fallback): ${organizationId.substring(0, 8)}...`)
+        console.log(`✅ Resolved organization_id from location (fallback): ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
       }
     }
 
@@ -2208,7 +2210,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (existingOrder && existingOrder.length > 0) {
           organizationId = existingOrder[0].organization_id
-          console.log(`✅ Resolved organization_id from existing order: ${organizationId.substring(0, 8)}...`)
+          console.log(`✅ Resolved organization_id from existing order: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
         }
       } catch (err) {
         console.warn(`⚠️ Could not resolve organization_id from existing order: ${err.message}`)
@@ -2226,7 +2228,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (defaultOrg && defaultOrg.length > 0) {
           organizationId = defaultOrg[0].id
-          console.warn(`⚠️ Using fallback organization_id: ${organizationId.substring(0, 8)}... (order: ${orderId})`)
+          console.warn(`⚠️ Using fallback organization_id: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}... (order: ${orderId})`)
         }
       } catch (err) {
         console.error(`❌ Error getting fallback organization: ${err.message}`)
