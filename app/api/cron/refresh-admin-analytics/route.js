@@ -153,9 +153,10 @@ export async function GET(request) {
           COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted,
           COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') as appointments_no_show,
           COUNT(*) FILTER (WHERE b.status LIKE 'CANCELLED%') as appointments_cancelled,
-          -- Count bookings created ON THIS DAY (start_at) for backward compatibility if needed, 
-          -- but the primary source will be created_agg
-          0 as bookings_created_count
+          COUNT(*) FILTER (
+            WHERE b.status LIKE 'CANCELLED%' 
+            AND (b.start_at - b.updated_at) < interval '24 hours'
+          ) as late_cancellations
         FROM bookings b
         CROSS JOIN date_range dr
         LEFT JOIN team_members tm_sys 
