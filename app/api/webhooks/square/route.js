@@ -2432,7 +2432,6 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
 
       // Extract totals and net amounts
       const totalMoney = order.total_money || order.totalMoney || {}
-      const totalMoney = order.total_money || order.totalMoney || {}
 
       const upsertedOrder = await prisma.$queryRaw`
         INSERT INTO orders (
