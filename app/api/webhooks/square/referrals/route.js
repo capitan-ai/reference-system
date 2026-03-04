@@ -4086,7 +4086,7 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
     }
 
       // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
-      let organizationId = runContext?.organizationId || null
+      let organizationId = null
       
       // Extract merchantId from webhook data at this scope so it's available for saveBookingToDatabase
       const merchantId = bookingData.merchant_id || bookingData.merchantId || null
