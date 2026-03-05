@@ -1,8 +1,11 @@
 import crypto from 'crypto'
+import { createRequire } from 'module'
 import { Prisma } from '@prisma/client'
 import prisma from '../../../../lib/prisma-client'
 import locationResolver from '../../../../lib/location-resolver'
 
+const require = createRequire(import.meta.url)
+const { logInfo, logWarn, logError, logDebug } = require('../../../../lib/observability/logger')
 const { resolveLocationUuidForSquareLocationId } = locationResolver
 
 // Helper to safely stringify objects with BigInt values
@@ -75,8 +78,8 @@ const {
  * @param {string} squareOrderId - Square order ID
  * @returns {Promise<{bookingId: string|null, confidence: string, source: string}>}
  */
-async function deriveBookingFromSquareApi(squareOrderId) {
-  console.log(`🔍 [DERIVE-BOOKING] Starting Square API-based booking derivation for order ${squareOrderId}`)
+async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
+  logInfo('derive_booking.start', { logId: correlationId, squareOrderId })
   
   try {
     // Step 1: Get full order from Square API
@@ -85,7 +88,7 @@ async function deriveBookingFromSquareApi(squareOrderId) {
     const order = orderResponse.result?.order
     
     if (!order) {
-      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} not found in Square API`)
+      logWarn('derive_booking.order_not_found', { logId: correlationId, squareOrderId })
       return { bookingId: null, confidence: 'none', source: 'order_not_found' }
     }
     
@@ -94,11 +97,13 @@ async function deriveBookingFromSquareApi(squareOrderId) {
     const orderCreatedAt = order.createdAt ? new Date(order.createdAt) : new Date()
     const lineItems = order.lineItems || []
     
-    console.log(`📋 [DERIVE-BOOKING] Order details:`)
-    console.log(`   Customer ID: ${customerId}`)
-    console.log(`   Location ID: ${locationId}`)
-    console.log(`   Order Created: ${orderCreatedAt.toISOString()}`)
-    console.log(`   Line Items: ${lineItems.length}`)
+    logDebug('derive_booking.order_details', {
+      logId: correlationId,
+      customerId,
+      locationId,
+      orderCreatedAt: orderCreatedAt.toISOString(),
+      lineItemsCount: lineItems.length
+    })
     
     if (!customerId) {
       console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no customer_id`)
@@ -432,50 +437,48 @@ export const dynamic = 'force-dynamic'
 export async function POST(request) {
   try {
     const rawBody = await request.text()
-    const signatureHeader = request.headers.get('x-square-hmacsha256-signature') ||
-                           request.headers.get('x-square-signature')
+    const signatureHeader = request.headers.get("x-square-hmacsha256-signature") ||
+                           request.headers.get("x-square-signature")
 
-    console.log('🔔 Webhook received:', {
-      hasSignature: !!signatureHeader,
-      contentType: request.headers.get('content-type')
-    })
-
-    const isTestMode = signatureHeader === 'test-signature-mock'
+    const isTestMode = signatureHeader === "test-signature-mock"
     
     if (!signatureHeader) {
-      console.warn('Missing webhook signature')
-      return new Response(JSON.stringify({ error: 'Missing signature' }), { 
+      logWarn("webhook.missing_signature")
+      return new Response(JSON.stringify({ error: "Missing signature" }), { 
         status: 401,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { "Content-Type": "application/json" }
       })
     }
 
     if (!isTestMode) {
       const webhookSecret = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY
       if (!webhookSecret) {
-        console.error('Missing SQUARE_WEBHOOK_SIGNATURE_KEY environment variable')
-        return new Response(JSON.stringify({ error: 'Webhook secret not configured' }), { 
+        logError("webhook.missing_secret_config")
+        return new Response(JSON.stringify({ error: "Webhook secret not configured" }), { 
           status: 500,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { "Content-Type": "application/json" }
         })
       }
 
       if (!verifySquareSignature(rawBody, signatureHeader, webhookSecret)) {
-        console.error('Invalid Square webhook signature')
-        return new Response(JSON.stringify({ error: 'Invalid signature' }), { 
+        logError("webhook.invalid_signature")
+        return new Response(JSON.stringify({ error: "Invalid signature" }), { 
           status: 401,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { "Content-Type": "application/json" }
         })
       }
-
-      console.log('✅ Webhook signature verified')
-    } else {
-      console.log('🧪 Test mode: processing webhook...')
     }
 
     // Парсим JSON
     const eventData = JSON.parse(rawBody)
-    console.log('📝 Raw event data:', safeStringify(eventData))
+    const correlationId = eventData.event_id || `webhook-${crypto.randomUUID()}`
+    
+    logInfo("webhook.received", {
+      logId: correlationId,
+      eventType: eventData.type,
+      eventId: eventData.event_id,
+      isTestMode
+    })
 
     // Save webhook event to application_logs (non-blocking)
     let webhookOrganizationId = null
@@ -513,140 +516,176 @@ export async function POST(request) {
       // Save to application_logs (non-blocking, don't fail webhook if this fails)
       if (eventData.event_id) {
         // eslint-disable-next-line global-require
-        const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
+        const { saveApplicationLog } = require("../../../../lib/workflows/application-log-queue")
         
         await saveApplicationLog(prisma, {
-          logType: 'webhook',
+          logType: "webhook",
           logId: eventData.event_id,
           logCreatedAt: eventData.created_at ? new Date(eventData.created_at) : new Date(),
           payload: eventData, // COMPLETE webhook payload
           organizationId: webhookOrganizationId,
-          status: 'received',
+          status: "received",
           maxAttempts: 0
         }).catch((logError) => {
-          console.warn('⚠️ Failed to save webhook to application_logs:', logError.message)
+          logWarn("webhook.log_save_failed", { 
+            logId: correlationId, 
+            error: logError.message,
+            organizationId: webhookOrganizationId
+          })
         })
       }
     } catch (logError) {
       // Don't fail webhook if logging fails
-      console.warn('⚠️ Error saving webhook to application_logs:', logError.message)
+      logWarn("webhook.org_resolution_failed", { 
+        logId: correlationId, 
+        error: logError.message 
+      })
     }
 
     // Простая обработка событий
-    if (eventData.type === 'booking.created') {
-      console.log('📅 Booking created event received')
-      console.log('📊 Data:', eventData.data)
-    } else if (eventData.type === 'booking.updated') {
-      console.log('📅 Booking updated event received')
+    if (eventData.type === "booking.created") {
+      logInfo("booking.created.received", { 
+        logId: correlationId, 
+        organizationId: webhookOrganizationId
+      })
+    } else if (eventData.type === "booking.updated") {
+      logInfo("booking.updated.received", { 
+        logId: correlationId, 
+        organizationId: webhookOrganizationId 
+      })
       const bookingData = eventData.data?.object?.booking
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:238',message:'booking.updated webhook received',data:{hasBookingData:!!bookingData,bookingId:bookingData?.id||bookingData?.bookingId||'missing',version:bookingData?.version||'missing',status:bookingData?.status||'missing',eventId:eventData.event_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
+
       if (bookingData) {
         try {
           // Import processBookingUpdated from referrals route
-          const referralsRoute = await import('./referrals/route.js')
+          const referralsRoute = await import("./referrals/route.js")
           if (referralsRoute.processBookingUpdated) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:245',message:'calling processBookingUpdated',data:{bookingId:bookingData.id||bookingData.bookingId,version:bookingData.version,status:bookingData.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
+            logInfo("booking.updated.processing", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              bookingId: bookingData.id || bookingData.bookingId
+            })
             await referralsRoute.processBookingUpdated(bookingData, eventData.event_id, eventData.created_at)
-            console.log(`✅ Booking updated webhook processed successfully`)
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:247',message:'processBookingUpdated completed',data:{bookingId:bookingData.id||bookingData.bookingId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
+            logInfo("booking.updated.success", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              bookingId: bookingData.id || bookingData.bookingId
+            })
           } else {
-            console.error(`❌ processBookingUpdated not found in referrals route`)
-            throw new Error('processBookingUpdated function not available')
+            logError("booking.updated.handler_missing", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId
+            })
+            throw new Error("processBookingUpdated function not available")
           }
         } catch (bookingError) {
-          console.error(`❌ Error processing booking.updated webhook:`, bookingError.message)
-          console.error(`   Stack:`, bookingError.stack)
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:253',message:'booking.updated error',data:{error:bookingError.message,bookingId:bookingData?.id||bookingData?.bookingId,stack:typeof bookingError.stack === 'string' ? bookingError.stack.substring(0,200) : null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
+          logError("booking.updated.error", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            error: bookingError.message,
+            bookingId: bookingData?.id || bookingData?.bookingId
+          })
           // Re-throw to return 500 so Square will retry
-          // Re-throw a clean error without BigInt values
-          const cleanBookingError = new Error(bookingError?.message || 'Booking webhook processing failed')
-          cleanBookingError.name = bookingError?.name || 'BookingWebhookError'
+          const cleanBookingError = new Error(bookingError?.message || "Booking webhook processing failed")
+          cleanBookingError.name = bookingError?.name || "BookingWebhookError"
           cleanBookingError.code = bookingError?.code
           throw cleanBookingError
         }
       } else {
-        console.warn(`⚠️ Booking updated webhook received but booking data is missing`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:259',message:'booking data missing',data:{eventType:eventData.type,hasData:!!eventData.data,hasObject:!!eventData.data?.object},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
+        logWarn("booking.updated.missing_data", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId
+        })
       }
-    } else if (eventData.type === 'payment.created' || eventData.type === 'payment.updated') {
-      console.log(`💳 Payment ${eventData.type === 'payment.created' ? 'created' : 'updated'} event received`)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:111',message:'payment webhook received',data:{eventType:eventData.type,eventId:eventData.event_id,hasPaymentData:!!eventData.data?.object?.payment},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
+    } else if (eventData.type === "payment.created" || eventData.type === "payment.updated") {
+      logInfo("payment.received", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })
       
       const paymentData = eventData.data?.object?.payment
       if (paymentData) {
         try {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:116',message:'calling savePaymentToDatabase',data:{paymentId:paymentData.id,orderId:paymentData.order_id||paymentData.orderId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-          // #endregion
+          logInfo("payment.processing", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            paymentId: paymentData.id
+          })
           
           // Save payment to database in real-time
-          await savePaymentToDatabase(paymentData, eventData.type, eventData.event_id, eventData.created_at)
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:120',message:'savePaymentToDatabase completed',data:{paymentId:paymentData.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-          // #endregion
+          await savePaymentToDatabase(paymentData, eventData.type, eventData.event_id, eventData.created_at, correlationId)          
+          logInfo("payment.saved", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            paymentId: paymentData.id
+          })
           
           const orderId = paymentData.order_id || paymentData.orderId
           const paymentId = paymentData.id
           if (orderId) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:122',message:'calling reconcileBookingLinks',data:{orderId,paymentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-            // #endregion
+            logInfo("payment.reconciling", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              orderId,
+              paymentId
+            })
             
             // Reconcile booking links (try to find and populate booking_id)
             await reconcileBookingLinks(orderId, paymentId)
-            
-            // Update order_line_items with technician_id and administrator_id when payment arrives
+            await reconcileBookingLinks(orderId, paymentId, correlationId)            // Update order_line_items with technician_id and administrator_id when payment arrives
             await updateOrderLineItemsWithTechnician(orderId)
           }
-      } catch (paymentError) {
-        safeLogError(`❌ Error processing payment webhook:`, paymentError)
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:135',message:'payment webhook error',data:{error:paymentError.message,paymentId:paymentData?.id,stack:typeof paymentError.stack === 'string' ? paymentError.stack.substring(0,200) : null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-          // #endregion
+            await updateOrderLineItemsWithTechnician(orderId, correlationId)          logError("payment.error", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            error: paymentError.message,
+            paymentId: paymentData?.id
+          })
           // Re-throw to return 500 so Square will retry
-          // Re-throw a clean error without BigInt values
-          const cleanPaymentError = new Error(paymentError?.message || 'Payment webhook processing failed')
-          cleanPaymentError.name = paymentError?.name || 'PaymentWebhookError'
+          const cleanPaymentError = new Error(paymentError?.message || "Payment webhook processing failed")
+          cleanPaymentError.name = paymentError?.name || "PaymentWebhookError"
           cleanPaymentError.code = paymentError?.code
           throw cleanPaymentError
         }
       } else {
-        console.warn(`⚠️ Payment webhook received but payment data is missing`)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:140',message:'payment webhook missing payment data',data:{eventType:eventData.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
+        logWarn("payment.missing_data", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId,
+          eventType: eventData.type
+        })
       }
-      console.log('📊 Data:', eventData.data)
-    } else if (eventData.type === 'order.created' || eventData.type === 'order.updated') {
-      console.log(`📦 Order ${eventData.type === 'order.created' ? 'created' : 'updated'} event received`)
+    } else if (eventData.type === "order.created" || eventData.type === "order.updated") {
+      logInfo("order.received", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })
       try {
         // Pass merchant_id from webhook if available (for faster organization_id resolution)
-        await processOrderWebhook(eventData.data, eventData.type, eventData.merchant_id)
-        console.log(`✅ Order webhook processed successfully`)
+        await processOrderWebhook(eventData.data, eventData.type, eventData.merchant_id, correlationId)
+        logInfo("order.success", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId
+        })
       } catch (orderError) {
-        safeLogError(`❌ Error processing order webhook:`, orderError)
+        logError("order.error", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId,
+          error: orderError.message
+        })
         // Re-throw a clean error without BigInt values so Next.js can serialize it
-        const cleanError = new Error(orderError?.message || 'Order webhook processing failed')
-        cleanError.name = orderError?.name || 'OrderWebhookError'
+        const cleanError = new Error(orderError?.message || "Order webhook processing failed")
+        cleanError.name = orderError?.name || "OrderWebhookError"
         cleanError.code = orderError?.code
         throw cleanError
       }
     } else {
-      console.log('ℹ️ Unhandled event type:', eventData.type)
-      
+      logInfo("webhook.unhandled_type", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })      
       // Enqueue unhandled events for processing via webhook-jobs cron
       // These include: customer.created, gift_card.*, refund.*, team_member.created
       const queueableEventTypes = [
@@ -762,8 +801,7 @@ export async function POST(request) {
         `.catch(() => {}) // Silently fail
       } catch (updateError) {
         // Don't fail webhook if status update fails
-        console.warn('⚠️ Failed to update application_log status:', updateError.message)
-      }
+        logWarn("webhook.app_log_status_update_failed", { logId: correlationId, error: updateError.message })      }
     }
 
     return new Response(JSON.stringify(serializeBigInt({ 
@@ -790,8 +828,7 @@ export async function POST(request) {
       } catch (updateError) {
         // Don't fail if status update fails
         console.warn('⚠️ Failed to update application_log error status:', updateError.message)
-      }
-    }
+        logWarn("webhook.app_log_error_status_update_failed", { logId: correlationId, error: updateError.message })    }
     
     // Enqueue failed webhook for retry via cron
     if (eventData?.type && eventData?.event_id) {
@@ -813,14 +850,13 @@ export async function POST(request) {
         if (locationId) {
           console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from location_id: ${locationId}`)
           organizationId = await resolveOrganizationIdFromLocationId(locationId)
+          logDebug("webhook.error_handler.resolving_org_location", { logId: correlationId, locationId })
+          organizationId = await resolveOrganizationIdFromLocationId(locationId)
           if (organizationId) {
-            console.log(`✅ [ERROR HANDLER] Resolved organization_id from location_id: ${organizationId}`)
+            logInfo("webhook.error_handler.org_resolved_location", { logId: correlationId, organizationId })
           } else {
-            console.warn(`⚠️ [ERROR HANDLER] Failed to resolve organization_id from location_id: ${locationId}`)
-          }
-        }
-        
-        // Strategy 2: Fallback to merchant_id if location_id resolution failed
+            logWarn("webhook.error_handler.org_resolve_failed_location", { logId: correlationId, locationId })
+          }        // Strategy 2: Fallback to merchant_id if location_id resolution failed
         if (!organizationId) {
           const merchantId = 
             eventData.merchant_id || 
@@ -832,14 +868,13 @@ export async function POST(request) {
             console.log(`🏢 [ERROR HANDLER] Attempting to resolve organization_id from merchant_id: ${merchantId}`)
             organizationId = await resolveOrganizationId(merchantId)
             if (organizationId) {
-              console.log(`✅ [ERROR HANDLER] Resolved organization_id from merchant_id: ${organizationId}`)
+            logDebug("webhook.error_handler.resolving_org_merchant", { logId: correlationId, merchantId })
+            organizationId = await resolveOrganizationId(merchantId)
+            if (organizationId) {
+              logInfo("webhook.error_handler.org_resolved_merchant", { logId: correlationId, organizationId })
             } else {
-              console.warn(`⚠️ [ERROR HANDLER] Failed to resolve organization_id from merchant_id: ${merchantId}`)
-            }
-          }
-        }
-        
-        // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
+              logWarn("webhook.error_handler.org_resolve_failed_merchant", { logId: correlationId, merchantId })
+            }        // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
         if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
           // Try nested location_id in order/booking/payment objects
           const nestedLocationId = 
@@ -854,16 +889,13 @@ export async function POST(request) {
             if (organizationId) {
               console.log(`✅ [ERROR HANDLER] Resolved organization_id from nested location_id: ${organizationId}`)
             }
-          }
-        }
+              logInfo("webhook.error_handler.org_resolved_nested", { logId: correlationId, organizationId })        }
         
         if (organizationId) {
           const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
           
-          await enqueueWebhookJob(prisma, {
-            eventType: eventData.type,
-            eventId: eventData.event_id,
-            eventCreatedAt: eventData.created_at,
+            logWarn("webhook.error_handler.enqueue_failed_no_org", { logId: correlationId, eventType: eventData.type })
+            logDebug("webhook.error_handler.payload_keys", { logId: correlationId, payloadKeys: Object.keys(payload) })            eventCreatedAt: eventData.created_at,
             payload: payload,
             organizationId: organizationId,
             error: error.message || String(error)
@@ -877,12 +909,10 @@ export async function POST(request) {
         }
       } catch (enqueueError) {
         console.error(`❌ Failed to enqueue webhook job:`, enqueueError.message)
-        // Continue to return 500 so Square retries
-      }
+          logInfo("webhook.error_handler.enqueued", { logId: correlationId, eventType: eventData.type, organizationId })      }
     }
     
-    // Return 500 so Square will retry the webhook
-    return new Response(JSON.stringify(serializeBigInt({ 
+          logError("webhook.error_handler.enqueue_error", { logId: correlationId, eventType: eventData.type, error: enqueueError.message })    return new Response(JSON.stringify(serializeBigInt({ 
       error: 'Processing failed',
       details: error instanceof Error ? error.message : 'Unknown error',
       eventType: eventData?.type || 'unknown'
@@ -897,7 +927,8 @@ export async function POST(request) {
  * Save payment from webhook to database
  * Uses the same transform logic as backfill-payments.js
  */
-export async function savePaymentToDatabase(paymentData, eventType, squareEventId = null, squareCreatedAt = null) {
+export async function savePaymentToDatabase(paymentData, eventType, squareEventId = null, squareCreatedAt = null, correlationId = null) {
+  logInfo('save_payment.start', { logId: correlationId, paymentId: paymentData?.id, eventType })
   try {
     // Helper to get value from either camelCase or snake_case (same as backfill script)
     const getValue = (obj, ...keys) => {
@@ -1640,7 +1671,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
  * 1. PRIMARY: Square API (deriveBookingFromSquareApi)
  * 2. FALLBACK: Database match by Customer + Location + Time
  */
-async function reconcileBookingLinks(orderId, paymentId = null) {
+async function reconcileBookingLinks(orderId, paymentId = null, correlationId = null) {
+  logInfo('reconcile.start', { logId: correlationId, orderId, paymentId })
   try {
     // Get order UUID and details
     const orderRecord = await prisma.$queryRaw`
@@ -1651,7 +1683,7 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     `
     
     if (!orderRecord || orderRecord.length === 0) {
-      console.log(`ℹ️ Order ${orderId} not found in database yet (might arrive later)`)
+      logInfo('reconcile.order_not_found', { logId: correlationId, orderId })
       return { bookingId: null, source: 'order_not_in_db', confidence: 'none' }
     }
     
@@ -1671,9 +1703,9 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
     // PRIMARY METHOD: Square API
     // ============================================================
     if (!bookingId && orderId) {
-      console.log(`🔄 [RECONCILE] Trying Square API for order ${orderId}...`)
+      logDebug('reconcile.trying_square_api', { logId: correlationId, orderId })
       
-      const squareResult = await deriveBookingFromSquareApi(orderId)
+      const squareResult = await deriveBookingFromSquareApi(orderId, correlationId)
       
       if (squareResult.bookingId) {
         // Square API returned a booking ID - find or create in our database
@@ -1685,10 +1717,10 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
         
         if (existingBooking && existingBooking.length > 0) {
           bookingId = existingBooking[0].id
-          console.log(`✅ [RECONCILE] Found existing booking in DB: ${bookingId}`)
+          logInfo('reconcile.found_in_db', { logId: correlationId, bookingId })
         } else {
           // Booking not in database - fetch and save it
-          console.log(`📥 [RECONCILE] Booking ${squareResult.bookingId} not in DB, fetching from Square...`)
+          logInfo('reconcile.fetching_from_square', { logId: correlationId, bookingId: squareResult.bookingId })
           try {
             const bookingsApi = getBookingsApi()
             const bookingResponse = await bookingsApi.retrieveBooking(squareResult.bookingId)
@@ -1935,7 +1967,8 @@ async function reconcileBookingLinks(orderId, paymentId = null) {
  * Gets technician ID from bookings table and administrator ID from payments table
  * Also populates booking_id if found
  */
-async function updateOrderLineItemsWithTechnician(orderId) {
+async function updateOrderLineItemsWithTechnician(orderId, correlationId = null) {
+  logInfo('update_line_items.start', { logId: correlationId, orderId })
   try {
     // Find payment linked to this order (orderId is square order_id, need to find order UUID first)
     const orderRecord = await prisma.$queryRaw`
@@ -1945,7 +1978,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
     `
     
     if (!orderRecord || orderRecord.length === 0) {
-      console.log(`ℹ️ Order ${orderId} not found in database yet`)
+      logInfo('update_line_items.order_not_found', { logId: correlationId, orderId })
       return null
     }
 
@@ -1962,13 +1995,13 @@ async function updateOrderLineItemsWithTechnician(orderId) {
     `
 
     if (!paymentWithBooking || paymentWithBooking.length === 0) {
-      console.log(`ℹ️ No payment with booking_id found for order ${orderId} yet (might arrive later)`)
+      logInfo('update_line_items.no_payment_with_booking', { logId: correlationId, orderId })
       return null
     }
 
     const bookingId = paymentWithBooking[0].booking_id
     const administratorId = paymentWithBooking[0].administrator_id || null
-    console.log(`🔍 Found booking ${bookingId} for order ${orderId}`)
+    logDebug('update_line_items.found_booking', { logId: correlationId, orderId, bookingId })
 
     // Update order with booking_id, technician_id, and administrator_id if not already set
     if (bookingId) {
@@ -2089,7 +2122,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
   }
 }
 
-async function processOrderWebhook(webhookData, eventType, webhookMerchantId = null) {
+async function processOrderWebhook(webhookData, eventType, webhookMerchantId = null, correlationId = null) {
   try {
     // Extract order_id from webhook payload structure
     // order.created: data.object.order_created.order_id
@@ -2097,7 +2130,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     const orderMetadata = webhookData.object?.order_created || webhookData.object?.order_updated
     
     if (!orderMetadata || !orderMetadata.order_id) {
-      console.error('❌ Invalid order webhook data:', webhookData)
+      logError('order.invalid_data', { logId: correlationId, webhookData })
       return
     }
 
@@ -2105,20 +2138,16 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     const locationId = orderMetadata.location_id
     const orderState = orderMetadata.state
     
-    console.log(`📦 Processing ${eventType} webhook for order ${orderId}`)
+    logInfo('order.processing_start', { logId: correlationId, orderId, eventType })
     if (webhookMerchantId) {
-      console.log(`   merchant_id from webhook: ${webhookMerchantId}`)
+      logDebug('order.webhook_merchant', { logId: correlationId, webhookMerchantId })
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:1807',message:'Extracted locationId from webhook metadata',data:{orderId,locationId:locationId||'missing',orderState,orderMetadataKeys:Object.keys(orderMetadata||{})},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-
-    console.log(`📦 Fetching full order details for order ${orderId} (state: ${orderState})`)
+    logDebug('order.fetching_details', { logId: correlationId, orderId, orderState })
     
-    const token = process.env.SQUARE_ACCESS_TOKEN?.trim() || ''
-    const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token
-    console.log(`   [DEBUG] Token length: ${cleanToken.length}, Preview: ${cleanToken.substring(0, 10)}...`)
+    const token = process.env.SQUARE_ACCESS_TOKEN?.trim() || ""
+    const cleanToken = token.startsWith("Bearer ") ? token.slice(7) : token
+    logDebug("order.token_check", { logId: correlationId, tokenLength: cleanToken.length })
 
     // Fetch full order details from Square API to get line items
     let order
@@ -2128,17 +2157,17 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       order = orderResponse.result?.order
 
       if (!order) {
-        console.error(`❌ Order ${orderId} not found in Square API`)
+        logError("order.api_not_found", { logId: correlationId, orderId })
         return
       }
     } catch (apiError) {
-      console.error(`❌ Error fetching order ${orderId} from Square API:`, apiError.message)
+      logError("order.api_error", { logId: correlationId, orderId, error: apiError.message })
       if (apiError.errors) {
-        console.error('Square API errors:', JSON.stringify(apiError.errors, null, 2))
+        logDebug("order.api_errors_detail", { logId: correlationId, errors: apiError.errors })
       }
       // Create a clean error without BigInt values to prevent serialization issues
-      const cleanApiError = new Error(apiError?.message || 'Failed to fetch order from Square API')
-      cleanApiError.name = apiError?.name || 'SquareAPIError'
+      const cleanApiError = new Error(apiError?.message || "Failed to fetch order from Square API")
+      cleanApiError.name = apiError?.name || "SquareAPIError"
       cleanApiError.code = apiError?.code
       throw cleanApiError
     }
@@ -2152,11 +2181,16 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     // Use merchant_id from order API response, fallback to webhook merchant_id
     // Ensure merchantId is a string before calling substring
     const rawMerchantId = order.merchant_id || order.merchantId || webhookMerchantId || null
-    const merchantId = typeof rawMerchantId === 'string' ? rawMerchantId : null
+    const merchantId = typeof rawMerchantId === "string" ? rawMerchantId : null
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:801',message:'Order webhook - extracted IDs',data:{orderId,merchantId:merchantId?.substring(0,16)||'missing',locationIdFromWebhook:typeof locationId === 'string' ? locationId.substring(0,16) : 'missing',orderLocationId:typeof orderLocationId === 'string' ? orderLocationId.substring(0,16) : 'missing',finalLocationId:typeof finalLocationId === 'string' ? finalLocationId.substring(0,16) : 'missing',orderKeys:Object.keys(order).join(',')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
+    logInfo("order.extracted_ids", { 
+      logId: correlationId, 
+      orderId, 
+      merchantId, 
+      finalLocationId, 
+      customerId,
+      lineItemsCount: lineItems.length 
+    })
 
     // Resolve organization_id - For order.created/updated, merchant_id is ALWAYS present
     // STEP 1: Resolve organization_id from merchant_id FIRST (source of truth from Square)
@@ -2164,7 +2198,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     
     if (merchantId) {
       try {
-        console.log(`📍 Resolving organization_id from merchant_id: ${merchantId}`)
+        logDebug("order.resolving_org_from_merchant", { logId: correlationId, merchantId })
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
           WHERE square_merchant_id = ${merchantId}
@@ -2172,33 +2206,27 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (org && org.length > 0) {
           organizationId = org[0].id
-          console.log(`✅ Resolved organization_id from merchant_id: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
+          logInfo("order.org_resolved_merchant", { logId: correlationId, organizationId })
         } else {
-          console.warn(`⚠️ No organization found for merchant_id: ${typeof merchantId === 'string' ? merchantId.substring(0, 16) : 'unknown'}...`)
+          logWarn("order.org_not_found_merchant", { logId: correlationId, merchantId })
         }
       } catch (err) {
-        console.error(`❌ Error resolving organization_id from merchant_id: ${err.message}`)
-        console.error(`   Stack: ${err.stack}`)
+        logError("order.org_resolve_error_merchant", { logId: correlationId, merchantId, error: err.message })
       }
     }
     
     // STEP 2: Fallback to location_id (if merchant_id lookup failed)
     if (!organizationId && finalLocationId) {
-      console.log(`📍 Fallback: Resolving organization_id from location_id: ${finalLocationId}`)
+      logDebug("order.resolving_org_fallback_location", { logId: correlationId, finalLocationId })
       organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
       if (organizationId) {
-        console.log(`✅ Resolved organization_id from location (fallback): ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
+        logInfo("order.org_resolved_location", { logId: correlationId, organizationId })
       }
     }
 
     if (!merchantId && !organizationId) {
-      console.warn(`⚠️ Order ${orderId} missing merchant_id AND fallback resolution failed`)
+      logWarn("order.missing_ids_critical", { logId: correlationId, orderId })
     }
-    // Note: If merchant_id is missing but organizationId was resolved via location fallback,
-    // that's expected behavior (Square webhooks don't always include merchant_id).
-    // No need to log this as it's working correctly.
-
-    // Location lookup already done above (STEP 1), no need to duplicate
 
     // If still no organization_id, try to get it from existing orders (fallback)
     if (!organizationId && orderId) {
@@ -2210,10 +2238,10 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (existingOrder && existingOrder.length > 0) {
           organizationId = existingOrder[0].organization_id
-          console.log(`✅ Resolved organization_id from existing order: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}...`)
+          logInfo("order.org_resolved_existing", { logId: correlationId, organizationId })
         }
       } catch (err) {
-        console.warn(`⚠️ Could not resolve organization_id from existing order: ${err.message}`)
+        logWarn("order.org_resolve_error_existing", { logId: correlationId, error: err.message })
       }
     }
 
@@ -2228,26 +2256,25 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         `
         if (defaultOrg && defaultOrg.length > 0) {
           organizationId = defaultOrg[0].id
-          console.warn(`⚠️ Using fallback organization_id: ${typeof organizationId === 'string' ? organizationId.substring(0, 8) : 'unknown'}... (order: ${orderId})`)
+          logWarn("order.org_using_fallback_default", { logId: correlationId, organizationId, orderId })
         }
       } catch (err) {
-        console.error(`❌ Error getting fallback organization: ${err.message}`)
+        logError("order.org_resolve_error_default", { logId: correlationId, error: err.message })
       }
     }
 
     if (!organizationId) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/d4bb41e0-e49d-40c3-bd8a-e995d2166939',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'route.js:884',message:'CRITICAL: Failed to resolve organization_id',data:{orderId,merchantId:merchantId||'missing',locationId:locationId||'missing',finalLocationId:finalLocationId||'missing',orderLocationId:order.location_id||'missing'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      console.error(`❌ CRITICAL: Cannot process order ${orderId}: organization_id is required but could not be resolved`)
-      console.error(`   merchant_id: ${merchantId || 'missing'}`)
-      console.error(`   location_id: ${finalLocationId || 'missing'}`)
-      console.error(`   order_id: ${orderId}`)
+      logError("order.org_resolution_failed_critical", { 
+        logId: correlationId, 
+        orderId, 
+        merchantId, 
+        finalLocationId 
+      })
       // Don't return - throw error so webhook returns 500 and Square will retry
-      throw new Error(`Cannot process order: organization_id is required but could not be resolved. merchant_id: ${merchantId || 'missing'}, location_id: ${finalLocationId || 'missing'}`)
+      throw new Error(`Cannot process order: organization_id is required but could not be resolved. merchant_id: ${merchantId || "missing"}, location_id: ${finalLocationId || "missing"}`)
     }
 
-    console.log(`📦 Processing order ${orderId} with ${lineItems.length} line items (organization_id: ${organizationId})`)
+    logInfo("order.processing_with_org", { logId: correlationId, orderId, organizationId, lineItemsCount: lineItems.length })    console.log(`📦 Processing order ${orderId} with ${lineItems.length} line items (organization_id: ${organizationId})`)
 
     // Get booking_id and administrator_id from payments (if payment exists)
     // Note: This will be empty initially, payment comes later via payment webhook
