@@ -3148,7 +3148,15 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
         const isSelfReferral = referrer.square_customer_id === customerId
         if (isSelfReferral) {
           console.log(`⚠️ Skipping referrer reward because this looks like self-referral (customerId=${customerId})`)
-          referrerCustomerId = null
+          
+          await saveApplicationLog(prisma, {
+            organization_id: organizationId,
+            log_type: 'REWARD_PROCESSING',
+            log_id: `reward-self-${customerId}-${Date.now()}`,
+            status: 'completed',
+            payload: { customerId, referrerId: referrer.square_customer_id, reason: 'self_referral' }
+          })
+          return
         }
 
         // Check if referrer already has a gift card
