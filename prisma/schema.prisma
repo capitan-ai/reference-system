@@ -520,28 +520,187 @@ model Location {
   @@schema("public")
 }
 
+model MasterSettings {
+  team_member_id  String       @id @db.Uuid
+  commission_rate Float        @default(40.0)
+  category        TeamRole     @default(MASTER)
+  location_code   TeamLocation @default(UNKNOWN_LOC)
+  is_active       Boolean      @default(true)
+  created_at      DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+
+  team_member TeamMember @relation(fields: [team_member_id], references: [id], onDelete: Cascade)
+
+  @@map("master_settings")
+  @@schema("public")
+}
+
+model BookingSnapshot {
+  booking_id      String  @id @db.Uuid
+  organization_id String  @db.Uuid
+  location_id     String  @db.Uuid
+  technician_id   String? @db.Uuid
+
+  category_snapshot         TeamRole @default(MASTER)
+  price_snapshot_amount     Int // В центах
+  commission_rate_snapshot  Float // Например, 45.0
+  duration_minutes_snapshot Int      @default(60)
+
+  status              String // ACCEPTED, CANCELLED, NO_SHOW
+  is_fix              Boolean @default(false)
+  original_booking_id String? @db.Uuid
+
+  base_processed     Boolean @default(false)
+  discount_processed Boolean @default(false)
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  booking        Booking                @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  ledger_entries MasterEarningsLedger[]
+
+  @@index([technician_id, status])
+  @@map("booking_snapshots")
+  @@schema("public")
+}
+
+model MasterEarningsLedger {
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String  @db.Uuid
+  team_member_id  String  @db.Uuid
+  booking_id      String? @db.Uuid
+
+  entry_type    MasterEntryType
+  amount_amount Int // В центах, может быть отрицательным
+
+  source_engine String // MASTER_ENGINE, DISCOUNT_ENGINE, etc.
+  meta_json     Json? // Для связи мастеров при Fix и других деталей
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  team_member TeamMember       @relation(fields: [team_member_id], references: [id], onDelete: Cascade)
+  snapshot    BookingSnapshot? @relation(fields: [booking_id], references: [booking_id], onDelete: SetNull)
+
+  @@index([team_member_id, created_at])
+  @@map("master_earnings_ledger")
+  @@schema("public")
+}
+
+model MasterPerformanceDaily {
+  date            DateTime @db.Date
+  master_id       String   @db.Uuid
+  organization_id String   @db.Uuid
+  location_id     String   @db.Uuid
+
+  // Финансовые показатели (в центах)
+  gross_generated     BigInt @default(0)
+  net_master_income   BigInt @default(0)
+  margin_contribution BigInt @default(0)
+  tips_total          BigInt @default(0)
+
+  // Операционные показатели
+  booked_minutes    Int   @default(0)
+  available_minutes Int   @default(0)
+  utilization_rate  Float @default(0)
+  booking_count     Int   @default(0)
+  fix_count         Int   @default(0)
+
+  // Score (0-100)
+  composite_score Float @default(0)
+
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@id([date, master_id])
+  @@index([organization_id, date])
+  @@map("master_performance_daily")
+  @@schema("public")
+}
+
+model CustomerPackage {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String   @db.Uuid
+  customer_id          String
+  package_name         String // Например: "Package 5 TOP MASTER"
+  category             TeamRole @default(MASTER)
+  units_total          Int
+  units_remaining      Int
+  allocated_unit_price Int // Цена за 1 визит для мастера
+
+  status     String   @default("ACTIVE") // ACTIVE, USED, EXPIRED
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  usages PackageUsage[]
+
+  @@index([customer_id])
+  @@map("customer_packages")
+  @@schema("public")
+}
+
+model PackageUsage {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  package_id String   @db.Uuid
+  booking_id String   @db.Uuid
+  used_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  package CustomerPackage @relation(fields: [package_id], references: [id], onDelete: Cascade)
+
+  @@map("package_usages")
+  @@schema("public")
+}
+
+model DiscountAllocationRule {
+  id                   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String @db.Uuid
+  discount_name        String // Имя скидки из Square
+  master_share_percent Float  @default(0) // Сколько % скидки платит мастер
+  salon_share_percent  Float  @default(100) // Сколько % скидки платит салон
+
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([organization_id, discount_name])
+  @@map("discount_allocation_rules")
+  @@schema("public")
+}
+
+enum MasterEntryType {
+  SERVICE_COMMISSION
+  TIP
+  FIX_PENALTY
+  FIX_COMPENSATION
+  DISCOUNT_ADJUSTMENT
+  MANUAL_ADJUSTMENT
+  REVERSAL
+
+  @@schema("public")
+}
+
 model TeamMember {
-  id                                String                @id @default(uuid()) @db.Uuid
+  id                                String                 @id @default(uuid()) @db.Uuid
   square_team_member_id             String
   given_name                        String?
   family_name                       String?
   email_address                     String?
   phone_number                      String?
   status                            String?
-  location_code                     TeamLocation          @default(UNKNOWN_LOC)
-  role                              TeamRole              @default(UNKNOWN)
-  created_at                        DateTime              @default(now())
-  updated_at                        DateTime              @updatedAt
-  organization_id                   String                @db.Uuid
-  is_system                         Boolean               @default(false)
+  location_code                     TeamLocation           @default(UNKNOWN_LOC)
+  role                              TeamRole               @default(UNKNOWN)
+  created_at                        DateTime               @default(now())
+  updated_at                        DateTime               @updatedAt
+  organization_id                   String                 @db.Uuid
+  is_system                         Boolean                @default(false)
+  commission_rate                   Float?                 @default(40.0)
+  master_settings                   MasterSettings?
   admin_analytics_daily             AdminAnalyticsDaily[]
-  booking_segments_as_technician    BookingSegment[]      @relation("BookingSegmentTechnician")
-  bookings_as_administrator         Booking[]             @relation("BookingAdministrator")
-  bookings_as_technician            Booking[]             @relation("BookingTechnician")
-  order_line_items_as_administrator OrderLineItem[]       @relation("OrderLineItemAdministrator")
-  order_line_items_as_technician    OrderLineItem[]       @relation("OrderLineItemTechnician")
-  payments_as_administrator         Payment[]             @relation("PaymentAdministrator")
-  organization                      Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  booking_segments_as_technician    BookingSegment[]       @relation("BookingSegmentTechnician")
+  bookings_as_administrator         Booking[]              @relation("BookingAdministrator")
+  bookings_as_technician            Booking[]              @relation("BookingTechnician")
+  order_line_items_as_administrator OrderLineItem[]        @relation("OrderLineItemAdministrator")
+  order_line_items_as_technician    OrderLineItem[]        @relation("OrderLineItemTechnician")
+  payments_as_administrator         Payment[]              @relation("PaymentAdministrator")
+  organization                      Organization           @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  MasterEarningsLedger              MasterEarningsLedger[]
 
   @@unique([organization_id, square_team_member_id], map: "team_members_organization_square_team_member_unique")
   @@index([square_team_member_id])
@@ -621,6 +780,7 @@ model Booking {
   technician                      TeamMember?       @relation("BookingTechnician", fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
   order_line_items                OrderLineItem[]
   orders                          Order[]
+  BookingSnapshot                 BookingSnapshot[]
 
   @@unique([organization_id, booking_id], map: "bookings_organization_booking_id_unique")
   @@index([customer_id])
@@ -674,8 +834,10 @@ model Order {
   state            String?
   version          Int?
   reference_id     String?
+  source_name      String?
   created_at       DateTime         @default(now())
   updated_at       DateTime         @updatedAt
+  closed_at        DateTime?
   team_member_id   String?
   order_id         String
   id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -684,6 +846,45 @@ model Order {
   booking_id       String?          @db.Uuid
   technician_id    String?          @db.Uuid
   administrator_id String?          @db.Uuid
+
+  // Totals
+  total_money_amount           Int?
+  total_money_currency         String? @default("USD")
+  total_tax_money_amount       Int?
+  total_tax_money_currency     String? @default("USD")
+  total_tip_money_amount       Int?
+  total_tip_money_currency     String? @default("USD")
+  total_discount_money_amount  Int?
+  total_discount_money_currency String? @default("USD")
+  total_service_charge_money_amount   Int?
+  total_service_charge_money_currency String? @default("USD")
+  net_amount_due_money_amount         Int?
+  net_amount_due_money_currency       String? @default("USD")
+
+  // Return Amounts
+  return_total_money_amount           Int?
+  return_total_money_currency         String? @default("USD")
+  return_total_tax_money_amount       Int?
+  return_total_tax_money_currency     String? @default("USD")
+  return_total_tip_money_amount       Int?
+  return_total_tip_money_currency     String? @default("USD")
+  return_total_discount_money_amount  Int?
+  return_total_discount_money_currency String? @default("USD")
+  return_total_service_charge_money_amount   Int?
+  return_total_service_charge_money_currency String? @default("USD")
+
+  // Net Amounts
+  net_total_money_amount              Int?
+  net_total_money_currency            String? @default("USD")
+  net_total_tax_money_amount          Int?
+  net_total_tax_money_currency        String? @default("USD")
+  net_total_tip_money_amount          Int?
+  net_total_tip_money_currency        String? @default("USD")
+  net_total_discount_money_amount     Int?
+  net_total_discount_money_currency   String? @default("USD")
+  net_total_service_charge_money_amount   Int?
+  net_total_service_charge_money_currency String? @default("USD")
+
   booking          Booking?         @relation(fields: [booking_id], references: [id])
   location         Location?        @relation(fields: [location_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
   organization     Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)

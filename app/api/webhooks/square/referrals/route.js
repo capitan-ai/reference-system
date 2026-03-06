@@ -3,8 +3,8 @@ const { Prisma } = require('@prisma/client')
 const crypto = require('crypto')
 const QRCode = require('qrcode')
 const { saveApplicationLog } = require('../../../../../lib/workflows/application-log-queue')
-const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
-const { sendReferralCodeSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
+const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification, trackNotification } = require('../../../../../lib/email-service-simple')
+const { sendReferralCodeSms, sendGiftCardSmsNotification, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
 // Import payment saving function from main webhook handler
 // Note: route.js uses ES6 exports, so we need to use dynamic import
@@ -584,13 +584,66 @@ async function sendGiftCardEmailNotification({
   locationId = null,
   notificationMetadata = {}
 }) {
+  const customerId = notificationMetadata.customerId
+  const organizationId = notificationMetadata.organizationId
+
   if (!email) {
-    console.log('⚠️ Skipping gift card email – email address missing')
+    console.log('⚠️ Email address missing, attempting SMS fallback...')
+    
+    // Attempt SMS fallback if phone number is available
+    const phoneNumber = notificationMetadata.phoneNumber
+    if (phoneNumber) {
+      const smsResult = await sendGiftCardSmsNotification({
+        to: phoneNumber,
+        customerName,
+        giftCardGan,
+        amountCents,
+        activationUrl,
+        organizationId,
+        customerId
+      })
+
+      // Track SMS notification
+      await trackNotification({
+        channel: 'SMS',
+        templateType: 'GIFT_CARD_DELIVERY',
+        status: smsResult.success ? 'sent' : 'failed',
+        customerId,
+        organizationId,
+        metadata: {
+          phoneNumber,
+          giftCardGan,
+          amountCents,
+          ...notificationMetadata
+        },
+        errorMessage: smsResult.error
+      })
+
+      return smsResult
+    }
+
+    console.log('⚠️ Skipping notification – both email and phone missing')
+    await trackNotification({
+      channel: 'EMAIL',
+      templateType: 'GIFT_CARD_DELIVERY',
+      status: 'skipped',
+      customerId,
+      organizationId,
+      metadata: { reason: 'missing-contact-info', ...notificationMetadata }
+    })
     return { success: false, skipped: true, reason: 'missing-email' }
   }
 
   if (!giftCardGan) {
     console.log('⚠️ Skipping gift card email – card number missing')
+    await trackNotification({
+      channel: 'EMAIL',
+      templateType: 'GIFT_CARD_DELIVERY',
+      status: 'skipped',
+      customerId,
+      organizationId,
+      metadata: { reason: 'missing-gan', ...notificationMetadata }
+    })
     return { success: false, skipped: true, reason: 'missing-gan' }
   }
 
@@ -3209,6 +3262,17 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   AND organization_id = ${referrerOrganizationId}::uuid
               `
 
+              // Also update referral_profiles stats
+              await prisma.$executeRaw`
+                UPDATE referral_profiles
+                SET 
+                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                  updated_at = NOW()
+                WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
+              `
+
               console.log(`✅ Referrer gets NEW gift card:`)
               console.log(`   - Gift Card ID: ${referrerGiftCard.giftCardId}`)
               console.log(`   - Amount: $10`)
@@ -3227,27 +3291,43 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 })
               }
 
-              const referrerNameBase = `${referrer.given_name || ''} ${referrer.family_name || ''}`.trim()
-              const referrerEmail = referrer.email_address || referrerGiftCard.digitalEmail || null
-              if (referrerEmail) {
-                await sendGiftCardEmailNotification({
-                  customerName: referrerNameBase || referrerEmail || 'there',
-                  email: referrerEmail,
-                  giftCardGan: referrerGiftCard.giftCardGan,
-                  amountCents: referrerGiftCard.amountCents,
-                  balanceCents: referrerGiftCard.balanceCents,
-                  activationUrl: referrerGiftCard.activationUrl,
-                  passKitUrl: referrerGiftCard.passKitUrl,
-                  giftCardId: referrerGiftCard.giftCardId,
-                  waitForPassKit: true,
-                  locationId: paymentLocationId,
-                  notificationMetadata: {
+              if (referrerEmail || referrer.phone_number) {
+                // Enqueue notification job for reliability
+                await enqueueGiftCardJob(prisma, {
+                  correlationId: runContext?.correlationId || `notification-${Date.now()}`,
+                  triggerType: 'payment.completed',
+                  stage: 'send_notification',
+                  payload: {
+                    type: 'REFERRER_ACTIVATION',
+                    customerName: referrerNameBase || referrerEmail || 'there',
+                    email: referrerEmail,
+                    phoneNumber: referrer.phone_number,
+                    giftCardGan: referrerGiftCard.giftCardGan,
+                    amountCents: referrerGiftCard.amountCents,
+                    balanceCents: referrerGiftCard.balanceCents,
+                    activationUrl: referrerGiftCard.activationUrl,
+                    passKitUrl: referrerGiftCard.passKitUrl,
+                    giftCardId: referrerGiftCard.giftCardId,
+                    locationId: paymentLocationId,
+                    organizationId,
                     customerId: referrer.square_customer_id,
-                    friendCustomerId: customerId
-                  }
+                    notificationMetadata: {
+                      friendCustomerId: customerId
+                    }
+                  },
+                  organizationId
                 })
+                console.log(`✅ Enqueued referrer notification job for ${referrer.square_customer_id}`)
               } else {
-                console.log('⚠️ Referrer gift card email skipped – missing email address')
+                console.log('⚠️ Referrer notification skipped – missing email and phone')
+                await trackNotification({
+                  channel: 'EMAIL',
+                  templateType: 'REFERRER_ACTIVATION',
+                  status: 'skipped',
+                  customerId: referrer.square_customer_id,
+                  organizationId,
+                  metadata: { reason: 'missing-contact-info', friendCustomerId: customerId }
+                })
               }
 
               // Create ReferralReward record for tracking
@@ -3351,6 +3431,17 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   AND organization_id = ${referrerOrganizationId}::uuid
               `
 
+              // Also update referral_profiles stats
+              await prisma.$executeRaw`
+                UPDATE referral_profiles
+                SET 
+                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                  updated_at = NOW()
+                WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
+              `
+
               if (runContext?.correlationId) {
                 await updateGiftCardRunStage(prisma, runContext.correlationId, {
                   stage: 'referrer_reward:completed',
@@ -3369,27 +3460,43 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               console.log(`   - Amount loaded: $10`)
               console.log(`   - Referrer: ${referrer.given_name} ${referrer.family_name}`)
 
-              const referrerNameBase = `${referrer.given_name || ''} ${referrer.family_name || ''}`.trim()
-              const referrerEmail = referrer.email_address || loadResult.digitalEmail || null
-              if (referrerEmail && loadResult.giftCardGan) {
-                await sendGiftCardEmailNotification({
-                  customerName: referrerNameBase || referrerEmail || 'there',
-                  email: referrerEmail,
-                  giftCardGan: loadResult.giftCardGan,
-                  amountCents: rewardAmountCents,
-                  balanceCents: loadResult.balanceCents,
-                  activationUrl: loadResult.activationUrl,
-                  passKitUrl: loadResult.passKitUrl,
-                  giftCardId: referrerInfo.gift_card_id,
-                  waitForPassKit: true,
-                  locationId: paymentLocationId,
-                  notificationMetadata: {
+              if (referrerEmail || referrer.phone_number) {
+                // Enqueue notification job for reliability
+                await enqueueGiftCardJob(prisma, {
+                  correlationId: runContext?.correlationId || `notification-load-${Date.now()}`,
+                  triggerType: 'payment.completed',
+                  stage: 'send_notification',
+                  payload: {
+                    type: 'REFERRER_ACTIVATION',
+                    customerName: referrerNameBase || referrerEmail || 'there',
+                    email: referrerEmail,
+                    phoneNumber: referrer.phone_number,
+                    giftCardGan: loadResult.giftCardGan,
+                    amountCents: rewardAmountCents,
+                    balanceCents: loadResult.balanceCents,
+                    activationUrl: loadResult.activationUrl,
+                    passKitUrl: loadResult.passKitUrl,
+                    giftCardId: referrerInfo.gift_card_id,
+                    locationId: paymentLocationId,
+                    organizationId,
                     customerId: referrer.square_customer_id,
-                    friendCustomerId: customerId
-                  }
+                    notificationMetadata: {
+                      friendCustomerId: customerId
+                    }
+                  },
+                  organizationId
                 })
+                console.log(`✅ Enqueued referrer load notification job for ${referrer.square_customer_id}`)
               } else {
-                console.log('⚠️ Referrer load email skipped – missing email address or card number')
+                console.log('⚠️ Referrer load notification skipped – missing email and phone')
+                await trackNotification({
+                  channel: 'EMAIL',
+                  templateType: 'REFERRER_ACTIVATION',
+                  status: 'skipped',
+                  customerId: referrer.square_customer_id,
+                  organizationId,
+                  metadata: { reason: 'missing-contact-info', friendCustomerId: customerId }
+                })
               }
 
               // Create ReferralReward record for tracking
@@ -3470,54 +3577,72 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       console.log(`❌ Referrer not found for code: ${customer.used_referral_code}`)
     }
 
-    // 3. Send referral code to NEW client (regardless of referral code usage)
-    if (customer.email_address) {
-      if (runContext?.correlationId) {
-        await updateGiftCardRunStage(prisma, runContext.correlationId, {
-          stage: 'referrer_promotion:issuing',
-          status: 'running',
-          incrementAttempts: true,
-          context: {
-            customerId,
-            email: customer.email_address
-          }
-        })
+    // 4. Handle friend reward (signup bonus)
+    if (customer.used_referral_code && !customer.got_signup_bonus) {
+      console.log(`🎁 Issuing friend reward for ${customer.given_name}`)
+      
+      const rewardAmountCents = 1000
+      const friendGiftCardOptions = {
+        idempotencyKeySeed: runContext?.correlationId
+          ? buildStageKey(runContext.correlationId, 'friend_reward', 'issue')
+          : undefined
       }
 
-      const referralResult = await sendReferralCodeToNewClient(
+      const friendGiftCard = await createGiftCard(
         customerId,
         `${customer.given_name} ${customer.family_name}`,
-        customer.email_address,
-        customer.phone_number,
-        { locationId: paymentLocationId }
+        rewardAmountCents,
+        false, // Not a referrer card
+        friendGiftCardOptions,
+        organizationId
       )
-      
-      if (referralResult.success) {
-        console.log(`✅ Referral code sent to new client:`)
-        console.log(`   - Customer: ${customer.given_name} ${customer.family_name}`)
-        console.log(`   - Email: ${customer.email_address}`)
-        console.log(`   - Referral Code: ${referralResult.referralCode}`)
-        console.log(`   - Status: Customer is now a referrer`)
-        if (runContext?.correlationId) {
-          await updateGiftCardRunStage(prisma, runContext.correlationId, {
-            stage: 'referrer_promotion:completed',
-            status: 'running',
-            clearError: true,
-            context: {
-              customerId,
-              referralCode: referralResult.referralCode
-            }
+
+      if (friendGiftCard?.giftCardId) {
+        await prisma.$executeRaw`
+          UPDATE square_existing_clients 
+          SET 
+            got_signup_bonus = TRUE,
+            gift_card_id = ${friendGiftCard.giftCardId},
+            gift_card_gan = ${friendGiftCard.giftCardGan ?? null},
+            gift_card_order_id = ${friendGiftCard.orderId ?? null},
+            gift_card_line_item_uid = ${friendGiftCard.lineItemUid ?? null},
+            gift_card_delivery_channel = ${friendGiftCard.activationChannel ?? null},
+            gift_card_activation_url = ${friendGiftCard.activationUrl ?? null},
+            gift_card_pass_kit_url = ${friendGiftCard.passKitUrl ?? null},
+            gift_card_digital_email = ${friendGiftCard.digitalEmail ?? null}
+          WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
+        `
+
+        // Enqueue notification job for friend reward
+        if (customer.email_address || customer.phone_number) {
+          await enqueueGiftCardJob(prisma, {
+            correlationId: runContext?.correlationId || `friend-notification-${Date.now()}`,
+            triggerType: 'payment.completed',
+            stage: 'send_notification',
+            payload: {
+              type: 'FRIEND_ACTIVATION',
+              customerName: `${customer.given_name} ${customer.family_name}`,
+              email: customer.email_address,
+              phoneNumber: customer.phone_number,
+              giftCardGan: friendGiftCard.giftCardGan,
+              amountCents: friendGiftCard.amountCents,
+              balanceCents: friendGiftCard.balanceCents,
+              activationUrl: friendGiftCard.activationUrl,
+              passKitUrl: friendGiftCard.passKitUrl,
+              giftCardId: friendGiftCard.giftCardId,
+              locationId: paymentLocationId,
+              organizationId,
+              customerId
+            },
+            organizationId
           })
+          console.log(`✅ Enqueued friend reward notification job for ${customerId}`)
         }
-      } else if (runContext?.correlationId) {
-        paymentHadError = true
-        await markGiftCardRunError(prisma, runContext.correlationId, 'Failed to send referral code email', {
-          stage: 'referrer_promotion:error'
-        })
       }
     }
 
-    // 4. Mark first payment as completed ONLY if there were no errors
+    // 5. Mark first payment as completed ONLY if there were no errors
     // This allows the client to retry processing if something failed
     if (!paymentHadError) {
     await prisma.$executeRaw`
