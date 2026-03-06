@@ -138,7 +138,7 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       throw new Error(`Could not resolve organization for booking ${bookingId}`)
     }
 
-    const locationUuid = await resolveLocationUuidForSquareLocationId(locationId)
+    const locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
     if (!locationUuid) {
       throw new Error(`Could not resolve location UUID for Square location ${locationId}`)
     }
