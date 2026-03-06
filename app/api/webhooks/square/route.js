@@ -632,11 +632,13 @@ export async function POST(request) {
             })
             
             // Reconcile booking links (try to find and populate booking_id)
-            await reconcileBookingLinks(orderId, paymentId)
-            await reconcileBookingLinks(orderId, paymentId, correlationId)            // Update order_line_items with technician_id and administrator_id when payment arrives
-            await updateOrderLineItemsWithTechnician(orderId)
+            await reconcileBookingLinks(orderId, paymentId, correlationId)
+            
+            // Update order_line_items with technician_id and administrator_id when payment arrives
+            await updateOrderLineItemsWithTechnician(orderId, correlationId)
           }
-            await updateOrderLineItemsWithTechnician(orderId, correlationId)          logError("payment.error", {
+        } catch (paymentError) {
+          logError("payment.error", {
             logId: correlationId,
             organizationId: webhookOrganizationId,
             error: paymentError.message,
