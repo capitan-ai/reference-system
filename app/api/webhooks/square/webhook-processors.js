@@ -8,6 +8,7 @@
 import prisma from '../../../../lib/prisma-client'
 import { Prisma } from '@prisma/client'
 import locationResolver from '../../../../lib/location-resolver'
+import { upsertBookingSnapshot } from '../../../../lib/workers/master-snapshot-service.js'
 
 const { resolveLocationUuidForSquareLocationId } = locationResolver
 
@@ -332,7 +333,6 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
 
     // NEW: Create financial snapshot for Master Economics
     try {
-      const { upsertBookingSnapshot } = await import('@/lib/workers/master-snapshot-service')
       await upsertBookingSnapshot(bookingId, organizationId)
     } catch (snapshotError) {
       console.error(`[WEBHOOK-PROCESSOR] ⚠️ Failed to create booking snapshot:`, snapshotError.message)
