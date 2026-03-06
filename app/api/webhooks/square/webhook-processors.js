@@ -5,10 +5,10 @@
  * queued webhook events asynchronously.
  */
 
-import prisma from '../../../../lib/prisma-client'
+import prisma from '@/lib/prisma-client'
 import { Prisma } from '@prisma/client'
-import locationResolver from '../../../../lib/location-resolver'
-import { upsertBookingSnapshot } from '../../../../lib/workers/master-snapshot-service.js'
+import locationResolver from '@/lib/location-resolver'
+import { upsertBookingSnapshot } from '@/lib/workers/master-snapshot-service'
 
 const { resolveLocationUuidForSquareLocationId } = locationResolver
 
