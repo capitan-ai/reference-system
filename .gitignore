@@ -72,6 +72,18 @@ square-payments-*.json
 gift-card-details-check.json
 referral-system-salon-log-export-*.csv
 
+# Investigation & Audit Results (Contain PII)
+accidental_rewards_*.json
+global_*.json
+final_*.json
+list_*.json
+our_system_referrals.json
+referral_research_results.json
+self_referral_audit.json
+truly_new_referrals_analysis.json
+empty_referrals_list.json
+retail_customers_report.json
+
 # Apple Wallet assets (large binaries)
 Add-to-Apple-Wallet/
 Add to Apple Wallet badge guidelines*/
@@ -89,39 +101,39 @@ VERCEL_PEM_KEYS.txt
 reports/
 
 # Root-level documentation/analysis (not in docs/)
-ANALYTICS_*.md
-BACKFILL_*.md
-BOOKING_*.md
-CLEANUP_*.md
-CRON_*.md
-DATABASE_*.md
-DISCOUNT_*.md
-EMAIL_*.md
-EMPTY_*.md
-FINAL_SUMMARY.md
-FIX_*.md
-GIFT_CARD_*.md
-GITHUB_*.md
-GIT_*.md
-JOB_*.md
-LOCATION_*.md
-MIGRATION_*.md
-ORDER_*.md
-PAYMENTS_*.md
-PAYMENT_*.md
-PRISMA_*.md
-RAW_JSON_*.md
-REFERRAL_CODE_*.md
-REFERRER_*.md
-SCRIPTS_*.md
-SERVICE_*.md
-SOLUTION_SUMMARY.md
-SQUARE_*.md
-TIMEZONE_*.md
-UNION_ST_*.md
-VERCEL_*.md
-WEBHOOK_*.md
-WHAT_SAVED_*.md
+/ANALYTICS_*.md
+/BACKFILL_*.md
+/BOOKING_*.md
+/CLEANUP_*.md
+/CRON_*.md
+/DATABASE_*.md
+/DISCOUNT_*.md
+/EMAIL_*.md
+/EMPTY_*.md
+/FINAL_SUMMARY.md
+/FIX_*.md
+/GIFT_CARD_*.md
+/GITHUB_*.md
+/GIT_*.md
+/JOB_*.md
+/LOCATION_*.md
+/MIGRATION_*.md
+/ORDER_*.md
+/PAYMENTS_*.md
+/PAYMENT_*.md
+/PRISMA_*.md
+/RAW_JSON_*.md
+/REFERRAL_CODE_*.md
+/REFERRER_*.md
+/SCRIPTS_*.md
+/SERVICE_*.md
+/SOLUTION_SUMMARY.md
+/SQUARE_*.md
+/TIMEZONE_*.md
+/UNION_ST_*.md
+/VERCEL_*.md
+/WEBHOOK_*.md
+/WHAT_SAVED_*.md
 
 # HTML previews
 preview-*.html
