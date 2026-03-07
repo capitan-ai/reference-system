@@ -940,9 +940,9 @@ async function findReferrerByCode(referralCode, organizationId) {
     console.log(`   🏢 Organization ID: ${organizationId}`)
     
     await saveApplicationLog(prisma, {
-      organization_id: organizationId,
-      log_type: 'REFERRAL_LOOKUP',
-      log_id: `lookup-${normalizedCode}-${Date.now()}`,
+      organizationId: organizationId,
+      logType: 'REFERRAL_LOOKUP',
+      logId: `lookup-${normalizedCode}-${Date.now()}`,
       status: 'processing',
       payload: { referralCode, normalizedCode, organizationId }
     })
@@ -974,9 +974,9 @@ async function findReferrerByCode(referralCode, organizationId) {
       console.log(`   ✅ Found referrer in referral_profiles: ${referralProfile.customer.given_name} ${referralProfile.customer.family_name}`)
       
       await saveApplicationLog(prisma, {
-        organization_id: organizationId,
-        log_type: 'REFERRAL_LOOKUP',
-        log_id: `found-profile-${referralProfile.customer.square_customer_id}-${Date.now()}`,
+        organizationId: organizationId,
+        logType: 'REFERRAL_LOOKUP',
+        logId: `found-profile-${referralProfile.customer.square_customer_id}-${Date.now()}`,
         status: 'completed',
         payload: { 
           source: 'referral_profiles',
@@ -1013,9 +1013,9 @@ async function findReferrerByCode(referralCode, organizationId) {
         console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id}...`)
         
         await saveApplicationLog(prisma, {
-          organization_id: organizationId,
-          log_type: 'REFERRAL_PROFILE_SYNC',
-          log_id: `sync-start-${foundReferrer.square_customer_id}-${Date.now()}`,
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-start-${foundReferrer.square_customer_id}-${Date.now()}`,
           status: 'processing',
           payload: { customerId: foundReferrer.square_customer_id, source: 'legacy_lookup' }
         })
@@ -1045,9 +1045,9 @@ async function findReferrerByCode(referralCode, organizationId) {
         console.log(`   ✅ ReferralProfile synced successfully`)
         
         await saveApplicationLog(prisma, {
-          organization_id: organizationId,
-          log_type: 'REFERRAL_PROFILE_SYNC',
-          log_id: `sync-success-${foundReferrer.square_customer_id}-${Date.now()}`,
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-success-${foundReferrer.square_customer_id}-${Date.now()}`,
           status: 'completed',
           payload: { customerId: foundReferrer.square_customer_id, status: 'synced' }
         })
@@ -1055,9 +1055,9 @@ async function findReferrerByCode(referralCode, organizationId) {
         console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
         
         await saveApplicationLog(prisma, {
-          organization_id: organizationId,
-          log_type: 'REFERRAL_PROFILE_SYNC',
-          log_id: `sync-error-${foundReferrer.square_customer_id}-${Date.now()}`,
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-error-${foundReferrer.square_customer_id}-${Date.now()}`,
           status: 'error',
           payload: { customerId: foundReferrer.square_customer_id, error: syncError.message }
         })
@@ -1116,9 +1116,9 @@ async function findReferrerByCode(referralCode, organizationId) {
     console.log(`   ❌ No referrer found with code "${referralCode}" or "${normalizedCode}"`)
     
     await saveApplicationLog(prisma, {
-      organization_id: organizationId,
-      log_type: 'REFERRAL_LOOKUP',
-      log_id: `not-found-${normalizedCode}-${Date.now()}`,
+      organizationId: organizationId,
+      logType: 'REFERRAL_LOOKUP',
+      logId: `not-found-${normalizedCode}-${Date.now()}`,
       status: 'completed',
       payload: { referralCode, normalizedCode, found: false }
     })
@@ -3150,9 +3150,9 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
           console.log(`⚠️ Skipping referrer reward because this looks like self-referral (customerId=${customerId})`)
           
           await saveApplicationLog(prisma, {
-            organization_id: organizationId,
-            log_type: 'REWARD_PROCESSING',
-            log_id: `reward-self-${customerId}-${Date.now()}`,
+            organizationId: organizationId,
+            logType: 'REWARD_PROCESSING',
+            logId: `reward-self-${customerId}-${Date.now()}`,
             status: 'completed',
             payload: { customerId, referrerId: referrer.square_customer_id, reason: 'self_referral' }
           })
