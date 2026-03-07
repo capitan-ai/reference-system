@@ -1,5 +1,5 @@
-import prisma from '../../../lib/prisma-client'
-import { logInfo, logError } from '../../../lib/observability/logger'
+import prisma from '@/lib/prisma-client'
+import { logInfo, logError } from '@/lib/observability/logger'
 
 export const dynamic = 'force-dynamic'
 

@@ -1,8 +1,8 @@
 import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 const { PrismaClient } = require('@prisma/client')
-const { processMasterEarnings } = require('../../../../lib/workers/master-earnings-worker')
-const { refreshMasterPerformance } = require('../../../../scripts/refresh-master-performance')
+const { processMasterEarnings } = require('@/lib/workers/master-earnings-worker')
+const { refreshMasterPerformance } = require('@/scripts/refresh-master-performance')
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
