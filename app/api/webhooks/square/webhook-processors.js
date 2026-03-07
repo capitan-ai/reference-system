@@ -195,7 +195,7 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         customer_id = COALESCE(EXCLUDED.customer_id, bookings.customer_id),
-        location_id = COALESCE(EXCLUDED.location_id, bookings.location_id),
+        location_id = EXCLUDED.location_id,
         status = EXCLUDED.status,
         version = EXCLUDED.version,
         start_at = COALESCE(EXCLUDED.start_at, bookings.start_at),

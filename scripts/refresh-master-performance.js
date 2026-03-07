@@ -13,7 +13,7 @@ async function refreshMasterPerformance(organizationId) {
 INSERT INTO master_performance_daily (
   date, master_id, organization_id, location_id,
   gross_generated, net_master_income, margin_contribution, tips_total,
-  booking_count, fix_count, booked_minutes, updated_at
+  booked_minutes, available_minutes, utilization_rate, booking_count, fix_count, composite_score, updated_at
 )
 WITH 
 ledger_agg AS (
@@ -32,7 +32,7 @@ booking_agg AS (
     (start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date as date,
     technician_id as master_id,
     organization_id,
-    location_id,
+    MAX(location_id::text)::uuid AS location_id,
     COUNT(*) as b_count,
     COUNT(*) FILTER (WHERE service_variation_id IN (SELECT uuid FROM service_variation WHERE name ~* 'fix')) as f_count,
     SUM(duration_minutes) as total_minutes,
@@ -40,7 +40,9 @@ booking_agg AS (
   FROM bookings
   WHERE organization_id = $1::uuid
     AND status = 'ACCEPTED'
-  GROUP BY 1, 2, 3, 4
+    AND location_id IS NOT NULL
+    AND technician_id IS NOT NULL
+  GROUP BY 1, 2, 3
 )
 SELECT 
   ba.date,
@@ -51,9 +53,12 @@ SELECT
   COALESCE(la.commission_cents, 0) as net_master_income,
   (COALESCE(ba.total_gross, 0) - COALESCE(la.commission_cents, 0)) as margin_contribution,
   COALESCE(la.tips_cents, 0) as tips_total,
+  COALESCE(ba.total_minutes, 0) as booked_minutes,
+  0 as available_minutes,
+  0 as utilization_rate,
   ba.b_count as booking_count,
   ba.f_count as fix_count,
-  ba.total_minutes as booked_minutes,
+  0 as composite_score,
   NOW() as updated_at
 FROM booking_agg ba
 LEFT JOIN ledger_agg la ON ba.date = la.date AND ba.master_id = la.master_id
