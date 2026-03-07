@@ -799,15 +799,16 @@ function generatePersonalCode(customerName, customerId) {
     const numericMatches = idStr.match(/\d+/g)
     if (numericMatches && numericMatches.length > 0) {
       const allNums = numericMatches.join('')
-      idPart = allNums.slice(-4).padStart(4, '0')
+      // Use FIRST 4 digits for future codes
+      idPart = allNums.substring(0, 4).padStart(4, '0')
     } else {
-      idPart = idStr.slice(-4).toUpperCase()
+      idPart = idStr.substring(0, 4).toUpperCase()
     }
   } else {
     idPart = Date.now().toString().slice(-4)
   }
   if (idPart.length < 3) idPart = idPart.padStart(4, '0')
-  if (idPart.length > 4) idPart = idPart.slice(-4)
+  if (idPart.length > 4) idPart = idPart.slice(0, 4)
   return `${namePart}${idPart}`
 }
 
@@ -2629,6 +2630,7 @@ async function sendReferralCodeToNewClient(
       reason: null
     }
 
+    let emailSent = false
     // Send email using email service
     if (email) {
       const emailResult = await sendReferralCodeEmail(
@@ -2645,6 +2647,7 @@ async function sendReferralCodeToNewClient(
         if (emailResult.skipped) {
           console.log(`⏸️ Email sending is disabled (skipped sending to ${email})`)
         } else {
+          emailSent = true
           console.log(`✅ Referral email sent successfully to ${email}`)
         }
       } else {
@@ -2656,7 +2659,11 @@ async function sendReferralCodeToNewClient(
     // Check if SMS sending is disabled
     const smsDisabled = process.env.DISABLE_SMS_SENDING === 'true' || process.env.SMS_ENABLED === 'false'
     
-    if (smsDisabled) {
+    if (emailSent) {
+      console.log(`ℹ️ Referral email was sent, skipping SMS for ${customerName}`)
+      smsAnalytics.skipped = true
+      smsAnalytics.reason = 'email-sent'
+    } else if (smsDisabled) {
       console.log('ℹ️ Referral SMS sending is disabled (DISABLE_SMS_SENDING or SMS_ENABLED=false)')
       smsAnalytics.skipped = true
       smsAnalytics.reason = 'sms-disabled'
