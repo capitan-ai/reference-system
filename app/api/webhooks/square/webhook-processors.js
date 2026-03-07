@@ -7,9 +7,7 @@
 
 import prisma from '../../../../lib/prisma-client'
 import { Prisma } from '@prisma/client'
-import locationResolver from '../../../../lib/location-resolver'
-
-const { resolveLocationUuidForSquareLocationId } = locationResolver
+import { resolveLocationUuidForSquareLocationId } from '../../../../lib/location-resolver'
 
 // Helper to clean values
 function cleanValue(val) {
