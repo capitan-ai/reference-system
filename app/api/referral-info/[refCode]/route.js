@@ -27,32 +27,36 @@ export async function GET(request, { params }) {
           { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
           { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
         ]
-      },
-      include: {
-        customer: {
-          ...(organizationId ? { where: { organization_id: organizationId } } : {}),
-          select: {
-            square_customer_id: true,
-            given_name: true,
-            family_name: true,
-            email_address: true
-          }
-        }
       }
     })
 
     // If we found a referral profile, use its organization_id for subsequent queries
-    if (referralProfile && !organizationId) {
-      organizationId = referralProfile.organization_id
-    }
+    if (referralProfile) {
+      if (!organizationId) {
+        organizationId = referralProfile.organization_id
+      }
 
-    if (referralProfile && referralProfile.customer) {
-      const referrerName = `${referralProfile.customer.given_name || ''} ${referralProfile.customer.family_name || ''}`.trim() || null
-      return Response.json({
-        referrerName: referrerName,
-        found: true,
-        code: normalizedCode
+      // Fetch customer details from square_existing_clients using square_customer_id
+      const customer = await prisma.squareExistingClient.findFirst({
+        where: {
+          square_customer_id: referralProfile.square_customer_id,
+          organization_id: organizationId
+        },
+        select: {
+          given_name: true,
+          family_name: true,
+          email_address: true
+        }
       })
+
+      if (customer) {
+        const referrerName = `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || null
+        return Response.json({
+          referrerName: referrerName,
+          found: true,
+          code: normalizedCode
+        })
+      }
     }
 
     // Fallback to square_existing_clients for backward compatibility
