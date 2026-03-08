@@ -2853,12 +2853,22 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           
           // If no rows updated, insert new record
           if (updateResult === 0) {
-            await prisma.orderLineItem.create({
-              data: {
-                ...lineItemData,
-                id: crypto.randomUUID(),
+            try {
+              await prisma.orderLineItem.create({
+                data: {
+                  ...lineItemData,
+                  id: crypto.randomUUID(),
+                }
+              })
+            } catch (createError) {
+              // If it's a unique constraint error, it means another process 
+              // already created it, which is fine.
+              if (createError.code === 'P2002') {
+                console.log(`ℹ️ Line item ${lineItem.uid} already created by another process`)
+              } else {
+                throw createError
               }
-            })
+            }
           }
         } else {
           // If no uid, create new record (uid is nullable and unique)
