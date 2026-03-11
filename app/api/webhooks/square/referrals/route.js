@@ -956,43 +956,48 @@ async function findReferrerByCode(referralCode, organizationId) {
           { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
           { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
         ]
-      },
-      include: {
-        customer: {
-          where: { organization_id: organizationId }, // CRITICAL: Filter customer by organization_id
-          select: {
-            square_customer_id: true,
-            given_name: true,
-            family_name: true,
-            email_address: true,
-            gift_card_id: true
-          }
-        }
       }
     })
     
-    if (referralProfile && referralProfile.customer) {
-      console.log(`   ✅ Found referrer in referral_profiles: ${referralProfile.customer.given_name} ${referralProfile.customer.family_name}`)
-      
-      await saveApplicationLog(prisma, {
-        organizationId: organizationId,
-        logType: 'REFERRAL_LOOKUP',
-        logId: `found-profile-${referralProfile.customer.square_customer_id}-${Date.now()}`,
-        status: 'completed',
-        payload: { 
-          source: 'referral_profiles',
-          customerId: referralProfile.customer.square_customer_id,
-          name: `${referralProfile.customer.given_name} ${referralProfile.customer.family_name}`
+    if (referralProfile) {
+      // Fetch customer details from square_existing_clients using square_customer_id
+      const customer = await prisma.squareExistingClient.findFirst({
+        where: { 
+          square_customer_id: referralProfile.square_customer_id,
+          organization_id: organizationId
+        },
+        select: {
+          square_customer_id: true,
+          given_name: true,
+          family_name: true,
+          email_address: true,
+          gift_card_id: true
         }
       })
 
-      return {
-        square_customer_id: referralProfile.customer.square_customer_id,
-        given_name: referralProfile.customer.given_name,
-        family_name: referralProfile.customer.family_name,
-        email_address: referralProfile.customer.email_address,
-        personal_code: referralProfile.personal_code,
-        gift_card_id: referralProfile.customer.gift_card_id
+      if (customer) {
+        console.log(`   ✅ Found referrer in referral_profiles: ${customer.given_name} ${customer.family_name}`)
+        
+        await saveApplicationLog(prisma, {
+          organizationId: organizationId,
+          logType: 'REFERRAL_LOOKUP',
+          logId: `found-profile-${customer.square_customer_id}-${Date.now()}`,
+          status: 'completed',
+          payload: { 
+            source: 'referral_profiles',
+            customerId: customer.square_customer_id,
+            name: `${customer.given_name} ${customer.family_name}`
+          }
+        })
+
+        return {
+          square_customer_id: customer.square_customer_id,
+          given_name: customer.given_name,
+          family_name: customer.family_name,
+          email_address: customer.email_address,
+          personal_code: referralProfile.personal_code,
+          gift_card_id: customer.gift_card_id
+        }
       }
     }
     
