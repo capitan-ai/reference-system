@@ -8,28 +8,54 @@ async function main() {
 WITH
 -- 1. Create a mapping of all IDs to a single "Canonical ID"
 -- Rule: Canonical ID is the one with the most recent activity (booking or payment)
+-- Group by normalized phone OR email (not AND)
 id_activity_rank AS (
   SELECT 
     square_customer_id,
     email_address,
-    phone_number,
+    CASE 
+      WHEN phone_number LIKE '+1%' THEN SUBSTRING(phone_number FROM 3)
+      WHEN phone_number LIKE '1%' AND LENGTH(REGEXP_REPLACE(phone_number, '[^0-9]', '', 'g')) = 11 THEN SUBSTRING(REGEXP_REPLACE(phone_number, '[^0-9]', '', 'g') FROM 2)
+      ELSE REGEXP_REPLACE(phone_number, '[^0-9]', '', 'g')
+    END as normalized_phone,
     organization_id,
     COALESCE(
       (SELECT MAX(start_at) FROM bookings b WHERE b.customer_id = c.square_customer_id),
       (SELECT MAX(created_at) FROM payments p WHERE p.customer_id = c.square_customer_id)
     ) as last_activity
   FROM square_existing_clients c
+  WHERE (email_address IS NOT NULL AND email_address != '') 
+     OR (phone_number IS NOT NULL AND phone_number != '')
 ),
-canonical_mapping AS (
+phone_canonical AS (
   SELECT 
     square_customer_id,
     FIRST_VALUE(square_customer_id) OVER (
-      PARTITION BY COALESCE(NULLIF(email_address, ''), NULLIF(phone_number, '')), organization_id 
+      PARTITION BY normalized_phone, organization_id 
       ORDER BY last_activity DESC NULLS LAST
-    ) as canonical_id
+    ) as phone_canonical_id
   FROM id_activity_rank
-  WHERE (email_address IS NOT NULL AND email_address != '') 
-     OR (phone_number IS NOT NULL AND phone_number != '')
+  WHERE normalized_phone IS NOT NULL AND normalized_phone != ''
+),
+email_canonical AS (
+  SELECT 
+    square_customer_id,
+    FIRST_VALUE(square_customer_id) OVER (
+      PARTITION BY email_address, organization_id 
+      ORDER BY last_activity DESC NULLS LAST
+    ) as email_canonical_id
+  FROM id_activity_rank
+  WHERE email_address IS NOT NULL AND email_address != ''
+),
+canonical_mapping AS (
+  SELECT 
+    iar.square_customer_id,
+    -- Priority: phone match > email match > self
+    -- If phone matches, use phone canonical (even if email is different)
+    COALESCE(pc.phone_canonical_id, ec.email_canonical_id, iar.square_customer_id) as canonical_id
+  FROM id_activity_rank iar
+  LEFT JOIN phone_canonical pc ON iar.square_customer_id = pc.square_customer_id
+  LEFT JOIN email_canonical ec ON iar.square_customer_id = ec.square_customer_id
 ),
 
 -- 2. Classify all line items using the canonical mapping
@@ -102,7 +128,8 @@ bookings_agg AS (
   GROUP BY 1,2
 ),
 
--- 6. Collect all unique keys (only canonical ones)
+-- 6. Collect all unique keys
+-- Include canonical_ids from aggregates AND original customer_ids that map to those canonical_ids
 keys AS (
   SELECT organization_id, customer_id FROM bookings_agg
   UNION
@@ -110,9 +137,15 @@ keys AS (
   UNION
   SELECT organization_id, customer_id FROM payments_agg
   UNION
-  SELECT c.organization_id, COALESCE(m.canonical_id, c.square_customer_id) as customer_id 
+  -- Include original customer_ids that map to canonical_ids in aggregates
+  SELECT c.organization_id, c.square_customer_id as customer_id 
   FROM square_existing_clients c
-  LEFT JOIN canonical_mapping m ON c.square_customer_id = m.square_customer_id
+  INNER JOIN canonical_mapping m ON c.square_customer_id = m.square_customer_id
+  WHERE m.canonical_id IN (
+    SELECT customer_id FROM bookings_agg
+    UNION SELECT customer_id FROM orders_agg
+    UNION SELECT customer_id FROM payments_agg
+  )
 ),
 
 -- 7. Final calculation
@@ -147,9 +180,10 @@ final_data AS (
     p.last_pay_at AS last_payment_at
   FROM keys k
   LEFT JOIN square_existing_clients c ON c.organization_id = k.organization_id AND c.square_customer_id = k.customer_id
-  LEFT JOIN bookings_agg b ON b.organization_id=k.organization_id AND b.customer_id=k.customer_id
-  LEFT JOIN orders_agg oa ON oa.organization_id=k.organization_id AND oa.customer_id=k.customer_id
-  LEFT JOIN payments_agg p ON p.organization_id=k.organization_id AND p.customer_id=k.customer_id
+  LEFT JOIN canonical_mapping m ON k.customer_id = m.square_customer_id
+  LEFT JOIN bookings_agg b ON b.organization_id=k.organization_id AND b.customer_id=COALESCE(m.canonical_id, k.customer_id)
+  LEFT JOIN orders_agg oa ON oa.organization_id=k.organization_id AND oa.customer_id=COALESCE(m.canonical_id, k.customer_id)
+  LEFT JOIN payments_agg p ON p.organization_id=k.organization_id AND p.customer_id=COALESCE(m.canonical_id, k.customer_id)
 )
 
 -- 8. Reset table and UPSERT only canonical records
