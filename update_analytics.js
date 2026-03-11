@@ -1,88 +1,43 @@
-import { createRequire } from 'module'
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
-const require = createRequire(import.meta.url)
-const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
-
-const logPrisma = new PrismaClient()
-
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  })
-}
-
-function authorize(request) {
-  const cronSecret = process.env.CRON_SECRET
-  if (!cronSecret) {
-    console.warn('⚠️ CRON_SECRET not set - allowing unauthenticated access (development only)')
-    return { authorized: true, method: 'no-secret-set' }
-  }
-
-  const authHeader = request.headers.get('Authorization') || ''
-  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key') || ''
-  const userAgent = request.headers.get('user-agent') || ''
+async function main() {
+  console.log('🚀 Starting deep deduplication and classification...');
   
-  if (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-auth-header' }
-  }
-
-  if (cronHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-header' }
-  }
-
-  const isVercelRequest = 
-    userAgent.includes('vercel-cron') || 
-    userAgent.includes('vercel') ||
-    userAgent.toLowerCase().includes('vercel') ||
-    (!userAgent || userAgent.length === 0)
-  
-  if (isVercelRequest) {
-    return { authorized: true, method: 'vercel-cron-user-agent' }
-  }
-
-  return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
-}
-
-async function handle(request) {
-  const startTime = Date.now()
-  const auth = authorize(request)
-  if (!auth.authorized) {
-    return json({ error: 'Unauthorized', reason: auth.reason }, 401)
-  }
-  
-  const cronId = `cron-refresh-customer-analytics-${Date.now()}`
-  const prisma = new PrismaClient()
-  const url = new URL(request.url)
-
-  try {
-    const isFull = url.searchParams.get('mode') === 'full' || url.searchParams.get('full') === 'true'
-    const bookingsDateFilter = isFull ? "" : "AND b_inner.start_at >= now() - interval '90 days'"
-    const paymentsDateFilter = isFull ? "" : "AND p_inner.created_at >= now() - interval '90 days'"
-    const ordersDateFilter = isFull ? "" : "AND o_inner.created_at >= now() - interval '90 days'"
-
-    const refreshSQL = `
+  const refreshSQL = `
 WITH
--- 0. Email and Phone based ID mapping for deduplication
-id_mapping AS (
+-- 1. Create a mapping of all IDs to a single "Canonical ID"
+-- Rule: Canonical ID is the one with the most recent activity (booking or payment)
+id_activity_rank AS (
+  SELECT 
+    square_customer_id,
+    email_address,
+    phone_number,
+    organization_id,
+    COALESCE(
+      (SELECT MAX(start_at) FROM bookings b WHERE b.customer_id = c.square_customer_id),
+      (SELECT MAX(created_at) FROM payments p WHERE p.customer_id = c.square_customer_id)
+    ) as last_activity
+  FROM square_existing_clients c
+),
+canonical_mapping AS (
   SELECT 
     square_customer_id,
     FIRST_VALUE(square_customer_id) OVER (
       PARTITION BY COALESCE(NULLIF(email_address, ''), NULLIF(phone_number, '')), organization_id 
-      ORDER BY created_at ASC
+      ORDER BY last_activity DESC NULLS LAST
     ) as canonical_id
-  FROM square_existing_clients
+  FROM id_activity_rank
   WHERE (email_address IS NOT NULL AND email_address != '') 
      OR (phone_number IS NOT NULL AND phone_number != '')
 ),
 
--- 1. Classify all line items
+-- 2. Classify all line items using the canonical mapping
 li_classified AS (
   SELECT
-    o.organization_id, COALESCE(m.canonical_id, o.customer_id, p.customer_id) as customer_id, li.order_id,
+    o.organization_id, 
+    COALESCE(m.canonical_id, o.customer_id, p.customer_id) as customer_id, 
+    li.order_id,
     COUNT(*) FILTER (WHERE li.name ~* '(class|training|course|level up|workshop|lesson|education|deposit|school|license|trainig|days russian)') AS training_items,
     COUNT(*) FILTER (WHERE li.name ~* '(manicure|pedicure|gel|removal|extension|polish|full set|fill|nail)' 
                      AND li.name !~* '(class|training|course|level up|workshop|lesson|education|deposit|school|license|trainig|days russian)') AS salon_items,
@@ -90,15 +45,16 @@ li_classified AS (
   FROM order_line_items li
   JOIN orders o ON li.order_id = o.id
   LEFT JOIN payments p ON o.id = p.order_id
-  LEFT JOIN id_mapping m ON COALESCE(o.customer_id, p.customer_id) = m.square_customer_id
+  LEFT JOIN canonical_mapping m ON COALESCE(o.customer_id, p.customer_id) = m.square_customer_id
   WHERE COALESCE(o.customer_id, p.customer_id) IS NOT NULL
   GROUP BY 1,2,3
 ),
 
--- 2. Aggregate orders
+-- 3. Aggregate orders (POS visits)
 orders_agg AS (
   SELECT
-    o_inner.organization_id, COALESCE(m.canonical_id, o_inner.customer_id, p_inner.customer_id) as customer_id,
+    o_inner.organization_id, 
+    COALESCE(m.canonical_id, o_inner.customer_id, p_inner.customer_id) as customer_id,
     MIN(o_inner.created_at) AS first_any_o,
     MAX(o_inner.created_at) AS last_any_o,
     COUNT(DISTINCT o_inner.order_id) FILTER (WHERE o_inner.state = 'COMPLETED' AND COALESCE(lic.salon_items,0) > 0) AS service_order_count,
@@ -108,46 +64,45 @@ orders_agg AS (
     SUM(COALESCE(lic.salon_items, 0)) as total_salon_items
   FROM orders o_inner
   LEFT JOIN payments p_inner ON o_inner.id = p_inner.order_id
-  LEFT JOIN id_mapping m ON COALESCE(o_inner.customer_id, p_inner.customer_id) = m.square_customer_id
+  LEFT JOIN canonical_mapping m ON COALESCE(o_inner.customer_id, p_inner.customer_id) = m.square_customer_id
   LEFT JOIN li_classified lic ON lic.order_id = o_inner.id
   WHERE COALESCE(o_inner.customer_id, p_inner.customer_id) IS NOT NULL
-    ${ordersDateFilter}
   GROUP BY 1,2
 ),
 
--- 3. Aggregate payments
+-- 4. Aggregate payments
 payments_agg AS (
   SELECT
-    p_inner.organization_id, COALESCE(m.canonical_id, p_inner.customer_id) as customer_id,
+    p_inner.organization_id, 
+    COALESCE(m.canonical_id, p_inner.customer_id) as customer_id,
     SUM(p_inner.total_money_amount) FILTER (WHERE p_inner.status = 'COMPLETED') AS gross_revenue_cents,
     SUM(COALESCE(p_inner.tip_money_amount, 0)) FILTER (WHERE p_inner.status = 'COMPLETED') AS total_tips_cents,
     COUNT(*) FILTER (WHERE p_inner.status = 'COMPLETED') AS total_payments,
     AVG(p_inner.total_money_amount) FILTER (WHERE p_inner.status = 'COMPLETED') AS avg_ticket_cents,
     MAX(p_inner.created_at) FILTER (WHERE p_inner.status = 'COMPLETED') AS last_pay_at
   FROM payments p_inner
-  LEFT JOIN id_mapping m ON p_inner.customer_id = m.square_customer_id
+  LEFT JOIN canonical_mapping m ON p_inner.customer_id = m.square_customer_id
   WHERE p_inner.customer_id IS NOT NULL
-    ${paymentsDateFilter}
   GROUP BY 1,2
 ),
 
--- 4. Aggregate bookings
+-- 5. Aggregate bookings
 bookings_agg AS (
   SELECT
-    b_inner.organization_id, COALESCE(m.canonical_id, b_inner.customer_id) as customer_id,
+    b_inner.organization_id, 
+    COALESCE(m.canonical_id, b_inner.customer_id) as customer_id,
     MIN(b_inner.start_at) AS first_b, MAX(b_inner.start_at) AS last_b,
     COUNT(*) FILTER (WHERE b_inner.status IN ('ACCEPTED','COMPLETED')) AS b_count,
     COUNT(*) FILTER (WHERE b_inner.status = 'NO_SHOW') AS b_no_shows,
     COUNT(*) FILTER (WHERE b_inner.status = 'CANCELLED_BY_CUSTOMER') AS b_cancelled_by_customer,
     COUNT(*) FILTER (WHERE b_inner.status = 'CANCELLED_BY_SELLER') AS b_cancelled_by_seller
   FROM bookings b_inner
-  LEFT JOIN id_mapping m ON b_inner.customer_id = m.square_customer_id
+  LEFT JOIN canonical_mapping m ON b_inner.customer_id = m.square_customer_id
   WHERE b_inner.customer_id IS NOT NULL
-    ${bookingsDateFilter}
   GROUP BY 1,2
 ),
 
--- 5. Collect all unique keys
+-- 6. Collect all unique keys (only canonical ones)
 keys AS (
   SELECT organization_id, customer_id FROM bookings_agg
   UNION
@@ -155,11 +110,12 @@ keys AS (
   UNION
   SELECT organization_id, customer_id FROM payments_agg
   UNION
-  SELECT c.organization_id, COALESCE(m.canonical_id, c.square_customer_id) as customer_id FROM square_existing_clients c
-  LEFT JOIN id_mapping m ON c.square_customer_id = m.square_customer_id
+  SELECT c.organization_id, COALESCE(m.canonical_id, c.square_customer_id) as customer_id 
+  FROM square_existing_clients c
+  LEFT JOIN canonical_mapping m ON c.square_customer_id = m.square_customer_id
 ),
 
--- 6. Final calculation
+-- 7. Final calculation
 final_data AS (
   SELECT
     k.organization_id, k.customer_id,
@@ -191,7 +147,7 @@ final_data AS (
   LEFT JOIN payments_agg p ON p.organization_id=k.organization_id AND p.customer_id=k.customer_id
 )
 
--- 7. Idempotent UPSERT
+-- 8. Reset table and UPSERT only canonical records
 INSERT INTO customer_analytics (
   organization_id, square_customer_id, 
   first_booking_at, last_booking_at, total_accepted_bookings, total_revenue_cents,
@@ -242,23 +198,18 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
   updated_at = NOW();
 `;
 
-    await prisma.$executeRawUnsafe(refreshSQL)
-    await prisma.$disconnect()
-
-    return json({ success: true, message: 'Customer analytics refresh completed' })
-
-  } catch (error) {
-    console.error('❌ Error during customer analytics refresh:', error.message)
-    return json({ success: false, error: error.message }, 500)
+  try {
+    console.log('Cleaning up old analytics data...');
+    await prisma.$executeRawUnsafe('DELETE FROM customer_analytics');
+    
+    console.log('Executing deep refresh with canonical ID mapping...');
+    await prisma.$executeRawUnsafe(refreshSQL);
+    console.log('✅ Done!');
+  } catch (e) {
+    console.error('❌ Error:', e.message);
   } finally {
-    await logPrisma.$disconnect()
+    await prisma.$disconnect();
   }
 }
 
-export async function POST(request) {
-  return handle(request)
-}
-
-export async function GET(request) {
-  return handle(request)
-}
+main();

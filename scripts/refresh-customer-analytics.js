@@ -1,65 +1,14 @@
-import { createRequire } from 'module'
+require('dotenv').config()
+const prisma = require('../lib/prisma-client')
 
-const require = createRequire(import.meta.url)
-const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
+async function refreshCustomerAnalytics(mode = 'full') {
+  console.log(`\n📊 Refreshing Enterprise Customer Analytics (mode: ${mode})...\n`)
+  console.log('='.repeat(80))
 
-const logPrisma = new PrismaClient()
-
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  })
-}
-
-function authorize(request) {
-  const cronSecret = process.env.CRON_SECRET
-  if (!cronSecret) {
-    console.warn('⚠️ CRON_SECRET not set - allowing unauthenticated access (development only)')
-    return { authorized: true, method: 'no-secret-set' }
-  }
-
-  const authHeader = request.headers.get('Authorization') || ''
-  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key') || ''
-  const userAgent = request.headers.get('user-agent') || ''
-  
-  if (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-auth-header' }
-  }
-
-  if (cronHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-header' }
-  }
-
-  const isVercelRequest = 
-    userAgent.includes('vercel-cron') || 
-    userAgent.includes('vercel') ||
-    userAgent.toLowerCase().includes('vercel') ||
-    (!userAgent || userAgent.length === 0)
-  
-  if (isVercelRequest) {
-    return { authorized: true, method: 'vercel-cron-user-agent' }
-  }
-
-  return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
-}
-
-async function handle(request) {
   const startTime = Date.now()
-  const auth = authorize(request)
-  if (!auth.authorized) {
-    return json({ error: 'Unauthorized', reason: auth.reason }, 401)
-  }
-  
-  const cronId = `cron-refresh-customer-analytics-${Date.now()}`
-  const prisma = new PrismaClient()
-  const url = new URL(request.url)
 
   try {
-    const isFull = url.searchParams.get('mode') === 'full' || url.searchParams.get('full') === 'true'
+    const isFull = mode === 'full'
     const bookingsDateFilter = isFull ? "" : "AND b_inner.start_at >= now() - interval '90 days'"
     const paymentsDateFilter = isFull ? "" : "AND p_inner.created_at >= now() - interval '90 days'"
     const ordersDateFilter = isFull ? "" : "AND o_inner.created_at >= now() - interval '90 days'"
@@ -242,23 +191,21 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
   updated_at = NOW();
 `;
 
+    console.log('Executing Enterprise Refresh query...');
     await prisma.$executeRawUnsafe(refreshSQL)
-    await prisma.$disconnect()
-
-    return json({ success: true, message: 'Customer analytics refresh completed' })
+    
+    const elapsed = Date.now() - startTime
+    console.log(`✅ Refresh completed in ${(elapsed / 1000).toFixed(2)}s`)
+    console.log(`   Mode: ${mode}`)
+    console.log('='.repeat(80))
 
   } catch (error) {
-    console.error('❌ Error during customer analytics refresh:', error.message)
-    return json({ success: false, error: error.message }, 500)
+    console.error('❌ Error during refresh:', error.message)
+    process.exit(1)
   } finally {
-    await logPrisma.$disconnect()
+    await prisma.$disconnect()
   }
 }
 
-export async function POST(request) {
-  return handle(request)
-}
-
-export async function GET(request) {
-  return handle(request)
-}
+const mode = process.argv[2] || 'full'
+refreshCustomerAnalytics(mode)

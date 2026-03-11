@@ -1,69 +1,37 @@
-import { createRequire } from 'module'
+require('dotenv').config()
+const prisma = require('../lib/prisma-client')
 
-const require = createRequire(import.meta.url)
-const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
+async function backfillMissingFields() {
+  console.log('\n🔄 Backfilling Missing Fields in Customer Analytics\n')
+  console.log('='.repeat(80))
+  console.log('This script will recalculate the following fields for all customers:')
+  console.log('  - total_no_shows')
+  console.log('  - total_cancelled_by_customer')
+  console.log('  - total_cancelled_by_seller')
+  console.log('  - total_tips_cents')
+  console.log('  - total_payments')
+  console.log('  - avg_ticket_cents')
+  console.log('='.repeat(80))
 
-const logPrisma = new PrismaClient()
-
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  })
-}
-
-function authorize(request) {
-  const cronSecret = process.env.CRON_SECRET
-  if (!cronSecret) {
-    console.warn('⚠️ CRON_SECRET not set - allowing unauthenticated access (development only)')
-    return { authorized: true, method: 'no-secret-set' }
-  }
-
-  const authHeader = request.headers.get('Authorization') || ''
-  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key') || ''
-  const userAgent = request.headers.get('user-agent') || ''
-  
-  if (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-auth-header' }
-  }
-
-  if (cronHeader === cronSecret) {
-    return { authorized: true, method: 'vercel-cron-header' }
-  }
-
-  const isVercelRequest = 
-    userAgent.includes('vercel-cron') || 
-    userAgent.includes('vercel') ||
-    userAgent.toLowerCase().includes('vercel') ||
-    (!userAgent || userAgent.length === 0)
-  
-  if (isVercelRequest) {
-    return { authorized: true, method: 'vercel-cron-user-agent' }
-  }
-
-  return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
-}
-
-async function handle(request) {
   const startTime = Date.now()
-  const auth = authorize(request)
-  if (!auth.authorized) {
-    return json({ error: 'Unauthorized', reason: auth.reason }, 401)
-  }
-  
-  const cronId = `cron-refresh-customer-analytics-${Date.now()}`
-  const prisma = new PrismaClient()
-  const url = new URL(request.url)
 
   try {
-    const isFull = url.searchParams.get('mode') === 'full' || url.searchParams.get('full') === 'true'
-    const bookingsDateFilter = isFull ? "" : "AND b_inner.start_at >= now() - interval '90 days'"
-    const paymentsDateFilter = isFull ? "" : "AND p_inner.created_at >= now() - interval '90 days'"
-    const ordersDateFilter = isFull ? "" : "AND o_inner.created_at >= now() - interval '90 days'"
+    // Check current state before backfill
+    console.log('\n📊 Checking current state...')
+    const beforeStats = await prisma.$queryRaw`
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(*) FILTER (WHERE total_no_shows > 0) as has_no_shows,
+        COUNT(*) FILTER (WHERE total_cancelled_by_customer > 0) as has_cancelled_by_customer,
+        COUNT(*) FILTER (WHERE total_cancelled_by_seller > 0) as has_cancelled_by_seller,
+        COUNT(*) FILTER (WHERE total_tips_cents > 0) as has_tips,
+        COUNT(*) FILTER (WHERE avg_ticket_cents > 0) as has_avg_ticket
+      FROM customer_analytics
+    `
+    console.log('Before backfill:')
+    console.table(beforeStats)
 
+    // Use the same SQL as refresh-customer-analytics.js but with full mode
     const refreshSQL = `
 WITH
 -- 0. Email and Phone based ID mapping for deduplication
@@ -111,7 +79,6 @@ orders_agg AS (
   LEFT JOIN id_mapping m ON COALESCE(o_inner.customer_id, p_inner.customer_id) = m.square_customer_id
   LEFT JOIN li_classified lic ON lic.order_id = o_inner.id
   WHERE COALESCE(o_inner.customer_id, p_inner.customer_id) IS NOT NULL
-    ${ordersDateFilter}
   GROUP BY 1,2
 ),
 
@@ -127,7 +94,6 @@ payments_agg AS (
   FROM payments p_inner
   LEFT JOIN id_mapping m ON p_inner.customer_id = m.square_customer_id
   WHERE p_inner.customer_id IS NOT NULL
-    ${paymentsDateFilter}
   GROUP BY 1,2
 ),
 
@@ -143,7 +109,6 @@ bookings_agg AS (
   FROM bookings b_inner
   LEFT JOIN id_mapping m ON b_inner.customer_id = m.square_customer_id
   WHERE b_inner.customer_id IS NOT NULL
-    ${bookingsDateFilter}
   GROUP BY 1,2
 ),
 
@@ -240,25 +205,52 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
   last_payment_at = EXCLUDED.last_payment_at,
   customer_segment = EXCLUDED.customer_segment,
   updated_at = NOW();
-`;
+`
 
+    console.log('\n🔄 Executing full refresh to backfill missing fields...')
+    const queryStartTime = Date.now()
     await prisma.$executeRawUnsafe(refreshSQL)
-    await prisma.$disconnect()
+    const queryElapsed = Date.now() - queryStartTime
+    console.log(`✅ Refresh completed in ${(queryElapsed / 1000).toFixed(2)}s`)
 
-    return json({ success: true, message: 'Customer analytics refresh completed' })
+    // Check state after backfill
+    console.log('\n📊 Checking state after backfill...')
+    const afterStats = await prisma.$queryRaw`
+      SELECT 
+        COUNT(*) as total_records,
+        COUNT(*) FILTER (WHERE total_no_shows > 0) as has_no_shows,
+        COUNT(*) FILTER (WHERE total_cancelled_by_customer > 0) as has_cancelled_by_customer,
+        COUNT(*) FILTER (WHERE total_cancelled_by_seller > 0) as has_cancelled_by_seller,
+        COUNT(*) FILTER (WHERE total_tips_cents > 0) as has_tips,
+        COUNT(*) FILTER (WHERE avg_ticket_cents > 0) as has_avg_ticket
+      FROM customer_analytics
+    `
+    console.log('After backfill:')
+    console.table(afterStats)
+
+    // Calculate improvements
+    const before = beforeStats[0]
+    const after = afterStats[0]
+    console.log('\n📈 Improvements:')
+    console.log(`  total_no_shows: ${before.has_no_shows} → ${after.has_no_shows} (+${after.has_no_shows - before.has_no_shows})`)
+    console.log(`  total_cancelled_by_customer: ${before.has_cancelled_by_customer} → ${after.has_cancelled_by_customer} (+${after.has_cancelled_by_customer - before.has_cancelled_by_customer})`)
+    console.log(`  total_cancelled_by_seller: ${before.has_cancelled_by_seller} → ${after.has_cancelled_by_seller} (+${after.has_cancelled_by_seller - before.has_cancelled_by_seller})`)
+    console.log(`  total_tips_cents: ${before.has_tips} → ${after.has_tips} (+${after.has_tips - before.has_tips})`)
+    console.log(`  avg_ticket_cents: ${before.has_avg_ticket} → ${after.has_avg_ticket} (+${after.has_avg_ticket - before.has_avg_ticket})`)
+
+    const totalElapsed = Date.now() - startTime
+    console.log('\n' + '='.repeat(80))
+    console.log(`✅ Backfill completed successfully in ${(totalElapsed / 1000).toFixed(2)}s`)
+    console.log('='.repeat(80) + '\n')
 
   } catch (error) {
-    console.error('❌ Error during customer analytics refresh:', error.message)
-    return json({ success: false, error: error.message }, 500)
+    console.error('\n❌ Error during backfill:', error.message)
+    console.error(error)
+    process.exit(1)
   } finally {
-    await logPrisma.$disconnect()
+    await prisma.$disconnect()
   }
 }
 
-export async function POST(request) {
-  return handle(request)
-}
+backfillMissingFields()
 
-export async function GET(request) {
-  return handle(request)
-}
