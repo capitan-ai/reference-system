@@ -128,6 +128,10 @@ keys AS (
 final_data AS (
   SELECT
     k.organization_id, k.customer_id,
+    c.given_name,
+    c.family_name,
+    c.email_address,
+    c.phone_number,
     CASE WHEN b.first_b IS NULL THEN oa.first_any_o WHEN oa.first_any_o IS NULL THEN b.first_b ELSE LEAST(b.first_b, oa.first_any_o) END AS first_visit_at,
     CASE WHEN b.last_b IS NULL THEN oa.last_any_o WHEN oa.last_any_o IS NULL THEN b.last_b ELSE GREATEST(b.last_b, oa.last_any_o) END AS last_visit_at,
     (COALESCE(b.b_count,0) + COALESCE(oa.service_order_count,0) + COALESCE(oa.training_order_count,0)) AS total_visits,
@@ -151,6 +155,7 @@ final_data AS (
     COALESCE(p.gross_revenue_cents,0) AS gross_revenue_cents,
     p.last_pay_at AS last_payment_at
   FROM keys k
+  LEFT JOIN square_existing_clients c ON c.organization_id = k.organization_id AND c.square_customer_id = k.customer_id
   LEFT JOIN bookings_agg b ON b.organization_id=k.organization_id AND b.customer_id=k.customer_id
   LEFT JOIN orders_agg oa ON oa.organization_id=k.organization_id AND oa.customer_id=k.customer_id
   LEFT JOIN payments_agg p ON p.organization_id=k.organization_id AND p.customer_id=k.customer_id
@@ -159,6 +164,7 @@ final_data AS (
 -- 7. Idempotent UPSERT
 INSERT INTO customer_analytics (
   organization_id, square_customer_id, 
+  given_name, family_name, email_address, phone_number,
   first_booking_at, last_booking_at, total_accepted_bookings, total_revenue_cents,
   total_no_shows, total_cancelled_by_customer, total_cancelled_by_seller,
   total_tips_cents, total_payments, avg_ticket_cents,
@@ -168,6 +174,7 @@ INSERT INTO customer_analytics (
 )
 SELECT
   fd.organization_id, fd.customer_id, 
+  fd.given_name, fd.family_name, fd.email_address, fd.phone_number,
   fd.first_visit_at, fd.last_visit_at, fd.total_visits, fd.gross_revenue_cents,
   fd.total_no_shows, fd.total_cancelled_by_customer, fd.total_cancelled_by_seller,
   fd.total_tips_cents, fd.total_payments, fd.avg_ticket_cents,
@@ -183,6 +190,10 @@ SELECT
   END
 FROM final_data fd
 ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
+  given_name = COALESCE(EXCLUDED.given_name, customer_analytics.given_name),
+  family_name = COALESCE(EXCLUDED.family_name, customer_analytics.family_name),
+  email_address = COALESCE(EXCLUDED.email_address, customer_analytics.email_address),
+  phone_number = COALESCE(EXCLUDED.phone_number, customer_analytics.phone_number),
   first_booking_at = EXCLUDED.first_booking_at,
   last_booking_at = EXCLUDED.last_booking_at,
   total_accepted_bookings = EXCLUDED.total_accepted_bookings,
