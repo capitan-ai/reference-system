@@ -83,7 +83,7 @@ export async function GET(request) {
           (${dateTo})::timestamptz as end_limit
       ),
       
-      -- Base set of appointment-linked payments
+      -- Base set of appointment-linked payments (by created_at date for consistency)
       appointment_payments AS (
         SELECT 
           p.id as payment_id, 
@@ -94,13 +94,13 @@ export async function GET(request) {
           b.location_id,
           b.administrator_id as raw_creator_id,
           p.administrator_id as raw_cashier_id,
-          DATE(b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific
+          DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific
         FROM payments p
         INNER JOIN bookings b ON p.booking_id = b.id
         CROSS JOIN date_range dr
         WHERE p.status = 'COMPLETED' 
-          AND b.start_at >= dr.start_limit 
-          AND b.start_at < dr.end_limit
+          AND b.created_at >= dr.start_limit 
+          AND b.created_at < dr.end_limit
       ),
 
       -- Resolve team member IDs (handling Unattributed)
@@ -142,13 +142,13 @@ export async function GET(request) {
         GROUP BY 1, 2, 3, 4
       ),
 
-      -- Visits Aggregation (Creator-based, by start_at date)
+      -- Visits Aggregation (Creator-based, by created_at date for consistency)
       visits_agg AS (
         SELECT
           b.organization_id,
           COALESCE(b.administrator_id, tm_sys.id) as team_member_id,
           b.location_id,
-          DATE(b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
+          DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
           COUNT(*) as appointments_total,
           COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted,
           COUNT(*) FILTER (WHERE b.status = 'NO_SHOW') as appointments_no_show,
@@ -162,7 +162,7 @@ export async function GET(request) {
         LEFT JOIN team_members tm_sys 
           ON tm_sys.organization_id = b.organization_id 
           AND tm_sys.is_system = true
-        WHERE b.start_at >= dr.start_limit AND b.start_at < dr.end_limit
+        WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
         GROUP BY 1, 2, 3, 4
       ),
 
@@ -214,13 +214,14 @@ export async function GET(request) {
       SELECT
         k.organization_id, k.team_member_id, k.location_id, k.date_pacific,
         tm.given_name, tm.family_name, tm.role::text,
-        -- Use creation-based counts for appointments_total and accepted
-        -- to correctly reflect admin productivity on the day they worked
-        COALESCE(c.bookings_created_count, 0) as appointments_total,
-        COALESCE(c.appointments_accepted_created_count, 0) as appointments_accepted,
+        -- All metrics now use created_at date for consistency
+        -- This ensures all metrics are comparable and reflect admin productivity on the day they worked
+        COALESCE(v.appointments_total, 0),
+        COALESCE(v.appointments_accepted, 0),
         COALESCE(v.appointments_no_show, 0),
         COALESCE(v.appointments_cancelled, 0),
         COALESCE(v.late_cancellations, 0),
+        -- bookings_created_count uses created_agg which filters only TEAM_MEMBER creators
         COALESCE(c.bookings_created_count, 0),
         COALESCE(cr.creator_payments_count, 0),
         COALESCE(cr.creator_revenue_cents, 0),

@@ -1,79 +1,24 @@
-/**
- * Secure Admin Analytics Refresh Endpoint
- * Allows authenticated admins/owners to trigger a refresh of the admin_analytics_daily table
- * without exposing the CRON_SECRET to the frontend.
- */
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
-import { getUserFromRequest } from '../../../../../lib/auth/check-access'
-import db from '../../../../../lib/prisma-client'
+async function main() {
+  const daysParam = process.argv.find(arg => arg.startsWith('--days='))?.split('=')[1] || '35';
+  const fromParam = process.argv.find(arg => arg.startsWith('--from='))?.split('=')[1];
+  const toParam = process.argv.find(arg => arg.startsWith('--to='))?.split('=')[1];
 
-// Force dynamic rendering
-export const dynamic = 'force-dynamic'
+  let dateFrom, dateTo;
+  if (fromParam && toParam) {
+    dateFrom = `'${fromParam} 00:00:00'`;
+    dateTo = `'${toParam} 23:59:59'`;
+  } else {
+    const days = parseInt(daysParam);
+    dateFrom = `NOW() - interval '${days} days'`;
+    dateTo = `NOW() + interval '1 day'`;
+  }
 
-export async function GET(request) {
-  return handleRefresh(request)
-}
+  console.log(`\n--- Refreshing Admin Analytics from ${dateFrom} to ${dateTo} ---`);
 
-export async function POST(request) {
-  return handleRefresh(request)
-}
-
-async function handleRefresh(request) {
-  try {
-    // 1. Check for CRON_SECRET / x-cron-key (for Edge Function proxy)
-    const authHeader = request.headers.get('authorization')
-    const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key')
-    const cronSecret = process.env.CRON_SECRET
-
-    let isAuthorized = false
-
-    if (cronSecret && (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret || cronHeader === cronSecret)) {
-      isAuthorized = true
-    }
-
-    // 2. If not authorized by secret, check for user session (for direct browser calls)
-    if (!isAuthorized) {
-      const user = await getUserFromRequest(request)
-      if (user && !user.error) {
-        const userRole = await db.organizationUser.findFirst({
-          where: {
-            user_id: user.id,
-            role: { in: ['owner', 'admin', 'super_admin'] }
-          }
-        })
-        if (userRole) {
-          isAuthorized = true
-        }
-      }
-    }
-
-    if (!isAuthorized) {
-      return Response.json(
-        { error: 'Unauthorized. Admin access or valid secret required.' },
-        { status: 403 }
-      )
-    }
-
-    const { searchParams } = new URL(request.url)
-    const daysParam = searchParams.get('days')
-    const fromParam = searchParams.get('from')
-    const toParam = searchParams.get('to')
-
-    // 3. Determine date range (same logic as cron)
-    let dateFrom, dateTo
-    if (fromParam && toParam) {
-      dateFrom = `'${fromParam} 00:00:00'`
-      dateTo = `'${toParam} 23:59:59'`
-    } else {
-      const days = parseInt(daysParam || '35')
-      dateFrom = `NOW() - interval '${days} days'`
-      dateTo = `NOW() + interval '1 day'`
-    }
-
-    console.log(`[ADMIN-API] Refreshing analytics from ${dateFrom} to ${dateTo}`)
-
-    // 4. Execute the "Golden Query"
-    const refreshSQL = `
+  const refreshSQL = `
       WITH date_range AS (
         SELECT 
           (${dateFrom})::timestamptz as start_limit,
@@ -270,13 +215,16 @@ async function handleRefresh(request) {
         cashier_tips_cents = EXCLUDED.cashier_tips_cents,
         cashier_avg_ticket_cents = EXCLUDED.cashier_avg_ticket_cents,
         updated_at = NOW();
-    `
+    `;
 
-    await db.$executeRawUnsafe(refreshSQL)
-
-    return Response.json({ success: true, message: 'Admin analytics refreshed successfully' })
+  try {
+    const result = await prisma.$executeRawUnsafe(refreshSQL);
+    console.log(`✅ Admin analytics refreshed successfully. Rows affected: ${result}`);
   } catch (error) {
-    console.error(`[ADMIN-API] Error refreshing admin analytics: ${error.message}`)
-    return Response.json({ error: error.message }, { status: 500 })
+    console.error(`❌ Error refreshing admin analytics: ${error.message}`);
+  } finally {
+    await prisma.$disconnect();
   }
 }
+
+main();
