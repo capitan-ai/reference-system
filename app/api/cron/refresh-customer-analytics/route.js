@@ -49,6 +49,8 @@ function authorize(request) {
 
 async function handle(request) {
   const startTime = Date.now()
+  console.log(`[CRON] Starting customer analytics refresh at ${new Date().toISOString()}`)
+  
   const auth = authorize(request)
   if (!auth.authorized) {
     return json({ error: 'Unauthorized', reason: auth.reason }, 401)
@@ -184,12 +186,25 @@ bookings_agg AS (
 
 -- 5. Collect all unique keys
 -- Include canonical_ids from aggregates AND original customer_ids that map to those canonical_ids
+-- IMPORTANT: Only include customers that exist in square_existing_clients
 keys AS (
-  SELECT organization_id, customer_id FROM bookings_agg
+  SELECT DISTINCT ba.organization_id, ba.customer_id 
+  FROM bookings_agg ba
+  INNER JOIN square_existing_clients sec 
+    ON ba.organization_id = sec.organization_id 
+    AND ba.customer_id = sec.square_customer_id
   UNION
-  SELECT organization_id, customer_id FROM orders_agg
+  SELECT DISTINCT oa.organization_id, oa.customer_id 
+  FROM orders_agg oa
+  INNER JOIN square_existing_clients sec 
+    ON oa.organization_id = sec.organization_id 
+    AND oa.customer_id = sec.square_customer_id
   UNION
-  SELECT organization_id, customer_id FROM payments_agg
+  SELECT DISTINCT pa.organization_id, pa.customer_id 
+  FROM payments_agg pa
+  INNER JOIN square_existing_clients sec 
+    ON pa.organization_id = sec.organization_id 
+    AND pa.customer_id = sec.square_customer_id
   UNION
   -- Include original customer_ids that map to canonical_ids in aggregates
   SELECT c.organization_id, c.square_customer_id as customer_id 
@@ -210,10 +225,13 @@ final_data AS (
     c.family_name,
     c.email_address,
     c.phone_number,
+    b.first_b AS first_booking_at,  -- Только букинги (ACCEPTED/COMPLETED)
+    b.last_b AS last_booking_at,    -- Только букинги (ACCEPTED/COMPLETED)
     CASE WHEN b.first_b IS NULL THEN oa.first_any_o WHEN oa.first_any_o IS NULL THEN b.first_b ELSE LEAST(b.first_b, oa.first_any_o) END AS first_visit_at,
     CASE WHEN b.last_b IS NULL THEN oa.last_any_o WHEN oa.last_any_o IS NULL THEN b.last_b ELSE GREATEST(b.last_b, oa.last_any_o) END AS last_visit_at,
     (COALESCE(b.b_count,0) + COALESCE(oa.service_order_count,0) + COALESCE(oa.training_order_count,0)) AS total_visits,
     COALESCE(b.b_count,0) AS booking_visits,
+    COALESCE(b.b_count,0) AS total_accepted_bookings,  -- Только ACCEPTED букинги
     COALESCE(oa.service_order_count,0) AS service_order_visits,
     COALESCE(oa.training_order_count,0) AS training_visits,
     COALESCE(oa.retail_order_count,0) AS retail_visits,
@@ -254,7 +272,8 @@ INSERT INTO customer_analytics (
 SELECT
   fd.organization_id, fd.customer_id, 
   fd.given_name, fd.family_name, fd.email_address, fd.phone_number,
-  fd.first_visit_at, fd.last_visit_at, fd.total_visits, fd.gross_revenue_cents,
+  fd.first_booking_at, fd.last_booking_at, fd.total_accepted_bookings, 
+  fd.gross_revenue_cents,  -- TODO: Уточнить бизнес-логику - должен ли total_revenue_cents включать tips?
   fd.total_no_shows, fd.total_cancelled_by_customer, fd.total_cancelled_by_seller,
   fd.total_tips_cents, fd.total_payments, fd.avg_ticket_cents,
   fd.booking_visits, fd.service_order_visits, fd.training_visits, fd.retail_visits, fd.total_visits,
@@ -298,13 +317,60 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
 `;
 
     await prisma.$executeRawUnsafe(refreshSQL)
+
+    // Validate data consistency
+    const validationSQL = `
+      SELECT 
+        COUNT(*) FILTER (
+          WHERE first_booking_at IS NOT NULL 
+          AND last_booking_at IS NOT NULL 
+          AND first_booking_at > last_booking_at
+        ) as booking_order_errors,
+        COUNT(*) FILTER (
+          WHERE first_booking_at IS NOT NULL 
+          AND first_visit_at IS NOT NULL 
+          AND first_booking_at > first_visit_at
+        ) as booking_visit_order_errors,
+        COUNT(*) FILTER (
+          WHERE total_visits < booking_visits
+        ) as visits_count_errors
+      FROM customer_analytics
+      WHERE organization_id IN (
+        SELECT DISTINCT organization_id FROM customer_analytics 
+        WHERE updated_at >= NOW() - INTERVAL '1 minute'
+      )
+    `
+
+    const validation = await prisma.$queryRawUnsafe(validationSQL)
+    if (validation[0]?.booking_order_errors > 0 || 
+        validation[0]?.booking_visit_order_errors > 0 ||
+        validation[0]?.visits_count_errors > 0) {
+      console.warn('⚠️ Data validation warnings:', validation[0])
+    }
+
     await prisma.$disconnect()
 
-    return json({ success: true, message: 'Customer analytics refresh completed' })
+    const duration = Date.now() - startTime
+    console.log(`[CRON] Customer analytics refresh completed in ${duration}ms`)
+    
+    if (validation[0]?.booking_order_errors > 0 || 
+        validation[0]?.booking_visit_order_errors > 0 ||
+        validation[0]?.visits_count_errors > 0) {
+      console.warn(`[CRON] Validation warnings after ${duration}ms:`, validation[0])
+    }
+
+    return json({ 
+      success: true, 
+      message: 'Customer analytics refresh completed',
+      duration_ms: duration,
+      validation: validation[0] || {}
+    })
 
   } catch (error) {
-    console.error('❌ Error during customer analytics refresh:', error.message)
-    return json({ success: false, error: error.message }, 500)
+    const duration = Date.now() - startTime
+    console.error(`[CRON] Error after ${duration}ms during customer analytics refresh:`, error.message)
+    console.error(error.stack)
+    return json({ success: false, error: error.message, duration_ms: duration }, 500)
   } finally {
     await logPrisma.$disconnect()
   }

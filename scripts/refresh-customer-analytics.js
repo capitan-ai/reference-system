@@ -133,12 +133,25 @@ bookings_agg AS (
 
 -- 5. Collect all unique keys
 -- Include canonical_ids from aggregates AND original customer_ids that map to those canonical_ids
+-- IMPORTANT: Only include customers that exist in square_existing_clients
 keys AS (
-  SELECT organization_id, customer_id FROM bookings_agg
+  SELECT DISTINCT ba.organization_id, ba.customer_id 
+  FROM bookings_agg ba
+  INNER JOIN square_existing_clients sec 
+    ON ba.organization_id = sec.organization_id 
+    AND ba.customer_id = sec.square_customer_id
   UNION
-  SELECT organization_id, customer_id FROM orders_agg
+  SELECT DISTINCT oa.organization_id, oa.customer_id 
+  FROM orders_agg oa
+  INNER JOIN square_existing_clients sec 
+    ON oa.organization_id = sec.organization_id 
+    AND oa.customer_id = sec.square_customer_id
   UNION
-  SELECT organization_id, customer_id FROM payments_agg
+  SELECT DISTINCT pa.organization_id, pa.customer_id 
+  FROM payments_agg pa
+  INNER JOIN square_existing_clients sec 
+    ON pa.organization_id = sec.organization_id 
+    AND pa.customer_id = sec.square_customer_id
   UNION
   -- Include original customer_ids that map to canonical_ids in aggregates
   SELECT c.organization_id, c.square_customer_id as customer_id 
@@ -159,10 +172,13 @@ final_data AS (
     c.family_name,
     c.email_address,
     c.phone_number,
+    b.first_b AS first_booking_at,  -- Только букинги (ACCEPTED/COMPLETED)
+    b.last_b AS last_booking_at,    -- Только букинги (ACCEPTED/COMPLETED)
     CASE WHEN b.first_b IS NULL THEN oa.first_any_o WHEN oa.first_any_o IS NULL THEN b.first_b ELSE LEAST(b.first_b, oa.first_any_o) END AS first_visit_at,
     CASE WHEN b.last_b IS NULL THEN oa.last_any_o WHEN oa.last_any_o IS NULL THEN b.last_b ELSE GREATEST(b.last_b, oa.last_any_o) END AS last_visit_at,
     (COALESCE(b.b_count,0) + COALESCE(oa.service_order_count,0) + COALESCE(oa.training_order_count,0)) AS total_visits,
     COALESCE(b.b_count,0) AS booking_visits,
+    COALESCE(b.b_count,0) AS total_accepted_bookings,  -- Только ACCEPTED букинги
     COALESCE(oa.service_order_count,0) AS service_order_visits,
     COALESCE(oa.training_order_count,0) AS training_visits,
     COALESCE(oa.retail_order_count,0) AS retail_visits,
@@ -203,7 +219,7 @@ INSERT INTO customer_analytics (
 SELECT
   fd.organization_id, fd.customer_id, 
   fd.given_name, fd.family_name, fd.email_address, fd.phone_number,
-  fd.first_visit_at, fd.last_visit_at, fd.total_visits, fd.gross_revenue_cents,
+  fd.first_booking_at, fd.last_booking_at, fd.total_accepted_bookings, fd.gross_revenue_cents,
   fd.total_no_shows, fd.total_cancelled_by_customer, fd.total_cancelled_by_seller,
   fd.total_tips_cents, fd.total_payments, fd.avg_ticket_cents,
   fd.booking_visits, fd.service_order_visits, fd.training_visits, fd.retail_visits, fd.total_visits,

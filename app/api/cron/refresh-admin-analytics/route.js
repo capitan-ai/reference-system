@@ -175,8 +175,7 @@ export async function GET(request) {
           COALESCE(b.administrator_id, tm_sys.id) as team_member_id,
           b.location_id,
           DATE(b.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') as date_pacific,
-          COUNT(*) as bookings_created_count,
-          COUNT(*) FILTER (WHERE b.status = 'ACCEPTED') as appointments_accepted_created_count
+          COUNT(*) as bookings_created_count
         FROM bookings b
         CROSS JOIN date_range dr
         LEFT JOIN team_members tm_sys 
@@ -282,6 +281,8 @@ export async function GET(request) {
 
     // 4. Log success
     const duration = Date.now() - startTime
+    console.log(`[CRON] Admin analytics refresh completed in ${duration}ms`)
+    
     await saveApplicationLog(logPrisma, {
       logType: 'cron',
       logId: cronId,
@@ -296,7 +297,9 @@ export async function GET(request) {
 
     return json({ success: true, duration_ms: duration })
   } catch (error) {
-    console.error(`[CRON] Error refreshing admin analytics: ${error.message}`)
+    const duration = Date.now() - startTime
+    console.error(`[CRON] Error after ${duration}ms refreshing admin analytics:`, error.message)
+    console.error(error.stack)
     
     await saveApplicationLog(logPrisma, {
       logType: 'cron',
@@ -304,13 +307,14 @@ export async function GET(request) {
       logCreatedAt: new Date(),
       payload: {
         cron_name: 'refresh-admin-analytics',
+        duration_ms: duration,
         error: error.message,
         stack: error.stack
       },
       status: 'failed'
     }).catch(() => {})
 
-    return json({ error: error.message }, 500)
+    return json({ error: error.message, duration_ms: duration }, 500)
   } finally {
     await prisma.$disconnect()
   }

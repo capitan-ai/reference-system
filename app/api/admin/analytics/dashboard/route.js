@@ -77,6 +77,25 @@ export async function GET(request) {
       ORDER BY date DESC, location_name
     `)
 
+    // Get unique customers for the period from customer_analytics
+    let uniqueCustomersQuery = `
+      SELECT COUNT(DISTINCT ca.square_customer_id)::int as unique_customers_period
+      FROM customer_analytics ca
+      WHERE ca.organization_id = '${organizationId}'::uuid
+        AND ca.first_visit_at IS NOT NULL
+        ${startDate && endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') BETWEEN '${startDate}'::date AND '${endDate}'::date` : ''}
+        ${startDate && !endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') >= '${startDate}'::date` : ''}
+        ${!startDate && endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') <= '${endDate}'::date` : ''}
+        ${locationId ? `AND EXISTS (
+          SELECT 1 FROM bookings b 
+          WHERE b.customer_id = ca.square_customer_id 
+          AND b.organization_id = ca.organization_id
+          AND b.location_id = '${locationId}'::uuid
+        )` : ''}
+    `
+    const uniqueCustomersResult = await prisma.$queryRawUnsafe(uniqueCustomersQuery)
+    const uniqueCustomersPeriod = uniqueCustomersResult[0]?.unique_customers_period || 0
+
     // Calculate totals
     let appointmentsTotals = {
       total_accepted: 0,
@@ -90,7 +109,7 @@ export async function GET(request) {
       appointmentsTotals.total_accepted += Number(record.accepted_appointments || 0)
       appointmentsTotals.total_cancelled += Number(record.cancelled_appointments || 0)
       appointmentsTotals.total_no_shows += Number(record.no_show_appointments || 0)
-      appointmentsTotals.unique_customers += Number(record.unique_customers || 0)
+      // unique_customers теперь берется из customer_analytics, не суммируем здесь
       appointmentsTotals.new_customers += Number(record.new_customers || 0)
     })
 
@@ -106,7 +125,7 @@ export async function GET(request) {
       revenueTotals.total_revenue_cents += Number(record.revenue_cents || 0)
       revenueTotals.total_revenue_dollars += Number(record.revenue_dollars || 0)
       revenueTotals.total_payments += Number(record.payment_count || 0)
-      revenueTotals.unique_customers += Number(record.unique_customers || 0)
+      // unique_customers теперь берется из customer_analytics, не суммируем здесь
     })
 
     // Build combined daily data
@@ -146,7 +165,7 @@ export async function GET(request) {
 
     // Calculate average ticket: Total Revenue / Total Payments
     if (revenueTotals.total_payments > 0) {
-      revenueTotals.average_transaction = (revenueTotals.total_revenue_dollars / revenueTotals.total_payments) * 100 // convert to cents for consistency
+      revenueTotals.average_transaction = revenueTotals.total_revenue_dollars / revenueTotals.total_payments
     }
 
     return Response.json({
@@ -161,14 +180,14 @@ export async function GET(request) {
           accepted: appointmentsTotals.total_accepted,
           cancelled: appointmentsTotals.total_cancelled,
           no_show: appointmentsTotals.total_no_shows,
-          unique_customers: appointmentsTotals.unique_customers,
+          unique_customers: uniqueCustomersPeriod,  // Используем точный подсчет из customer_analytics
           new_customers: appointmentsTotals.new_customers
         },
         revenue: {
           total_dollars: Number(revenueTotals.total_revenue_dollars.toFixed(2)),
           total_payments: revenueTotals.total_payments,
-          average_transaction: Number((revenueTotals.average_transaction / 100).toFixed(2)),
-          unique_customers: revenueTotals.unique_customers
+          average_transaction: Number(revenueTotals.average_transaction.toFixed(2)),
+          unique_customers: uniqueCustomersPeriod  // Используем точный подсчет из customer_analytics
         }
       },
       daily: combinedDaily.sort((a, b) => new Date(b.date) - new Date(a.date))
