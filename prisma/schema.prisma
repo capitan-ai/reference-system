@@ -467,11 +467,15 @@ model AdminAnalyticsDaily {
   role                       String?
   bookings_created_count     Int          @default(0)
   new_customers_booked_count Int          @default(0)
+  rebookings_count           Int          @default(0)
+  bookings_current_month_count        Int @default(0)
+  bookings_future_months_count        Int @default(0)
   appointments_total         Int          @default(0)
   appointments_accepted      Int          @default(0)
   appointments_no_show       Int          @default(0)
   appointments_cancelled     Int          @default(0)
   late_cancellations         Int          @default(0)
+  early_cancellations        Int          @default(0)
   created_at                 DateTime     @default(now()) @db.Timestamptz(6)
   updated_at                 DateTime     @updatedAt @db.Timestamptz(6)
   cashier_avg_ticket_cents   BigInt       @default(0)
@@ -490,6 +494,46 @@ model AdminAnalyticsDaily {
   @@index([organization_id, team_member_id])
   @@index([organization_id, location_id, date_pacific])
   @@map("admin_analytics_daily")
+  @@schema("public")
+}
+
+/// Admin-created booking facts for New vs Rebook classification.
+/// Snapshot fields (administrator_*, creator_*, created_at_utc, start_at_utc, *_pacific) are IMMUTABLE - do not update on refresh.
+model AdminCreatedBookingFact {
+  booking_id                   String   @id @db.Uuid
+  organization_id              String   @db.Uuid
+  location_id                  String   @db.Uuid
+  customer_id                  String   @db.VarChar(255)
+  administrator_id_snapshot    String   @db.Uuid // IMMUTABLE - do not update on refresh
+  administrator_name_snapshot  String? // IMMUTABLE
+  creator_type_snapshot        String? // IMMUTABLE
+  creator_resolution_source    String? // IMMUTABLE
+
+  created_at_utc              DateTime @db.Timestamptz(6) // IMMUTABLE - freeze on first capture
+  start_at_utc                DateTime @db.Timestamptz(6) // IMMUTABLE
+  created_day_pacific         DateTime @db.Date // IMMUTABLE
+  visit_day_pacific           DateTime @db.Date // IMMUTABLE
+  created_month_pacific       DateTime @db.Date // IMMUTABLE
+  visit_month_pacific         DateTime @db.Date // IMMUTABLE
+
+  classification_snapshot     String // NEW_CLIENT | REBOOKING - Mutable in correction window
+  classification_reason_snapshot String? // NO_PRIOR_PAID | HAS_PRIOR_PAID - Mutable
+  prior_paid_exists           Boolean // Mutable
+
+  is_same_month               Boolean
+  is_future_month             Boolean
+  is_past_month               Boolean
+
+  snapshot_calculated_at      DateTime @db.Timestamptz(6) // Mutable
+  inserted_at                 DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([organization_id, administrator_id_snapshot, created_day_pacific], map: "idx_admin_facts_org_admin_day")
+  @@index([organization_id, location_id, created_day_pacific], map: "idx_admin_facts_org_loc_day")
+  @@index([organization_id, customer_id, start_at_utc], map: "idx_admin_facts_org_cust_start")
+  @@index([organization_id, created_at_utc], map: "idx_admin_facts_org_created")
+  @@index([organization_id, administrator_id_snapshot, created_month_pacific], map: "idx_admin_facts_org_admin_month")
+  @@map("admin_created_booking_facts")
   @@schema("public")
 }
 
