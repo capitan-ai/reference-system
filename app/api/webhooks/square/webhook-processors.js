@@ -141,17 +141,25 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       throw new Error(`Could not resolve location UUID for Square location ${locationId}`)
     }
 
-    const bookingStartAt = bookingData.start_at || bookingData.startAt
-    const status = bookingData.status
-    const version = bookingData.version
+    const bookingStartAt = bookingData.start_at || bookingData.startAt || new Date()
+    const status = bookingData.status || 'ACCEPTED'
+    const version = bookingData.version || 0
     const bookingCreatedAt = bookingData.created_at || bookingData.createdAt || eventCreatedAt
     const bookingUpdatedAt = bookingData.updated_at || bookingData.updatedAt || new Date().toISOString()
+
+    const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
+    const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
+    const creatorCustomerId = creatorDetails.customer_id || creatorDetails.customerId
+    const address = bookingData.address || {}
+    const finalMerchantId = payload.merchant_id || bookingData.merchant_id || bookingData.merchantId
 
     const firstSegment = (bookingData.appointment_segments || bookingData.appointmentSegments || [])[0]
     const technicianId = firstSegment?.team_member_id || firstSegment?.teamMemberId
     const serviceVariationId = firstSegment?.service_variation_id || firstSegment?.serviceVariationId
     const serviceVariationVersion = firstSegment?.service_variation_version || firstSegment?.serviceVariationVersion
     const durationMinutes = firstSegment?.duration_minutes || firstSegment?.durationMinutes
+    const intermissionMinutes = firstSegment?.intermission_minutes ?? firstSegment?.intermissionMinutes ?? 0
+    const anyTeamMember = firstSegment?.any_team_member ?? firstSegment?.anyTeamMember ?? false
 
     let technicianUuid = null
     if (technicianId) {
@@ -170,41 +178,67 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
     }
 
     let administratorUuid = null
-    const creatorType = bookingData.creator_details?.creator_type || bookingData.creatorDetails?.creatorType
-    const creatorId = bookingData.creator_details?.team_member_id || bookingData.creatorDetails?.teamMemberId
-    if (creatorType === 'TEAM_MEMBER' && creatorId) {
+    const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+    if (creatorType === 'TEAM_MEMBER' && creatorTeamMemberId) {
       const admin = await prisma.teamMember.findFirst({
-        where: { square_team_member_id: creatorId, organization_id: organizationId }
+        where: { square_team_member_id: creatorTeamMemberId, organization_id: organizationId }
       })
       administratorUuid = admin?.id
     }
 
     await prisma.$executeRaw`
       INSERT INTO bookings (
-        id, organization_id, booking_id, customer_id, location_id, start_at, status, version,
-        administrator_id, technician_id, service_variation_id, service_variation_version, duration_minutes,
-        created_at, updated_at, raw_json
+        id, organization_id, booking_id, version, customer_id, location_id, location_type, source,
+        start_at, status, all_day, transition_time_minutes,
+        creator_type, creator_customer_id, administrator_id,
+        address_line_1, locality, administrative_district_level_1, postal_code,
+        service_variation_id, service_variation_version, duration_minutes,
+        intermission_minutes, technician_id, any_team_member,
+        customer_note, seller_note,
+        merchant_id, created_at, updated_at, raw_json
       ) VALUES (
-        gen_random_uuid(), ${organizationId}::uuid, ${bookingId}, ${customerId}, ${locationUuid}::uuid, ${bookingStartAt}::timestamptz, ${status}, ${version || 1},
+        gen_random_uuid(),
+        ${organizationId}::uuid,
+        ${bookingId},
+        ${version},
+        ${customerId},
+        ${locationUuid}::uuid,
+        ${bookingData.location_type || bookingData.locationType || null},
+        ${bookingData.source || null},
+        ${bookingStartAt}::timestamptz,
+        ${status},
+        ${bookingData.all_day ?? bookingData.allDay ?? false},
+        ${bookingData.transition_time_minutes ?? bookingData.transitionTimeMinutes ?? 0},
+        ${creatorType || null},
+        ${creatorCustomerId || null},
         ${administratorUuid ? Prisma.sql`${administratorUuid}::uuid` : Prisma.sql`NULL`},
-        ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
+        ${address.address_line_1 || address.addressLine1 || null},
+        ${address.locality || null},
+        ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
+        ${address.postal_code || address.postalCode || null},
         ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
         ${serviceVariationVersion ? serviceVariationVersion : Prisma.sql`NULL`},
         ${durationMinutes || Prisma.sql`NULL`},
-        ${bookingCreatedAt}::timestamptz, ${bookingUpdatedAt}::timestamptz, ${safeStringify(bookingData)}::jsonb
+        ${intermissionMinutes},
+        ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
+        ${anyTeamMember},
+        ${bookingData.customer_note || bookingData.customerNote || null},
+        ${bookingData.seller_note || bookingData.sellerNote || null},
+        ${finalMerchantId || null},
+        ${bookingCreatedAt}::timestamptz,
+        ${bookingUpdatedAt}::timestamptz,
+        ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
-        customer_id = COALESCE(EXCLUDED.customer_id, bookings.customer_id),
-        location_id = EXCLUDED.location_id,
-        status = EXCLUDED.status,
         version = EXCLUDED.version,
-        start_at = COALESCE(EXCLUDED.start_at, bookings.start_at),
-        administrator_id = COALESCE(EXCLUDED.administrator_id, bookings.administrator_id),
-        technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
-        service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
-        service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
-        duration_minutes = COALESCE(EXCLUDED.duration_minutes, bookings.duration_minutes),
-        updated_at = ${bookingUpdatedAt}::timestamptz,
+        status = EXCLUDED.status,
+        merchant_id = COALESCE(EXCLUDED.merchant_id, bookings.merchant_id),
+        service_variation_id = EXCLUDED.service_variation_id,
+        service_variation_version = EXCLUDED.service_variation_version,
+        technician_id = EXCLUDED.technician_id,
+        customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
+        seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
+        updated_at = EXCLUDED.updated_at,
         raw_json = EXCLUDED.raw_json
     `
 

@@ -4334,32 +4334,11 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       // Process appointment segments to update service-specific fields
       let serviceVariationId = existingBooking.service_variation_id
       let technicianId = existingBooking.technician_id
-      let administratorId = existingBooking.administrator_id
       let durationMinutes = null
       let serviceVariationVersion = null
 
-      // Extract administrator_id from creator_details if creator_type is TEAM_MEMBER
-      const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
-      const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
-      if (creatorType === 'TEAM_MEMBER') {
-        const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
-        if (creatorTeamMemberId) {
-          try {
-            const adminRecord = await prisma.$queryRaw`
-              SELECT id::text as id FROM team_members
-              WHERE square_team_member_id = ${creatorTeamMemberId}
-                AND organization_id = ${organizationId}::uuid
-              LIMIT 1
-            `
-            administratorId = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
-            if (administratorId) {
-              console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorId}`)
-            }
-          } catch (error) {
-            console.error(`❌ Error resolving administrator: ${error.message}`)
-          }
-        }
-      }
+      // NOTE: administrator_id and creator_type are NOT updated on booking.updated.
+      // We keep the original values from booking.created (team member who created the booking).
 
       // Process appointment segments to resolve Square IDs to UUIDs
       if (appointmentSegments.length > 0) {
@@ -4456,11 +4435,6 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
       if (technicianId) {
         updateFields.push('technician_id = $' + (updateValues.length + 1) + '::uuid')
         updateValues.push(technicianId)
-      }
-      
-      if (administratorId) {
-        updateFields.push('administrator_id = $' + (updateValues.length + 1) + '::uuid')
-        updateValues.push(administratorId)
       }
       
       if (durationMinutes !== null) {
