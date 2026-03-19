@@ -922,6 +922,30 @@ async function checkCustomerHasPreviousPayments(
   }
 }
 
+/**
+ * Check if customer has prior COMPLETED payments for service (order with booking).
+ * Gift card / retail-only orders (order.booking_id IS NULL) are NOT counted as visits.
+ */
+async function checkCustomerHasPriorServicePayments(organizationId, customerId, beforeStartAt) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*)::int as count
+      FROM payments p
+      INNER JOIN orders o ON o.id = p.order_id AND o.organization_id = p.organization_id
+      INNER JOIN bookings b ON b.id = o.booking_id AND b.organization_id = o.organization_id
+      WHERE p.organization_id = ${organizationId}::uuid
+        AND p.customer_id = ${customerId}
+        AND p.status = 'COMPLETED'
+        AND o.booking_id IS NOT NULL
+        AND b.start_at < ${new Date(beforeStartAt)}::timestamptz
+    `
+    return (result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking prior service payments:', error.message)
+    return false
+  }
+}
+
 // Find referrer by referral code
 async function findReferrerByCode(referralCode, organizationId) {
   try {
@@ -4015,7 +4039,10 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
         seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
         updated_at = EXCLUDED.updated_at,
-        raw_json = EXCLUDED.raw_json
+        raw_json = EXCLUDED.raw_json,
+        source = COALESCE(bookings.source, EXCLUDED.source),
+        customer_id = COALESCE(bookings.customer_id, EXCLUDED.customer_id),
+        creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type)
     `
     
     console.log(`✅ Saved booking ${bookingId} with service ${segment?.service_variation_id || segment?.serviceVariationId || 'N/A'}`)
@@ -4724,6 +4751,28 @@ async function processBookingCreated(bookingData, runContext = {}) {
     console.log('🔍 Step 2: Getting customer record...')
     const customer = customerExists[0]
     console.log(`   Customer: ${customer.given_name} ${customer.family_name}`)
+
+    // Set first_visit_at when this is customer's first booking (no prior bookings, no prior service payments)
+    const bookingStartAt = bookingData.start_at || bookingData.startAt
+    if (bookingStartAt) {
+      const hasPriorBookings = await checkCustomerHasPreviousBookings(
+        organizationId, customerId, bookingId, bookingStartAt
+      )
+      const hasPriorServicePayments = await checkCustomerHasPriorServicePayments(
+        organizationId, customerId, bookingStartAt
+      )
+      if (!hasPriorBookings && !hasPriorServicePayments) {
+        await prisma.$executeRaw`
+          UPDATE square_existing_clients
+          SET first_visit_at = ${new Date(bookingStartAt)}::timestamptz,
+              updated_at = NOW()
+          WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
+            AND (first_visit_at IS NULL OR first_visit_at > ${new Date(bookingStartAt)}::timestamptz)
+        `
+        console.log(`   ✅ Set first_visit_at = ${bookingStartAt} for customer ${customerId}`)
+      }
+    }
 
     if ((!customer.given_name || !customer.family_name || !customer.email_address || !customer.phone_number)) {
       const squareCustomer = await fetchSquareCustomerProfile(customerId)

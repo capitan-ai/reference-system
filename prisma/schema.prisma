@@ -219,6 +219,7 @@ model SquareExistingClient {
   organization_id            String       @db.Uuid
   id                         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   raw_json                   Json?
+  first_visit_at             DateTime?    @db.Timestamptz(6)
   organization               Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@unique([organization_id, square_customer_id], map: "square_existing_clients_org_customer_idx")
@@ -422,6 +423,31 @@ model ReferralReward {
   @@schema("public")
 }
 
+model ReferralAnalyticsDaily {
+  organization_id                 String   @db.Uuid
+  date_pacific                    DateTime @db.Date
+  new_customers_via_referral      Int      @default(0)
+  unique_codes_rewarded           Int      @default(0)
+  rewards_issued_cents            Int      @default(0)
+  referrer_rewards_count          Int      @default(0)
+  friend_signup_bonuses_count     Int      @default(0)
+  friend_signup_bonuses_cents     Int      @default(0)
+  emails_referral_invite_sent     Int      @default(0)
+  emails_friend_activation_sent   Int      @default(0)
+  emails_referrer_activation_sent Int      @default(0)
+  wallet_activations_count        Int      @default(0)
+  redemptions_count               Int      @default(0)
+  redemptions_cents               Int      @default(0)
+  details_json                    Json?
+  updated_at                      DateTime @updatedAt @db.Timestamptz(6)
+  organization                   Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([organization_id, date_pacific])
+  @@index([organization_id, date_pacific])
+  @@map("referral_analytics_daily")
+  @@schema("public")
+}
+
 model Organization {
   id                      String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   square_merchant_id      String                 @unique
@@ -442,6 +468,7 @@ model Organization {
   organization_users      OrganizationUser[]
   payment_tenders         PaymentTender[]
   payments                Payment[]
+  referral_analytics_daily ReferralAnalyticsDaily[]
   referral_profiles       ReferralProfile[]
   referral_rewards        ReferralReward[]
   service_variations      ServiceVariation[]
@@ -565,13 +592,14 @@ model Location {
 }
 
 model MasterSettings {
-  team_member_id  String       @id @db.Uuid
-  commission_rate Float        @default(40.0)
-  category        TeamRole     @default(MASTER)
-  location_code   TeamLocation @default(UNKNOWN_LOC)
-  is_active       Boolean      @default(true)
-  created_at      DateTime     @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+  team_member_id                 String   @id @db.Uuid
+  commission_rate                Float    @default(40.0)
+  category                       TeamRole @default(MASTER)
+  location_code                  TeamLocation @default(UNKNOWN_LOC)
+  is_active                      Boolean  @default(true)
+  default_working_minutes_per_day Int?     // For utilization_rate; null = use 480
+  created_at                     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   team_member TeamMember @relation(fields: [team_member_id], references: [id], onDelete: Cascade)
 
@@ -654,8 +682,9 @@ model MasterPerformanceDaily {
 
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
-  @@id([date, master_id])
+  @@id([date, master_id, location_id])
   @@index([organization_id, date])
+  @@index([organization_id, location_id, date])
   @@map("master_performance_daily")
   @@schema("public")
 }

@@ -2,6 +2,7 @@ import { createRequire } from 'module'
 const require = createRequire(import.meta.url)
 const { PrismaClient } = require('@prisma/client')
 const { processMasterEarnings } = require('@/lib/workers/master-earnings-worker')
+const { processDiscountAdjustments } = require('@/lib/workers/discount-engine-worker')
 const { refreshMasterPerformance } = require('@/scripts/refresh-master-performance')
 
 function json(body, status = 200) {
@@ -65,6 +66,7 @@ async function handle(request) {
     for (const org of organizations) {
       console.log(`[CRON-EARNINGS] Processing org: ${org.id}`)
       await processMasterEarnings(org.id)
+      await processDiscountAdjustments(org.id)
       await refreshMasterPerformance(org.id)
       results.push({ orgId: org.id, status: 'success' })
     }

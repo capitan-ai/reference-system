@@ -144,7 +144,7 @@ async function main() {
         GROUP BY 1, 2, 3, 4
       ),
 
-      -- NEW: Bookings Created Aggregation (by created_at date)
+      -- Bookings Created: staff (FIRST_PARTY_MERCHANT) + Online Booking (FIRST_PARTY_BUYER, THIRD_PARTY_BUYER)
       created_agg AS (
         SELECT
           b.organization_id,
@@ -158,11 +158,22 @@ async function main() {
           ON tm_sys.organization_id = b.organization_id 
           AND tm_sys.is_system = true
         WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
-          AND (b.creator_type = 'TEAM_MEMBER' 
+          AND (
+            -- Staff-created (FIRST_PARTY_MERCHANT)
+            (
+              (b.creator_type = 'TEAM_MEMBER' 
                OR (b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER')
                OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id'))
-          AND (COALESCE(b.source, b.raw_json->>'source') IS NULL
-               OR COALESCE(b.source, b.raw_json->>'source') = 'FIRST_PARTY_MERCHANT')
+              AND (COALESCE(b.source, b.raw_json->>'source') IS NULL
+                   OR COALESCE(b.source, b.raw_json->>'source') = 'FIRST_PARTY_MERCHANT')
+            )
+            OR
+            -- Online-created (customer) — для Online Booking
+            (
+              b.administrator_id IS NULL
+              AND COALESCE(b.source, b.raw_json->>'source') IN ('FIRST_PARTY_BUYER', 'THIRD_PARTY_BUYER')
+            )
+          )
         GROUP BY 1, 2, 3, 4
       ),
 
@@ -218,8 +229,8 @@ async function main() {
         COALESCE(v.late_cancellations, 0),
         COALESCE(v.early_cancellations, 0),
         COALESCE(c.bookings_created_count, 0),
-        COALESCE(f.new_client_bookings_count, 0),
-        COALESCE(f.rebooking_count, 0),
+        COALESCE(f.new_client_bookings_count, v.new_client_bookings_count, 0),
+        COALESCE(f.rebooking_count, v.rebooking_count, 0),
         COALESCE(f.same_month_count, 0),
         COALESCE(f.future_months_count, 0),
         COALESCE(cr.creator_payments_count, 0),

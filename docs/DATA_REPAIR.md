@@ -51,3 +51,4 @@ DELETE FROM application_logs WHERE created_at < NOW() - INTERVAL '30 days';
 ```
 *(Keep at least 30 days for audit purposes).*
 
+

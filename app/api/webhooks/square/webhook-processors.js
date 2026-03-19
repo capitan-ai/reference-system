@@ -239,7 +239,10 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
         seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
         updated_at = EXCLUDED.updated_at,
-        raw_json = EXCLUDED.raw_json
+        raw_json = EXCLUDED.raw_json,
+        source = COALESCE(bookings.source, EXCLUDED.source),
+        customer_id = COALESCE(bookings.customer_id, EXCLUDED.customer_id),
+        creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type)
     `
 
     await upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData)

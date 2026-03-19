@@ -41,17 +41,17 @@ async function main() {
           SELECT b.id as booking_uuid
           FROM bookings b
           CROSS JOIN date_range dr
+          LEFT JOIN team_members tm_sys ON tm_sys.organization_id = b.organization_id AND tm_sys.is_system = true
           WHERE b.created_at >= dr.start_limit AND b.created_at < dr.end_limit
             AND b.customer_id IS NOT NULL
-            AND (b.creator_type = 'TEAM_MEMBER' 
-                 OR b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER'
-                 OR EXISTS (
-                   SELECT 1 FROM team_members tm 
-                   WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id'
-                     AND tm.organization_id = b.organization_id
-                 ))
-            AND (COALESCE(b.source, b.raw_json->>'source') IS NULL
-                 OR COALESCE(b.source, b.raw_json->>'source') = 'FIRST_PARTY_MERCHANT')
+            AND (
+              ((b.creator_type = 'TEAM_MEMBER' OR b.raw_json->'creator_details'->>'creator_type' = 'TEAM_MEMBER'
+                OR EXISTS (SELECT 1 FROM team_members tm WHERE tm.square_team_member_id = b.raw_json->'creator_details'->>'team_member_id' AND tm.organization_id = b.organization_id))
+               AND (COALESCE(b.source, b.raw_json->>'source') IS NULL OR COALESCE(b.source, b.raw_json->>'source') = 'FIRST_PARTY_MERCHANT'))
+              OR
+              (b.administrator_id IS NULL AND COALESCE(b.source, b.raw_json->>'source') IN ('FIRST_PARTY_BUYER', 'THIRD_PARTY_BUYER'))
+            )
+            AND COALESCE(b.administrator_id, tm_sys.id) NOT IN (SELECT id FROM team_members WHERE status = 'INACTIVE')
         )
         SELECT COUNT(*)::int as cnt FROM created_by_admin
       `

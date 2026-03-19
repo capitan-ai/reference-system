@@ -53,3 +53,4 @@ If a security vulnerability or data leak is suspected:
 2.  **Clear Logs**: Run `DELETE FROM application_logs;` to remove all cached PII.
 3.  **Audit Rewards**: Check `referral_rewards` for any suspicious patterns (e.g., one IP address triggering multiple rewards).
 
+

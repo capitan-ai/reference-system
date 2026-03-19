@@ -55,3 +55,4 @@ WHERE status = 'error';
 - **Missing Organization ID**: Webhook couldn't determine which salon location the event belonged to.
 - **Race Conditions**: Two webhooks for the same order arriving simultaneously. (Handled by database unique constraints).
 
+

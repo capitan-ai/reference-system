@@ -37,3 +37,4 @@ As the system scales to hundreds of salons:
 - **Connection Pooling**: Always use the Transaction mode port (6543) for Supabase to handle high-concurrency serverless functions.
 - **Read Replicas**: Consider offloading analytics queries to a read-only replica if dashboard performance slows down.
 
+

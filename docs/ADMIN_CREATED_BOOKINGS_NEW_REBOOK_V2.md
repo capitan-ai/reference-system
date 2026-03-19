@@ -71,6 +71,13 @@ Square используется только как reconciliation/audit layer, 
 
 ## 4. Логика расчёта
 
+### 4.0. Включённые букинги
+
+- **Staff:** creator_type = TEAM_MEMBER, source = FIRST_PARTY_MERCHANT
+- **Online Booking:** administrator_id IS NULL, source IN ('FIRST_PARTY_BUYER', 'THIRD_PARTY_BUYER')
+
+Оба типа используют prior-paid логику для New vs Rebook и same_month/future_month/past_month.
+
 ### 4.1. Prior paid
 
 **Prior paid** = у клиента есть хотя бы один `Payment` со статусом `COMPLETED`, связанный с букингом, который по порядку `(start_at, created_at, booking_id)` идёт **раньше** текущего.

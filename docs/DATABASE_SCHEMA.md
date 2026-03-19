@@ -57,3 +57,4 @@ Background processing and audit logs.
 | `notification_events` | History of all outgoing Emails and SMS. | `channel`, `templateType`, `status`, `externalId` |
 | `custom_oauth_providers` | Configuration for Square OAuth 2.0 connections. | `client_id`, `scopes`, `enabled` |
 
+

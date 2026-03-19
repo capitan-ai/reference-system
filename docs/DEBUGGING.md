@@ -49,3 +49,4 @@ The system includes several "Hidden" API routes for testing:
 ## ⚠️ Important Note on PII
 Logs contain **Personally Identifiable Information** (names, emails). Access to the `application_logs` table should be restricted to authorized administrators only.
 
+
