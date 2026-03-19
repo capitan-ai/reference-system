@@ -7,12 +7,17 @@ const { PrismaClient } = require('@prisma/client')
 const logPrisma = new PrismaClient()
 
 function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  })
+  return new Response(
+    JSON.stringify(body, (_key, value) =>
+      typeof value === 'bigint' ? Number(value) : value
+    ),
+    {
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    }
+  )
 }
 
 function authorize(request) {
@@ -342,28 +347,34 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
     `
 
     const validation = await prisma.$queryRawUnsafe(validationSQL)
-    if (validation[0]?.booking_order_errors > 0 || 
-        validation[0]?.booking_visit_order_errors > 0 ||
-        validation[0]?.visits_count_errors > 0) {
-      console.warn('⚠️ Data validation warnings:', validation[0])
+    const raw = validation[0] || {}
+    // Convert BigInt to Number (PostgreSQL returns COUNT as BigInt; JSON.stringify cannot serialize BigInt)
+    const validationSafe = {
+      booking_order_errors: Number(raw.booking_order_errors ?? 0),
+      booking_visit_order_errors: Number(raw.booking_visit_order_errors ?? 0),
+      visits_count_errors: Number(raw.visits_count_errors ?? 0),
+    }
+    if (validationSafe.booking_order_errors > 0 ||
+        validationSafe.booking_visit_order_errors > 0 ||
+        validationSafe.visits_count_errors > 0) {
+      console.warn('⚠️ Data validation warnings:', validationSafe)
     }
 
     await prisma.$disconnect()
 
     const duration = Date.now() - startTime
     console.log(`[CRON] Customer analytics refresh completed in ${duration}ms`)
-    
-    if (validation[0]?.booking_order_errors > 0 || 
-        validation[0]?.booking_visit_order_errors > 0 ||
-        validation[0]?.visits_count_errors > 0) {
-      console.warn(`[CRON] Validation warnings after ${duration}ms:`, validation[0])
+    if (validationSafe.booking_order_errors > 0 ||
+        validationSafe.booking_visit_order_errors > 0 ||
+        validationSafe.visits_count_errors > 0) {
+      console.warn(`[CRON] Validation warnings after ${duration}ms:`, validationSafe)
     }
 
-    return json({ 
-      success: true, 
+    return json({
+      success: true,
       message: 'Customer analytics refresh completed',
       duration_ms: duration,
-      validation: validation[0] || {}
+      validation: validationSafe,
     })
 
   } catch (error) {
