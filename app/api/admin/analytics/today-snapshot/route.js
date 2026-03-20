@@ -27,96 +27,80 @@ export async function GET(request) {
       return Response.json({ error: 'organizationId is required' }, { status: 400 })
     }
 
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-
-    // Build query conditions
-    const whereConditions = {
-      organization_id: organizationId,
-      start_at: {
-        gte: today,
-        lt: tomorrow
-      }
-    }
-
-    if (locationId) {
-      whereConditions.location_id = locationId
-    }
-
-    // Get today's appointments (ACCEPTED status)
-    const appointmentsToday = await prisma.booking.count({
-      where: {
-        ...whereConditions,
-        status: 'ACCEPTED'
-      }
-    })
-
-    // Get today's cancellations (CANCELLED_BY_CUSTOMER, CANCELLED_BY_SELLER, NO_SHOW)
-    const cancellationsToday = await prisma.booking.count({
-      where: {
-        ...whereConditions,
-        status: {
-          in: ['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'NO_SHOW']
-        }
-      }
-    })
-
-    // Get cancellations by type
-    const cancellationDetails = await prisma.booking.groupBy({
-      by: ['status'],
-      where: {
-        ...whereConditions,
-        status: {
-          in: ['CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_SELLER', 'NO_SHOW']
-        }
-      },
-      _count: true
-    })
-
-    const cancellationBreakdown = {
-      cancelled_by_customer: 0,
-      cancelled_by_seller: 0,
-      no_show: 0
-    }
-
-    cancellationDetails.forEach(detail => {
-      if (detail.status === 'CANCELLED_BY_CUSTOMER') {
-        cancellationBreakdown.cancelled_by_customer = detail._count
-      } else if (detail.status === 'CANCELLED_BY_SELLER') {
-        cancellationBreakdown.cancelled_by_seller = detail._count
-      } else if (detail.status === 'NO_SHOW') {
-        cancellationBreakdown.no_show = detail._count
-      }
-    })
-
-    // Get revenue for today
-    const today_date = today.toISOString().split('T')[0]
-    const revenueToday = await prisma.$queryRaw`
-      SELECT 
-        SUM(revenue_dollars) as total_revenue,
-        SUM(payment_count) as total_payments,
-        COUNT(*) as location_records
-      FROM analytics_revenue_by_location_daily
-      WHERE DATE(date) = ${today_date}::date
-        AND organization_id = ${organizationId}::uuid
-        ${locationId ? `AND location_id = ${locationId}::uuid` : ''}
+    const pacificRows = await prisma.$queryRaw`
+      SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'America/Los_Angeles')::date AS d
     `
+    const pacificDate = pacificRows[0].d
+    const dateStr =
+      pacificDate instanceof Date
+        ? pacificDate.toISOString().slice(0, 10)
+        : String(pacificDate).slice(0, 10)
+
+    // Same logic as analytics_appointments_by_location_daily (canonical booking + active segment for ACCEPTED)
+    const snapshotRows = locationId
+      ? await prisma.$queryRaw`
+          SELECT
+            COALESCE(SUM(appointments_count), 0)::int AS accepted,
+            COALESCE(SUM(cancelled_by_customer), 0)::int AS cancelled_by_customer,
+            COALESCE(SUM(cancelled_by_seller), 0)::int AS cancelled_by_seller,
+            COALESCE(SUM(no_show_appointments), 0)::int AS no_show
+          FROM analytics_appointments_by_location_daily
+          WHERE organization_id = ${organizationId}::uuid
+            AND date = ${pacificDate}::date
+            AND location_id = ${locationId}::uuid
+        `
+      : await prisma.$queryRaw`
+          SELECT
+            COALESCE(SUM(appointments_count), 0)::int AS accepted,
+            COALESCE(SUM(cancelled_by_customer), 0)::int AS cancelled_by_customer,
+            COALESCE(SUM(cancelled_by_seller), 0)::int AS cancelled_by_seller,
+            COALESCE(SUM(no_show_appointments), 0)::int AS no_show
+          FROM analytics_appointments_by_location_daily
+          WHERE organization_id = ${organizationId}::uuid
+            AND date = ${pacificDate}::date
+        `
+
+    const snap = snapshotRows[0] || {}
+    const byCustomer = Number(snap.cancelled_by_customer || 0)
+    const bySeller = Number(snap.cancelled_by_seller || 0)
+    const noShow = Number(snap.no_show || 0)
+    const cancellationsTotal = byCustomer + bySeller + noShow
+    const appointmentsToday = Number(snap.accepted || 0)
+
+    const revenueToday = locationId
+      ? await prisma.$queryRaw`
+          SELECT
+            SUM(revenue_dollars) as total_revenue,
+            SUM(payment_count) as total_payments,
+            COUNT(*) as location_records
+          FROM analytics_revenue_by_location_daily
+          WHERE DATE(date) = ${pacificDate}::date
+            AND organization_id = ${organizationId}::uuid
+            AND location_id = ${locationId}::uuid
+        `
+      : await prisma.$queryRaw`
+          SELECT
+            SUM(revenue_dollars) as total_revenue,
+            SUM(payment_count) as total_payments,
+            COUNT(*) as location_records
+          FROM analytics_revenue_by_location_daily
+          WHERE DATE(date) = ${pacificDate}::date
+            AND organization_id = ${organizationId}::uuid
+        `
 
     const revenue = revenueToday[0]
 
     return Response.json({
-      date: today.toISOString().split('T')[0],
+      date: dateStr,
       appointments: {
         accepted: appointmentsToday,
         total: appointmentsToday
       },
       cancellations: {
-        total: cancellationsToday,
-        by_customer: cancellationBreakdown.cancelled_by_customer,
-        by_seller: cancellationBreakdown.cancelled_by_seller,
-        no_show: cancellationBreakdown.no_show
+        total: cancellationsTotal,
+        by_customer: byCustomer,
+        by_seller: bySeller,
+        no_show: noShow
       },
       revenue: {
         total_dollars: Number(revenue?.total_revenue || 0),
