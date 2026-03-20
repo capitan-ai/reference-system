@@ -6,7 +6,6 @@ async function updateAnalyticsView() {
   console.log('='.repeat(80))
 
   try {
-    // Use MIN(bookings.start_at) as single source of truth - first_visit_at has timezone interpretation issues
     const updatedViewSQL = `
 -- ============================================================================
 -- ANALYTICS APPOINTMENTS BY LOCATION DAILY VIEW
@@ -17,6 +16,11 @@ async function updateAnalyticsView() {
 --   (includes duplicate Square versions); Pacific Ave = org-day canonical total minus that
 --   so Union + Pacific = total and matches Square Dashboard (e.g. 24 + 22 = 46).
 -- Cancellations / no-show: latest version only, no segment filter
+--
+-- new_customers: customer is "new on this Pacific day" if first visit instant's
+--   calendar date (America/Los_Angeles) equals the booking row's Pacific date.
+--   first_visit_effective_at = COALESCE(square_existing_clients.first_visit_at,
+--   MIN(bookings.start_at) ACCEPTED|COMPLETED). See docs/NEW_CUSTOMERS_FIRST_VISIT_AT.md
 -- ============================================================================
 
 CREATE OR REPLACE VIEW analytics_appointments_by_location_daily AS
@@ -78,14 +82,22 @@ booking_daily AS (
     has_active_segment
   FROM booking_canonical
 ),
-first_booking_per_customer AS (
+customer_first_visit_effective AS (
   SELECT
-    b.organization_id,
-    b.customer_id,
-    MIN(b.start_at) as first_start_at
-  FROM bookings b
-  WHERE b.customer_id IS NOT NULL AND b.status IN ('ACCEPTED', 'COMPLETED')
-  GROUP BY b.organization_id, b.customer_id
+    sec.organization_id,
+    sec.square_customer_id AS customer_id,
+    COALESCE(
+      sec.first_visit_at,
+      (
+        SELECT MIN(b.start_at)
+        FROM bookings b
+        WHERE b.organization_id = sec.organization_id
+          AND b.customer_id = sec.square_customer_id
+          AND b.customer_id IS NOT NULL
+          AND b.status IN ('ACCEPTED', 'COMPLETED')
+      )
+    ) AS first_visit_effective_at
+  FROM square_existing_clients sec
 ),
 per_location AS (
   SELECT
@@ -103,13 +115,13 @@ per_location AS (
       WHERE bd.customer_id IS NOT NULL
         AND bd.status = 'ACCEPTED'
         AND bd.has_active_segment
-        AND fb.first_start_at IS NOT NULL
-        AND DATE(fb.first_start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') = bd.booking_date_pacific
+        AND fv.first_visit_effective_at IS NOT NULL
+        AND DATE(fv.first_visit_effective_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') = bd.booking_date_pacific
     ) AS canon_new
   FROM booking_daily bd
   INNER JOIN locations l ON bd.location_id = l.id AND bd.organization_id = l.organization_id
-  LEFT JOIN first_booking_per_customer fb
-    ON bd.organization_id = fb.organization_id AND bd.customer_id = fb.customer_id
+  LEFT JOIN customer_first_visit_effective fv
+    ON bd.organization_id = fv.organization_id AND bd.customer_id = fv.customer_id
   GROUP BY bd.organization_id, bd.location_id, l.name, bd.booking_date_pacific
 ),
 org_day_total AS (
