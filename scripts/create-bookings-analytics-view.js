@@ -91,7 +91,7 @@ booking_dates AS (
     location_id,
     customer_id,
     status,
-    DATE(start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') AS booking_date_pacific,
+    DATE((start_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles') AS booking_date_pacific,
     has_active_segment
   FROM booking_canonical
 ),
@@ -102,7 +102,7 @@ customer_first_visit_effective AS (
     COALESCE(
       sec.first_visit_at,
       (
-        SELECT MIN(b.start_at)
+        SELECT MIN(b.start_at) AT TIME ZONE 'UTC'
         FROM bookings b
         WHERE b.organization_id = sec.organization_id
           AND b.customer_id = sec.square_customer_id
@@ -129,7 +129,7 @@ per_location AS (
         AND bd.status = 'ACCEPTED'
         AND bd.has_active_segment
         AND fv.first_visit_effective_at IS NOT NULL
-        AND DATE(fv.first_visit_effective_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') = bd.booking_date_pacific
+        AND DATE(fv.first_visit_effective_at AT TIME ZONE 'America/Los_Angeles') = bd.booking_date_pacific
     ) AS canon_new
   FROM booking_dates bd
   INNER JOIN locations l ON bd.location_id = l.id AND bd.organization_id = l.organization_id
@@ -145,13 +145,13 @@ org_day_total AS (
 union_raw AS (
   SELECT
     b.organization_id,
-    DATE(b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') AS booking_date_pacific,
+    DATE((b.start_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles') AS booking_date_pacific,
     COUNT(*)::bigint AS raw_union_accept
   FROM bookings b
   INNER JOIN locations lu ON lu.id = b.location_id AND lu.organization_id = b.organization_id
   WHERE b.status = 'ACCEPTED'
     AND lu.name ILIKE '%Union St%'
-  GROUP BY b.organization_id, DATE(b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')
+  GROUP BY b.organization_id, DATE((b.start_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')
 ),
 org_loc_count AS (
   SELECT organization_id, COUNT(*)::int AS nloc

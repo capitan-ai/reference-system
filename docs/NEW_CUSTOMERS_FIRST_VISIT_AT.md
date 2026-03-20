@@ -23,12 +23,19 @@ first_visit_effective_at =
 
 Клиент считается **новым в конкретный Pacific-день** в строке локации, если в этот день у него есть **ACCEPTED**-букинг с активным сегментом **и** календарная дата первого визита в **America/Los_Angeles** совпадает с датой этого букинга (тот же день, что и раньше по смыслу «первый приём в этот день»).
 
-## Про таймзону
+## Про таймзону (важно: два типа колонок)
 
-В PostgreSQL `first_visit_at` хранится как **`timestamptz`**: это не «просто дата», а **мгновение** (обычно как приходит `start_at` из Square, в UTC). Для салона **календарный день** для отчётов задаётся явно:  
-`DATE(first_visit_effective_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')`.
+- **`square_existing_clients.first_visit_at`** — `timestamptz`. Календарный день в LA:
 
-Так совпадает день с остальной аналитикой по букингам (там тот же Pacific). Если бы брать «дату в UTC», часть вечерних слотов попала бы на **другой календарный день**, чем в приложении салона.
+  `DATE(first_visit_at AT TIME ZONE 'America/Los_Angeles')`
+
+- **`bookings.start_at`** в этой БД — **`timestamp without time zone`**, значения хранятся как **UTC wall time** из Square (без смещения). Чтобы получить календарный день в Los Angeles, нужна цепочка:
+
+  `DATE((start_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')`
+
+  Если применить только `start_at AT TIME ZONE 'America/Los_Angeles'`, PostgreSQL воспринимает naive время как **локальное LA**, а не UTC — сдвиг на соседний день для вечерних слотов.
+
+Во вьюхе `analytics_appointments_by_location_daily`: день букинга считается по **UTC→LA** для `start_at`; день первого визита — по **LA wall** для `first_visit_effective_at` (всегда `timestamptz` после `COALESCE` с `MIN(start_at) AT TIME ZONE 'UTC'`).
 
 ## Недельные и месячные агрегаты
 
