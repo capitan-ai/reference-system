@@ -867,6 +867,30 @@ model Booking {
   @@schema("public")
 }
 
+/// Staging mirror of Square List Bookings API — no relations to core tables (audit / compare / backfill).
+model SquareBookingSdkSnapshot {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  square_booking_id  String    @unique @map("square_booking_id")
+  square_location_id String?   @map("square_location_id")
+  square_customer_id String?   @map("square_customer_id")
+  start_at           DateTime? @db.Timestamptz(6)
+  status             String?
+  square_version     Int?      @map("square_version")
+  square_updated_at  DateTime? @map("square_updated_at") @db.Timestamptz(6)
+  raw_json           Json
+  sync_batch_id      String    @map("sync_batch_id")
+  window_start       DateTime? @map("window_start") @db.Timestamptz(6)
+  window_end         DateTime? @map("window_end") @db.Timestamptz(6)
+  fetched_at         DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  @@index([start_at])
+  @@index([square_location_id])
+  @@index([sync_batch_id])
+  @@index([status])
+  @@map("square_booking_sdk_snapshot")
+  @@schema("public")
+}
+
 model BookingSegment {
   id                          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   booking_id                  String            @db.Uuid
