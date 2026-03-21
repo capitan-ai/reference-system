@@ -1,10 +1,8 @@
 import { createRequire } from 'module'
+import prisma from '@/lib/prisma-client'
 
 const require = createRequire(import.meta.url)
 const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
-
-const logPrisma = new PrismaClient()
 
 function json(body, status = 200) {
   return new Response(
@@ -62,7 +60,6 @@ async function handle(request) {
   }
   
   const cronId = `cron-refresh-customer-analytics-${Date.now()}`
-  const prisma = new PrismaClient()
   const url = new URL(request.url)
 
   try {
@@ -360,8 +357,6 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
       console.warn('⚠️ Data validation warnings:', validationSafe)
     }
 
-    await prisma.$disconnect()
-
     const duration = Date.now() - startTime
     console.log(`[CRON] Customer analytics refresh completed in ${duration}ms`)
     if (validationSafe.booking_order_errors > 0 ||
@@ -381,9 +376,7 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
     const duration = Date.now() - startTime
     console.error(`[CRON] Error after ${duration}ms during customer analytics refresh:`, error.message)
     console.error(error.stack)
-    return json({ success: false, error: error.message, duration_ms: duration }, 500)
-  } finally {
-    await logPrisma.$disconnect()
+    return json({ success: false, error: 'Internal server error', duration_ms: duration }, 500)
   }
 }
 

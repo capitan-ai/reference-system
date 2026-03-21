@@ -7,10 +7,8 @@
 
 export const dynamic = 'force-dynamic'
 
-import { PrismaClient } from '@prisma/client'
+import prisma from '@/lib/prisma-client'
 import { getUserFromRequest } from '@/lib/auth/check-access'
-
-const prisma = new PrismaClient()
 
 export async function GET(request) {
   try {
@@ -133,11 +131,9 @@ export async function GET(request) {
   } catch (error) {
     console.error('Revenue KPI error:', error)
     return Response.json(
-      { error: error.message },
+      { error: 'Internal server error' },
       { status: 500 }
     )
-  } finally {
-    await prisma.$disconnect()
   }
 }
 

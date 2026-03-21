@@ -813,7 +813,7 @@ function generatePersonalCode(customerName, customerId) {
 }
 
 // Generate unique personal code, checking for duplicates
-async function generateUniquePersonalCode(customerName, customerId, maxAttempts = 10) {
+async function generateUniquePersonalCode(customerName, customerId, organizationId, maxAttempts = 10) {
   let attempt = 0
   while (attempt < maxAttempts) {
     const code = generatePersonalCode(customerName, customerId)
@@ -826,33 +826,33 @@ async function generateUniquePersonalCode(customerName, customerId, maxAttempts 
       const uniqueCode = `${baseCode}${suffix}`
       
       // Check if this code exists in referral_profiles OR square_existing_clients (backward compatibility)
-      const existingInProfiles = await prisma.referralProfile.findUnique({
-        where: { personal_code: uniqueCode },
+      const existingInProfiles = await prisma.referralProfile.findFirst({
+        where: { organization_id: organizationId, personal_code: uniqueCode },
         select: { square_customer_id: true }
       })
-      
+
       const existingInClients = await prisma.$queryRaw`
-        SELECT square_customer_id FROM square_existing_clients 
-        WHERE personal_code = ${uniqueCode}
+        SELECT square_customer_id FROM square_existing_clients
+        WHERE personal_code = ${uniqueCode} AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
-      
+
       if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return uniqueCode
       }
     } else {
       // First attempt - check if base code exists
-      const existingInProfiles = await prisma.referralProfile.findUnique({
-        where: { personal_code: code },
+      const existingInProfiles = await prisma.referralProfile.findFirst({
+        where: { organization_id: organizationId, personal_code: code },
         select: { square_customer_id: true }
       })
-      
+
       const existingInClients = await prisma.$queryRaw`
-        SELECT square_customer_id FROM square_existing_clients 
-        WHERE personal_code = ${code}
+        SELECT square_customer_id FROM square_existing_clients
+        WHERE personal_code = ${code} AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
-      
+
       if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return code
       }
@@ -2412,7 +2412,7 @@ async function sendReferralCodeToNewClient(
       console.log(`✅ Using existing personal_code: ${referralCode}`)
     } else {
       // Generate new unique code in name+ID format (checking for duplicates)
-      referralCode = await generateUniquePersonalCode(customerName, customerId)
+      referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
       console.log(`✅ Generated new personal_code in name+ID format: ${referralCode}`)
     }
     
@@ -2512,7 +2512,7 @@ async function sendReferralCodeToNewClient(
         let retrySuccess = false
         for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
           try {
-            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
             referralUrl = generateReferralUrl(referralCode)
             
             await upsertCustomerCustomAttribute(customerId, REFERRAL_CODE_ATTRIBUTE_KEY, referralCode)
@@ -2591,7 +2591,7 @@ async function sendReferralCodeToNewClient(
         for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
           try {
             // Generate a new unique code
-            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
             referralUrl = generateReferralUrl(referralCode)
             
             // Update custom attribute and note with new code
@@ -2918,7 +2918,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     // 2. Generate referral code immediately when customer creates profile
     // This allows customer to start sharing their referral code right away
     const customerName = `${givenName || ''} ${familyName || ''}`.trim() || 'Customer'
-    const referralCode = await generateUniquePersonalCode(customerName, customerId)
+    const referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
     const referralUrl = generateReferralUrl(referralCode)
     
     console.log(`✅ Generated referral code: ${referralCode}`)

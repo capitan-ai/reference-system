@@ -91,9 +91,7 @@ export async function GET(request, { params }) {
     // Return user-friendly error
     return new Response(
       JSON.stringify({ 
-        error: 'Failed to generate pass',
-        message: error.message,
-        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        error: 'Failed to generate pass'
       }),
       {
         status: 500,

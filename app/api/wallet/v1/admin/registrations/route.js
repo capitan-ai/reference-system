@@ -85,7 +85,7 @@ export async function GET(request) {
   } catch (error) {
     console.error('Error fetching registrations:', error)
     return new Response(JSON.stringify({
-      error: error.message
+      error: 'Internal server error'
     }), {
       status: 500,
       headers: {

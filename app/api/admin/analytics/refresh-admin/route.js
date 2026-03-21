@@ -60,13 +60,22 @@ async function handleRefresh(request) {
     const fromParam = searchParams.get('from')
     const toParam = searchParams.get('to')
 
-    // 3. Determine date range (same logic as cron)
+    // 3. Validate and determine date range (same logic as cron)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+    if (fromParam && !dateRegex.test(fromParam)) {
+      return Response.json({ error: 'Invalid date format for "from"' }, { status: 400 })
+    }
+    if (toParam && !dateRegex.test(toParam)) {
+      return Response.json({ error: 'Invalid date format for "to"' }, { status: 400 })
+    }
+
     let dateFrom, dateTo
     if (fromParam && toParam) {
+      // fromParam/toParam validated above with dateRegex
       dateFrom = `'${fromParam} 00:00:00'`
       dateTo = `'${toParam} 23:59:59'`
     } else {
-      const days = parseInt(daysParam || '35')
+      const days = Math.min(Math.max(parseInt(daysParam || '35', 10) || 35, 1), 365)
       dateFrom = `NOW() - interval '${days} days'`
       dateTo = `NOW() + interval '1 day'`
     }
@@ -363,6 +372,6 @@ async function handleRefresh(request) {
     })
   } catch (error) {
     console.error(`[ADMIN-API] Error refreshing admin analytics: ${error.message}`)
-    return Response.json({ error: error.message }, { status: 500 })
+    return Response.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

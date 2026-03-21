@@ -1,6 +1,7 @@
 import { createRequire } from 'module'
+import prisma from '@/lib/prisma-client'
+
 const require = createRequire(import.meta.url)
-const { PrismaClient } = require('@prisma/client')
 const { processMasterEarnings } = require('@/lib/workers/master-earnings-worker')
 const { processDiscountAdjustments } = require('@/lib/workers/discount-engine-worker')
 const { refreshMasterPerformance } = require('@/scripts/refresh-master-performance')
@@ -52,8 +53,6 @@ async function handle(request) {
     return json({ error: 'Unauthorized', reason: auth.reason }, 401)
   }
   
-  const prisma = new PrismaClient()
-
   try {
     const organizations = await prisma.organization.findMany({
       where: { is_active: true },
@@ -74,9 +73,7 @@ async function handle(request) {
     return json({ success: true, results })
   } catch (error) {
     console.error('[CRON-EARNINGS] ❌ Master Earnings failed:', error.message)
-    return json({ success: false, error: error.message }, 500)
-  } finally {
-    await prisma.$disconnect()
+    return json({ success: false, error: 'Internal server error' }, 500)
   }
 }
 

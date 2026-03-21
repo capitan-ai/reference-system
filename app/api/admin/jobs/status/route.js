@@ -167,7 +167,7 @@ export async function GET(request) {
     console.error('Error getting job status:', error)
     return Response.json({
       success: false,
-      error: error.message
+      error: 'Internal server error'
     }, { status: 500 })
   }
 }

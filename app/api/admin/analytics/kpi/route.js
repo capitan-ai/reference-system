@@ -8,10 +8,8 @@
 
 export const dynamic = 'force-dynamic'
 
-import { PrismaClient } from '@prisma/client'
+import prisma from '@/lib/prisma-client'
 import { getUserFromRequest } from '@/lib/auth/check-access'
-
-const prisma = new PrismaClient()
 
 function calculatePeriodDates(startDate, endDate) {
   const start = new Date(startDate)
@@ -75,48 +73,42 @@ export async function GET(request) {
     // Calculate previous period
     const periods = calculatePeriodDates(currentStart, currentEnd)
     
-    let locationFilter = ''
-    if (locationId) {
-      locationFilter = `AND location_id = '${locationId}'::uuid`
-    }
-
-    // Get current period data
-    const currentData = await prisma.$queryRawUnsafe(`
-      SELECT 
+    // Build parameterized KPI query
+    const kpiQueryBase = `
+      SELECT
         SUM(a.appointments_count)::int as total_appointments,
         SUM(a.cancelled_appointments)::int as total_cancelled,
         SUM(a.no_show_appointments)::int as total_no_show,
         SUM(r.revenue_dollars)::numeric as total_revenue,
         SUM(r.payment_count)::int as total_payments
       FROM analytics_appointments_by_location_daily a
-      FULL OUTER JOIN analytics_revenue_by_location_daily r 
-        ON a.organization_id = r.organization_id 
-        AND a.location_id = r.location_id 
+      FULL OUTER JOIN analytics_revenue_by_location_daily r
+        ON a.organization_id = r.organization_id
+        AND a.location_id = r.location_id
         AND a.date = r.date
-      WHERE a.organization_id = '${organizationId}'::uuid
-        AND a.date BETWEEN '${periods.current.start}'::date AND '${periods.current.end}'::date
-        ${locationFilter}
-    `)
+      WHERE a.organization_id = $1::uuid
+        AND a.date BETWEEN $2::date AND $3::date
+    `
+
+    // Current period
+    const currentParams = [organizationId, periods.current.start, periods.current.end]
+    let currentQuery = kpiQueryBase
+    if (locationId) {
+      currentQuery += ` AND a.location_id = $${currentParams.length + 1}::uuid`
+      currentParams.push(locationId)
+    }
+    const currentData = await prisma.$queryRawUnsafe(currentQuery, ...currentParams)
 
     const currentRevenue = currentData[0] || {}
 
-    // Get previous period data
-    const previousData = await prisma.$queryRawUnsafe(`
-      SELECT 
-        SUM(a.appointments_count)::int as total_appointments,
-        SUM(a.cancelled_appointments)::int as total_cancelled,
-        SUM(a.no_show_appointments)::int as total_no_show,
-        SUM(r.revenue_dollars)::numeric as total_revenue,
-        SUM(r.payment_count)::int as total_payments
-      FROM analytics_appointments_by_location_daily a
-      FULL OUTER JOIN analytics_revenue_by_location_daily r 
-        ON a.organization_id = r.organization_id 
-        AND a.location_id = r.location_id 
-        AND a.date = r.date
-      WHERE a.organization_id = '${organizationId}'::uuid
-        AND a.date BETWEEN '${periods.previous.start}'::date AND '${periods.previous.end}'::date
-        ${locationFilter}
-    `)
+    // Previous period
+    const previousParams = [organizationId, periods.previous.start, periods.previous.end]
+    let previousQuery = kpiQueryBase
+    if (locationId) {
+      previousQuery += ` AND a.location_id = $${previousParams.length + 1}::uuid`
+      previousParams.push(locationId)
+    }
+    const previousData = await prisma.$queryRawUnsafe(previousQuery, ...previousParams)
 
     const previousRevenue = previousData[0] || {}
 
@@ -194,11 +186,9 @@ export async function GET(request) {
   } catch (error) {
     console.error('KPI error:', error)
     return Response.json(
-      { error: error.message },
+      { error: 'Internal server error' },
       { status: 500 }
     )
-  } finally {
-    await prisma.$disconnect()
   }
 }
 

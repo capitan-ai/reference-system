@@ -7,10 +7,8 @@
 
 export const dynamic = 'force-dynamic'
 
-import { PrismaClient } from '@prisma/client'
+import prisma from '@/lib/prisma-client'
 import { getUserFromRequest } from '@/lib/auth/check-access'
-
-const prisma = new PrismaClient()
 
 export async function GET(request) {
   try {
@@ -29,71 +27,90 @@ export async function GET(request) {
       return Response.json({ error: 'organizationId is required' }, { status: 400 })
     }
 
-    // Build WHERE clause for dates
-    let dateFilter = ''
-    if (startDate && endDate) {
-      dateFilter = `AND date BETWEEN '${startDate}'::date AND '${endDate}'::date`
-    } else if (startDate) {
-      dateFilter = `AND date >= '${startDate}'::date`
-    } else if (endDate) {
-      dateFilter = `AND date <= '${endDate}'::date`
-    }
-
-    let locationFilter = ''
-    if (locationId) {
-      locationFilter = `AND location_id = '${locationId}'::uuid`
-    }
-
-    // Get appointments data (ACCEPTED only for KPI)
-    const appointmentsData = await prisma.$queryRawUnsafe(`
-      SELECT 
-        date,
-        location_name,
+    // Build parameterized queries
+    // --- Appointments query ---
+    let apptQuery = `
+      SELECT
+        date, location_name,
         appointments_count as accepted_appointments,
-        cancelled_appointments,
-        no_show_appointments,
-        unique_customers,
-        new_customers
+        cancelled_appointments, no_show_appointments,
+        unique_customers, new_customers
       FROM analytics_appointments_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        ${dateFilter}
-        ${locationFilter}
-      ORDER BY date DESC, location_name
-    `)
+      WHERE organization_id = $1::uuid
+    `
+    const apptParams = [organizationId]
 
-    // Get revenue data
-    const revenueData = await prisma.$queryRawUnsafe(`
-      SELECT 
-        date,
-        location_name,
-        revenue_cents,
-        revenue_dollars,
-        payment_count,
-        unique_customers
+    if (startDate) {
+      apptQuery += ` AND date >= $${apptParams.length + 1}::date`
+      apptParams.push(startDate)
+    }
+    if (endDate) {
+      apptQuery += ` AND date <= $${apptParams.length + 1}::date`
+      apptParams.push(endDate)
+    }
+    if (locationId) {
+      apptQuery += ` AND location_id = $${apptParams.length + 1}::uuid`
+      apptParams.push(locationId)
+    }
+    apptQuery += ` ORDER BY date DESC, location_name`
+
+    const appointmentsData = await prisma.$queryRawUnsafe(apptQuery, ...apptParams)
+
+    // --- Revenue query ---
+    let revQuery = `
+      SELECT
+        date, location_name,
+        revenue_cents, revenue_dollars,
+        payment_count, unique_customers
       FROM analytics_revenue_by_location_daily
-      WHERE organization_id = '${organizationId}'::uuid
-        ${dateFilter}
-        ${locationFilter}
-      ORDER BY date DESC, location_name
-    `)
+      WHERE organization_id = $1::uuid
+    `
+    const revParams = [organizationId]
 
-    // Get unique customers for the period from customer_analytics
-    let uniqueCustomersQuery = `
+    if (startDate) {
+      revQuery += ` AND date >= $${revParams.length + 1}::date`
+      revParams.push(startDate)
+    }
+    if (endDate) {
+      revQuery += ` AND date <= $${revParams.length + 1}::date`
+      revParams.push(endDate)
+    }
+    if (locationId) {
+      revQuery += ` AND location_id = $${revParams.length + 1}::uuid`
+      revParams.push(locationId)
+    }
+    revQuery += ` ORDER BY date DESC, location_name`
+
+    const revenueData = await prisma.$queryRawUnsafe(revQuery, ...revParams)
+
+    // --- Unique customers query ---
+    let ucQuery = `
       SELECT COUNT(DISTINCT ca.square_customer_id)::int as unique_customers_period
       FROM customer_analytics ca
-      WHERE ca.organization_id = '${organizationId}'::uuid
+      WHERE ca.organization_id = $1::uuid
         AND ca.first_visit_at IS NOT NULL
-        ${startDate && endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') BETWEEN '${startDate}'::date AND '${endDate}'::date` : ''}
-        ${startDate && !endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') >= '${startDate}'::date` : ''}
-        ${!startDate && endDate ? `AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') <= '${endDate}'::date` : ''}
-        ${locationId ? `AND EXISTS (
-          SELECT 1 FROM bookings b 
-          WHERE b.customer_id = ca.square_customer_id 
-          AND b.organization_id = ca.organization_id
-          AND b.location_id = '${locationId}'::uuid
-        )` : ''}
     `
-    const uniqueCustomersResult = await prisma.$queryRawUnsafe(uniqueCustomersQuery)
+    const ucParams = [organizationId]
+
+    if (startDate) {
+      ucQuery += ` AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') >= $${ucParams.length + 1}::date`
+      ucParams.push(startDate)
+    }
+    if (endDate) {
+      ucQuery += ` AND DATE(ca.first_visit_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles') <= $${ucParams.length + 1}::date`
+      ucParams.push(endDate)
+    }
+    if (locationId) {
+      ucQuery += ` AND EXISTS (
+        SELECT 1 FROM bookings b
+        WHERE b.customer_id = ca.square_customer_id
+        AND b.organization_id = ca.organization_id
+        AND b.location_id = $${ucParams.length + 1}::uuid
+      )`
+      ucParams.push(locationId)
+    }
+
+    const uniqueCustomersResult = await prisma.$queryRawUnsafe(ucQuery, ...ucParams)
     const uniqueCustomersPeriod = uniqueCustomersResult[0]?.unique_customers_period || 0
 
     // Calculate totals
@@ -195,11 +212,9 @@ export async function GET(request) {
   } catch (error) {
     console.error('Dashboard error:', error)
     return Response.json(
-      { error: error.message },
+      { error: 'Internal server error' },
       { status: 500 }
     )
-  } finally {
-    await prisma.$disconnect()
   }
 }
 

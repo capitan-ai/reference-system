@@ -135,8 +135,46 @@ reports/
 /WEBHOOK_*.md
 /WHAT_SAVED_*.md
 
+# Root-level one-off JS scripts
+/check_*.js
+/fix_*.js
+/sync_*.js
+/generate_*.js
+/check_square_*.js
+
+# Untracked root analysis files
+/ARTIFACTS.md
+/CUSTOMER_*.md
+/DASHBOARD_*.md
+/DATA_SYNC_*.md
+/KPI_*.md
+/NET_SALES_*.md
+/deploy-*.sh
+
+# Data/export files at root
+audit_output.txt
+*_report.json
+*_report.md
+referral-analytics-*.json
+payments_*.json
+payment_ids_*.txt
+other_services_purchases.json
+vercel_logs_test.json
+square_clients_comparison_report.json
+extra_customers_in_db.txt
+missing_customers_in_db.txt
+guest_sales_report.md
+
+# docs/ analysis files
+/docs/ADMIN_*.md
+/docs/NEW_CUSTOMERS_*.md
+/docs/REFERRAL_*.md
+
 # HTML previews
 preview-*.html
 
 # Logo files (keep only what's in public/)
 logo-no-background/
+
+# Jest config (if not committed)
+jest.config.js

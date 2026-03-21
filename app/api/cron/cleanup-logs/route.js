@@ -27,9 +27,7 @@ export async function GET(request) {
     })
   } catch (error) {
     logError('cleanup.logs.error', { error: error.message })
-    return Response.json({ success: false, error: error.message }, { status: 500 })
-  } finally {
-    await prisma.$disconnect()
+    return Response.json({ success: false, error: 'Internal server error' }, { status: 500 })
   }
 }
 

@@ -1,12 +1,10 @@
 import { createRequire } from 'module'
+import prisma from '@/lib/prisma-client'
 
 const require = createRequire(import.meta.url)
 const { runGiftCardJobOnce } = require('../../../../lib/workers/giftcard-job-runner')
 const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
 const { randomUUID } = require('crypto')
-
-const logPrisma = new PrismaClient()
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -101,7 +99,7 @@ async function handle(request) {
   
   // Save cron start to application_logs (non-blocking)
   try {
-    await saveApplicationLog(logPrisma, {
+    await saveApplicationLog(prisma, {
       logType: 'cron',
       logId: cronId,
       logCreatedAt: new Date(),
@@ -163,7 +161,7 @@ async function handle(request) {
     
     // Update application_log with results (non-blocking)
     try {
-      await logPrisma.$executeRaw`
+      await prisma.$executeRaw`
         UPDATE application_logs
         SET status = 'completed',
             payload = jsonb_set(
@@ -202,7 +200,7 @@ async function handle(request) {
     
     // Update application_log with error (non-blocking)
     try {
-      await logPrisma.$executeRaw`
+      await prisma.$executeRaw`
         UPDATE application_logs
         SET status = 'error',
             payload = jsonb_set(
@@ -224,10 +222,9 @@ async function handle(request) {
       console.warn('⚠️ Failed to update cron error log:', updateError.message)
     }
     
-    return json({ 
-      error: 'Gift card job failed', 
-      detail: error.message,
-      duration: duration 
+    return json({
+      error: 'Gift card job failed',
+      duration: duration
     }, 500)
   }
 }

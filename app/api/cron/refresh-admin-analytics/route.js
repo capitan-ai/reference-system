@@ -1,11 +1,9 @@
 import { createRequire } from 'module'
+import prisma from '@/lib/prisma-client'
 
 const require = createRequire(import.meta.url)
 const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
-const { PrismaClient } = require('@prisma/client')
 const { refreshAdminCreatedBookingFacts } = require('../../../../lib/analytics/admin-created-booking-facts')
-
-const logPrisma = new PrismaClient()
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -48,11 +46,17 @@ export async function GET(request) {
   const toParam = url.searchParams.get('to')
 
   const cronId = `cron-refresh-admin-analytics-${Date.now()}`
-  const prisma = new PrismaClient()
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/
+  if (fromParam && !dateRegex.test(fromParam)) {
+    return json({ error: 'Invalid date format for "from"' }, 400)
+  }
+  if (toParam && !dateRegex.test(toParam)) {
+    return json({ error: 'Invalid date format for "to"' }, 400)
+  }
 
   try {
     // 1. Log start
-    await saveApplicationLog(logPrisma, {
+    await saveApplicationLog(prisma, {
       logType: 'cron',
       logId: cronId,
       logCreatedAt: new Date(),
@@ -68,10 +72,11 @@ export async function GET(request) {
     // 2. Determine date range
     let dateFrom, dateTo
     if (fromParam && toParam) {
+      // fromParam/toParam validated above with dateRegex
       dateFrom = `'${fromParam} 00:00:00'`
       dateTo = `'${toParam} 23:59:59'`
     } else {
-      const days = parseInt(daysParam || '35')
+      const days = Math.min(Math.max(parseInt(daysParam || '35', 10) || 35, 1), 365)
       dateFrom = `NOW() - interval '${days} days'`
       dateTo = `NOW() + interval '1 day'`
     }
@@ -361,7 +366,7 @@ export async function GET(request) {
     const duration = Date.now() - startTime
     console.log(`[CRON] Admin analytics refresh completed in ${duration}ms`)
     
-    await saveApplicationLog(logPrisma, {
+    await saveApplicationLog(prisma, {
       logType: 'cron',
       logId: cronId,
       logCreatedAt: new Date(),
@@ -379,7 +384,7 @@ export async function GET(request) {
     console.error(`[CRON] Error after ${duration}ms refreshing admin analytics:`, error.message)
     console.error(error.stack)
     
-    await saveApplicationLog(logPrisma, {
+    await saveApplicationLog(prisma, {
       logType: 'cron',
       logId: cronId,
       logCreatedAt: new Date(),
@@ -392,8 +397,6 @@ export async function GET(request) {
       status: 'failed'
     }).catch(() => {})
 
-    return json({ error: error.message, duration_ms: duration }, 500)
-  } finally {
-    await prisma.$disconnect()
+    return json({ error: 'Internal server error', duration_ms: duration }, 500)
   }
 }
