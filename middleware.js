@@ -3,14 +3,6 @@ import { NextResponse } from 'next/server'
 export function middleware(request) {
   const pathname = request.nextUrl.pathname
 
-  // Admin API routes: require Bearer token
-  if (pathname.startsWith('/api/admin/')) {
-    const auth = request.headers.get('authorization')
-    if (!auth?.startsWith('Bearer ')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-  }
-
   // Cron routes: require CRON_SECRET
   if (pathname.startsWith('/api/cron/')) {
     const cronSecret = process.env.CRON_SECRET
@@ -27,5 +19,5 @@ export function middleware(request) {
 }
 
 export const config = {
-  matcher: ['/api/admin/:path*', '/api/cron/:path*']
+  matcher: ['/api/cron/:path*']
 }
