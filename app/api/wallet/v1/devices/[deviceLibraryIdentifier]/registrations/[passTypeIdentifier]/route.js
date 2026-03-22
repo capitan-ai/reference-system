@@ -4,6 +4,8 @@
 
 import prisma from '@/lib/prisma-client'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request, { params }) {
   try {
     const { deviceLibraryIdentifier, passTypeIdentifier } = params

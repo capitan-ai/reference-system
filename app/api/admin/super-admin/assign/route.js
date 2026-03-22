@@ -10,6 +10,8 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     // Only super admin can assign super admin
@@ -83,9 +85,11 @@ export async function POST(request) {
   } catch (error) {
     console.error('Assign super admin error:', error)
     return Response.json(
-      { error: error.message || 'Internal server error' },
+      { error: 'Internal server error' },
       { status: 500 }
     )
   }
 }
+
+
 

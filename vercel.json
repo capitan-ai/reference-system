@@ -22,6 +22,30 @@
     {
       "path": "/api/cron/giftcard-jobs",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/webhook-jobs",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-customer-analytics",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-admin-analytics",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/master-earnings",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-referral-analytics",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/cleanup-logs",
+      "schedule": "0 0 * * *"
     }
   ],
   "headers": [

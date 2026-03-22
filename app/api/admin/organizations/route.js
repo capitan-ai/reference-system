@@ -6,6 +6,9 @@
 import { isSuperAdminFromRequest } from '../../../../lib/auth/check-access'
 import { prisma } from '../../../../lib/prisma-client'
 
+// Force dynamic rendering since we use request.headers
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     // Only super admin can see all organizations
@@ -63,9 +66,10 @@ export async function GET(request) {
   } catch (error) {
     console.error('Get organizations error:', error)
     return Response.json(
-      { error: error.message || 'Internal server error' },
+      { error: 'Internal server error' },
       { status: 500 }
     )
   }
 }
+
 

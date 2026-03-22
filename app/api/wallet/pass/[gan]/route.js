@@ -32,6 +32,8 @@ const { resolveGiftCardContext } = loadWithDiagnostics(
 
 const prisma = loadWithDiagnostics('Prisma client', () => getPrisma())
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request, { params }) {
   try {
     const giftCardsApi = getGiftCardsApi()
@@ -89,9 +91,7 @@ export async function GET(request, { params }) {
     // Return user-friendly error
     return new Response(
       JSON.stringify({ 
-        error: 'Failed to generate pass',
-        message: error.message,
-        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        error: 'Failed to generate pass'
       }),
       {
         status: 500,

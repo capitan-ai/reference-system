@@ -1,9 +1,54 @@
 const prisma = require('../../../../../lib/prisma-client')
+const { Prisma } = require('@prisma/client')
 const crypto = require('crypto')
 const QRCode = require('qrcode')
-const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification } = require('../../../../../lib/email-service-simple')
-const { sendReferralCodeSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
+const { saveApplicationLog } = require('../../../../../lib/workflows/application-log-queue')
+const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification, trackNotification } = require('../../../../../lib/email-service-simple')
+const { sendReferralCodeSms, sendGiftCardSmsNotification, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
+// Import payment saving function from main webhook handler
+// Note: route.js uses ES6 exports, so we need to use dynamic import
+// Since this is a CommonJS file, we'll use a simpler approach: directly call the function
+// by requiring the module and accessing the export
+let savePaymentToDatabase = null
+let processOrderWebhook = null
+
+async function getProcessOrderWebhook() {
+  if (!processOrderWebhook) {
+    try {
+      const mainWebhookRoute = await import('../route.js')
+      processOrderWebhook = mainWebhookRoute.processOrderWebhook
+      if (!processOrderWebhook) {
+        console.error('❌ processOrderWebhook not found in imported module')
+        console.error('   Available exports:', Object.keys(mainWebhookRoute || {}))
+      }
+    } catch (importError) {
+      console.error(`❌ Error importing processOrderWebhook: ${importError.message}`)
+      return null
+    }
+  }
+  return processOrderWebhook
+}
+
+async function getSavePaymentToDatabase() {
+  if (!savePaymentToDatabase) {
+    try {
+      // Use dynamic import which works in both CommonJS and ES modules
+      const mainWebhookRoute = await import('../route.js')
+      savePaymentToDatabase = mainWebhookRoute.savePaymentToDatabase
+      if (!savePaymentToDatabase) {
+        console.error('❌ savePaymentToDatabase not found in imported module')
+        console.error('   Available exports:', Object.keys(mainWebhookRoute || {}))
+      } else {
+      }
+    } catch (importError) {
+      console.error(`❌ Error importing savePaymentToDatabase: ${importError.message}`)
+      console.error('   Stack:', importError.stack)
+      return null
+    }
+  }
+  return savePaymentToDatabase
+}
 const {
   buildCorrelationId,
   buildStageKey,
@@ -30,65 +75,16 @@ const {
 } = require('../../../../../lib/config/location-map')
 const { getSquareEnvironmentName } = require('../../../../../lib/utils/square-env')
 
-let squareApisCache = null
-function getSquareApis() {
-  if (squareApisCache) return squareApisCache
-  // Use dynamic require so bundlers don't evaluate Square SDK at build-time
-  // eslint-disable-next-line global-require
-  const squareModule = require('square')
-  const candidates = [squareModule, squareModule?.default].filter(Boolean)
-  const pick = (selector) => {
-    for (const candidate of candidates) {
-      const value = selector(candidate)
-      if (value) return value
-    }
-    return null
-  }
-
-  const Client =
-    pick((mod) => (typeof mod?.Client === 'function' ? mod.Client : null)) ||
-    (typeof candidates[0] === 'function' ? candidates[0] : null)
-  const Environment = pick((mod) => mod?.Environment)
-  const WebhooksHelper = pick((mod) => mod?.WebhooksHelper)
-
-  if (
-    typeof Client !== 'function' ||
-    !Environment ||
-    typeof Environment.Production === 'undefined'
-  ) {
-    throw new Error('Square SDK exports missing (Client/Environment)')
-  }
-
-  const squareEnvName = getSquareEnvironmentName()
-  const resolvedEnvironment = squareEnvName === 'sandbox' ? Environment.Sandbox : Environment.Production
-  const squareClient = new Client({
-    accessToken: process.env.SQUARE_ACCESS_TOKEN?.trim(),
-    environment: resolvedEnvironment,
-  })
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`[square] Webhook handler using ${squareEnvName} environment`)
-  }
-  squareApisCache = {
-    Client,
-    Environment,
-    WebhooksHelper,
-    customersApi: squareClient.customersApi,
-    giftCardsApi: squareClient.giftCardsApi,
-    giftCardActivitiesApi: squareClient.giftCardActivitiesApi,
-    customerCustomAttributesApi: squareClient.customerCustomAttributesApi,
-    ordersApi: squareClient.ordersApi,
-    paymentsApi: squareClient.paymentsApi,
-  }
-  return squareApisCache
-}
-
-const getCustomersApi = () => getSquareApis().customersApi
-const getGiftCardsApi = () => getSquareApis().giftCardsApi
-const getGiftCardActivitiesApi = () => getSquareApis().giftCardActivitiesApi
-const getCustomerCustomAttributesApi = () => getSquareApis().customerCustomAttributesApi
-const getOrdersApi = () => getSquareApis().ordersApi
-const getPaymentsApi = () => getSquareApis().paymentsApi
-const getWebhooksHelper = () => getSquareApis().WebhooksHelper
+const { 
+  getCustomersApi, 
+  getGiftCardsApi, 
+  getGiftCardActivitiesApi, 
+  getCustomerCustomAttributesApi, 
+  getOrdersApi, 
+  getPaymentsApi, 
+  getLocationsApi,
+  getWebhooksHelper
+} = require('../../../../../lib/utils/square-client')
 
 const DELIVERY_CHANNELS = {
   SQUARE_EGIFT_ORDER: 'square_egift_order',
@@ -119,6 +115,152 @@ async function resolveOrganizationId(squareMerchantId) {
     return null
   } catch (error) {
     console.error(`❌ Error resolving organization_id: ${error.message}`)
+    return null
+  }
+}
+
+// Helper: Fetch location from Square API and update merchant_id in database
+// ============================================================================
+async function fetchAndUpdateLocationFromSquare(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    const locationsApi = getLocationsApi()
+    const response = await locationsApi.retrieveLocation(squareLocationId)
+    const location = response.result?.location
+    
+    if (!location) {
+      console.warn(`⚠️ Location ${squareLocationId} not found in Square API`)
+      return null
+    }
+    
+    // Square API returns merchantId (camelCase), not merchant_id
+    const merchantId = location.merchantId || location.merchant_id || null
+    
+    if (!merchantId) {
+      console.warn(`⚠️ Location ${squareLocationId} missing merchant_id in Square API response`)
+      return null
+    }
+    
+    // Update location in database with merchant_id
+    // First, try to find existing location by square_location_id (without organization_id)
+    const existingLocation = await prisma.$queryRaw`
+      SELECT id, organization_id, square_location_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (existingLocation && existingLocation.length > 0) {
+      const loc = existingLocation[0]
+      
+      // Update merchant_id if it's missing or different
+      if (loc.square_merchant_id !== merchantId) {
+        await prisma.$executeRaw`
+          UPDATE locations
+          SET square_merchant_id = ${merchantId},
+              updated_at = NOW()
+          WHERE id = ${loc.id}::uuid
+        `
+        console.log(`✅ Updated location ${squareLocationId} with merchant_id: ${merchantId}`)
+      }
+      
+      return {
+        locationId: loc.id,
+        organizationId: loc.organization_id,
+        squareLocationId: squareLocationId,
+        merchantId: merchantId,
+        name: location.name || `Location ${squareLocationId.substring(0, 8)}...`,
+        address: location.address || null
+      }
+    } else {
+      // Location doesn't exist in DB yet - we'll need organization_id to create it
+      // But we can return the merchant_id so caller can resolve organization_id
+      console.log(`ℹ️ Location ${squareLocationId} not in database yet, but fetched merchant_id: ${merchantId}`)
+      return {
+        locationId: null,
+        organizationId: null,
+        squareLocationId: squareLocationId,
+        merchantId: merchantId,
+        name: location.name || `Location ${squareLocationId.substring(0, 8)}...`,
+        address: location.address || null
+      }
+    }
+  } catch (error) {
+    console.error(`❌ Error fetching location from Square API: ${error.message}`)
+    if (error.errors) {
+      console.error(`   Square API errors:`, JSON.stringify(error.errors, null, 2))
+    }
+    return null
+  }
+}
+
+// Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
+// ============================================================================
+async function resolveOrganizationIdFromLocationId(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    // STEP 1: Fast database lookup (most common case)
+    const location = await prisma.$queryRaw`
+      SELECT organization_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (location && location.length > 0) {
+      const loc = location[0]
+      
+      // If we have organization_id, return it immediately (fastest path)
+      if (loc.organization_id) {
+        return loc.organization_id
+      }
+      
+      // If we have merchant_id but no organization_id, resolve it
+      if (loc.square_merchant_id) {
+        const orgId = await resolveOrganizationId(loc.square_merchant_id)
+        if (orgId) {
+          // Update location with organization_id for future use
+          await prisma.$executeRaw`
+            UPDATE locations
+            SET organization_id = ${orgId}::uuid,
+                updated_at = NOW()
+            WHERE square_location_id = ${squareLocationId}
+          `
+          return orgId
+        }
+      }
+    }
+    
+    // STEP 2: Location not in DB or missing merchant_id - fetch from Square API
+    console.log(`📍 Location ${squareLocationId} not in database or missing merchant_id, fetching from Square API...`)
+    const locationData = await fetchAndUpdateLocationFromSquare(squareLocationId)
+    
+    if (locationData && locationData.merchantId) {
+      // Resolve organization_id from merchant_id
+      const orgId = await resolveOrganizationId(locationData.merchantId)
+      
+      if (orgId && locationData.locationId) {
+        // Update location with organization_id
+        await prisma.$executeRaw`
+          UPDATE locations
+          SET organization_id = ${orgId}::uuid,
+              updated_at = NOW()
+          WHERE id = ${locationData.locationId}::uuid
+        `
+      }
+      
+      return orgId
+    }
+    
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id from location_id: ${error.message}`)
     return null
   }
 }
@@ -400,13 +542,66 @@ async function sendGiftCardEmailNotification({
   locationId = null,
   notificationMetadata = {}
 }) {
+  const customerId = notificationMetadata.customerId
+  const organizationId = notificationMetadata.organizationId
+
   if (!email) {
-    console.log('⚠️ Skipping gift card email – email address missing')
+    console.log('⚠️ Email address missing, attempting SMS fallback...')
+    
+    // Attempt SMS fallback if phone number is available
+    const phoneNumber = notificationMetadata.phoneNumber
+    if (phoneNumber) {
+      const smsResult = await sendGiftCardSmsNotification({
+        to: phoneNumber,
+        customerName,
+        giftCardGan,
+        amountCents,
+        activationUrl,
+        organizationId,
+        customerId
+      })
+
+      // Track SMS notification
+      await trackNotification({
+        channel: 'SMS',
+        templateType: 'GIFT_CARD_DELIVERY',
+        status: smsResult.success ? 'sent' : 'failed',
+        customerId,
+        organizationId,
+        metadata: {
+          phoneNumber,
+          giftCardGan,
+          amountCents,
+          ...notificationMetadata
+        },
+        errorMessage: smsResult.error
+      })
+
+      return smsResult
+    }
+
+    console.log('⚠️ Skipping notification – both email and phone missing')
+    await trackNotification({
+      channel: 'EMAIL',
+      templateType: 'GIFT_CARD_DELIVERY',
+      status: 'skipped',
+      customerId,
+      organizationId,
+      metadata: { reason: 'missing-contact-info', ...notificationMetadata }
+    })
     return { success: false, skipped: true, reason: 'missing-email' }
   }
 
   if (!giftCardGan) {
     console.log('⚠️ Skipping gift card email – card number missing')
+    await trackNotification({
+      channel: 'EMAIL',
+      templateType: 'GIFT_CARD_DELIVERY',
+      status: 'skipped',
+      customerId,
+      organizationId,
+      metadata: { reason: 'missing-gan', ...notificationMetadata }
+    })
     return { success: false, skipped: true, reason: 'missing-gan' }
   }
 
@@ -468,22 +663,23 @@ async function sendGiftCardEmailNotification({
 
   // Send email with QR code, GAN, and PassKit URL (if available)
   const analyticsMetadata = addLocationMetadata(notificationMetadata, locationId)
-  const emailResult = await sendGiftCardIssuedEmail(
-    customerName,
-    email,
-    {
-      giftCardGan: ganForEmail,
-      amountCents: meaningfulAmount,
-      balanceCents: balanceCents ?? null,
-      activationUrl: activationUrl ?? null,
-      passKitUrl: finalPassKitUrl ?? null, // Use waited-for URL or original
-      qrDataUri,
-      isReminder
-    },
-    {
-      metadata: analyticsMetadata
-    }
-  )
+    const emailResult = await sendGiftCardIssuedEmail(
+      customerName,
+      email,
+      {
+        giftCardGan: ganForEmail,
+        amountCents: meaningfulAmount,
+        balanceCents: balanceCents ?? null,
+        activationUrl: activationUrl ?? null,
+        passKitUrl: finalPassKitUrl ?? null, // Use waited-for URL or original
+        qrDataUri,
+        isReminder
+      },
+      {
+        metadata: analyticsMetadata,
+        organizationId: notificationMetadata.organizationId // Pass from metadata
+      }
+    )
 
   if (!isReminder && ganForEmail) {
     queueWalletPassUpdate(ganForEmail, {
@@ -561,20 +757,21 @@ function generatePersonalCode(customerName, customerId) {
     const numericMatches = idStr.match(/\d+/g)
     if (numericMatches && numericMatches.length > 0) {
       const allNums = numericMatches.join('')
-      idPart = allNums.slice(-4).padStart(4, '0')
+      // Use FIRST 4 digits for future codes
+      idPart = allNums.substring(0, 4).padStart(4, '0')
     } else {
-      idPart = idStr.slice(-4).toUpperCase()
+      idPart = idStr.substring(0, 4).toUpperCase()
     }
   } else {
     idPart = Date.now().toString().slice(-4)
   }
   if (idPart.length < 3) idPart = idPart.padStart(4, '0')
-  if (idPart.length > 4) idPart = idPart.slice(-4)
+  if (idPart.length > 4) idPart = idPart.slice(0, 4)
   return `${namePart}${idPart}`
 }
 
 // Generate unique personal code, checking for duplicates
-async function generateUniquePersonalCode(customerName, customerId, maxAttempts = 10) {
+async function generateUniquePersonalCode(customerName, customerId, organizationId, maxAttempts = 10) {
   let attempt = 0
   while (attempt < maxAttempts) {
     const code = generatePersonalCode(customerName, customerId)
@@ -587,33 +784,33 @@ async function generateUniquePersonalCode(customerName, customerId, maxAttempts 
       const uniqueCode = `${baseCode}${suffix}`
       
       // Check if this code exists in referral_profiles OR square_existing_clients (backward compatibility)
-      const existingInProfiles = await prisma.referralProfile.findUnique({
-        where: { personal_code: uniqueCode },
+      const existingInProfiles = await prisma.referralProfile.findFirst({
+        where: { organization_id: organizationId, personal_code: uniqueCode },
         select: { square_customer_id: true }
       })
-      
+
       const existingInClients = await prisma.$queryRaw`
-        SELECT square_customer_id FROM square_existing_clients 
-        WHERE personal_code = ${uniqueCode}
+        SELECT square_customer_id FROM square_existing_clients
+        WHERE personal_code = ${uniqueCode} AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
-      
+
       if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return uniqueCode
       }
     } else {
       // First attempt - check if base code exists
-      const existingInProfiles = await prisma.referralProfile.findUnique({
-        where: { personal_code: code },
+      const existingInProfiles = await prisma.referralProfile.findFirst({
+        where: { organization_id: organizationId, personal_code: code },
         select: { square_customer_id: true }
       })
-      
+
       const existingInClients = await prisma.$queryRaw`
-        SELECT square_customer_id FROM square_existing_clients 
-        WHERE personal_code = ${code}
+        SELECT square_customer_id FROM square_existing_clients
+        WHERE personal_code = ${code} AND organization_id = ${organizationId}::uuid
         LIMIT 1
       `
-      
+
       if (!existingInProfiles && (!existingInClients || existingInClients.length === 0)) {
         return code
       }
@@ -630,47 +827,159 @@ async function generateUniquePersonalCode(customerName, customerId, maxAttempts 
   return `${namePart}${randomSuffix}`
 }
 
+/**
+ * Check if customer has previous bookings before the current booking
+ * CRITICAL: Uses start_at (service time) not created_at (booking creation time)
+ * CRITICAL: Filters by organization_id for multi-tenant isolation
+ */
+async function checkCustomerHasPreviousBookings(
+  organizationId, 
+  customerId, 
+  currentBookingId, 
+  currentBookingStartAt
+) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*) as count
+      FROM bookings
+      WHERE organization_id = ${organizationId}::uuid
+        AND customer_id = ${customerId}
+        AND booking_id != ${currentBookingId}
+        AND start_at < ${new Date(currentBookingStartAt)}::timestamptz
+    `
+    return parseInt(result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking previous bookings:', error.message)
+    // On error, return false to allow processing (fail open)
+    return false
+  }
+}
+
+/**
+ * Check if customer has previous payments before the current booking
+ * CRITICAL: Filters by organization_id for multi-tenant isolation
+ */
+async function checkCustomerHasPreviousPayments(
+  organizationId,
+  customerId, 
+  beforeDate
+) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*) as count
+      FROM payments
+      WHERE organization_id = ${organizationId}::uuid
+        AND customer_id = ${customerId}
+        AND created_at < ${new Date(beforeDate)}::timestamptz
+    `
+    return parseInt(result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking previous payments:', error.message)
+    // On error, return false to allow processing (fail open)
+    return false
+  }
+}
+
+/**
+ * Check if customer has prior COMPLETED payments for service (order with booking).
+ * Gift card / retail-only orders (order.booking_id IS NULL) are NOT counted as visits.
+ */
+async function checkCustomerHasPriorServicePayments(organizationId, customerId, beforeStartAt) {
+  try {
+    const result = await prisma.$queryRaw`
+      SELECT COUNT(*)::int as count
+      FROM payments p
+      INNER JOIN orders o ON o.id = p.order_id AND o.organization_id = p.organization_id
+      INNER JOIN bookings b ON b.id = o.booking_id AND b.organization_id = o.organization_id
+      WHERE p.organization_id = ${organizationId}::uuid
+        AND p.customer_id = ${customerId}
+        AND p.status = 'COMPLETED'
+        AND o.booking_id IS NOT NULL
+        AND b.start_at < ${new Date(beforeStartAt)}::timestamptz
+    `
+    return (result[0]?.count || 0) > 0
+  } catch (error) {
+    console.error('Error checking prior service payments:', error.message)
+    return false
+  }
+}
+
 // Find referrer by referral code
-async function findReferrerByCode(referralCode) {
+async function findReferrerByCode(referralCode, organizationId) {
   try {
     if (!referralCode || typeof referralCode !== 'string') {
       console.error(`Invalid referral code provided: ${referralCode}`)
       return null
     }
     
+    if (!organizationId) {
+      console.error('❌ findReferrerByCode requires organizationId for multi-tenant isolation')
+      return null
+    }
+    
     // Trim and normalize the code
     const normalizedCode = referralCode.trim().toUpperCase()
     console.log(`   🔍 Looking up referral code in database: "${normalizedCode}" (original: "${referralCode}")`)
+    console.log(`   🏢 Organization ID: ${organizationId}`)
+    
+    await saveApplicationLog(prisma, {
+      organizationId: organizationId,
+      logType: 'REFERRAL_LOOKUP',
+      logId: `lookup-${normalizedCode}-${Date.now()}`,
+      status: 'processing',
+      payload: { referralCode, normalizedCode, organizationId }
+    })
     
     // Try exact match first in referral_profiles (case-insensitive)
     let referralProfile = await prisma.referralProfile.findFirst({
       where: {
+        organization_id: organizationId, // CRITICAL: Filter by organization_id
         OR: [
           { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
           { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
         ]
-      },
-      include: {
-        customer: {
-          select: {
-            square_customer_id: true,
-            given_name: true,
-            family_name: true,
-            email_address: true,
-            gift_card_id: true
-          }
-        }
       }
     })
     
     if (referralProfile) {
-      return {
-        square_customer_id: referralProfile.customer.square_customer_id,
-        given_name: referralProfile.customer.given_name,
-        family_name: referralProfile.customer.family_name,
-        email_address: referralProfile.customer.email_address,
-        personal_code: referralProfile.personal_code,
-        gift_card_id: referralProfile.customer.gift_card_id
+      // Fetch customer details from square_existing_clients using square_customer_id
+      const customer = await prisma.squareExistingClient.findFirst({
+        where: { 
+          square_customer_id: referralProfile.square_customer_id,
+          organization_id: organizationId
+        },
+        select: {
+          square_customer_id: true,
+          given_name: true,
+          family_name: true,
+          email_address: true,
+          gift_card_id: true
+        }
+      })
+
+      if (customer) {
+        console.log(`   ✅ Found referrer in referral_profiles: ${customer.given_name} ${customer.family_name}`)
+        
+        await saveApplicationLog(prisma, {
+          organizationId: organizationId,
+          logType: 'REFERRAL_LOOKUP',
+          logId: `found-profile-${customer.square_customer_id}-${Date.now()}`,
+          status: 'completed',
+          payload: { 
+            source: 'referral_profiles',
+            customerId: customer.square_customer_id,
+            name: `${customer.given_name} ${customer.family_name}`
+          }
+        })
+
+        return {
+          square_customer_id: customer.square_customer_id,
+          given_name: customer.given_name,
+          family_name: customer.family_name,
+          email_address: customer.email_address,
+          personal_code: referralProfile.personal_code,
+          gift_card_id: customer.gift_card_id
+        }
       }
     }
     
@@ -678,29 +987,130 @@ async function findReferrerByCode(referralCode) {
     let referrer = await prisma.$queryRaw`
       SELECT square_customer_id, given_name, family_name, email_address, personal_code, gift_card_id
       FROM square_existing_clients 
-      WHERE UPPER(TRIM(personal_code)) = ${normalizedCode}
+      WHERE organization_id = ${organizationId}::uuid
+        AND (UPPER(TRIM(personal_code)) = ${normalizedCode} OR UPPER(TRIM(referral_code)) = ${normalizedCode})
       LIMIT 1
     `
     
     if (referrer && referrer.length > 0) {
-      console.log(`   ✅ Found referrer with code "${normalizedCode}": ${referrer[0].given_name} ${referrer[0].family_name}`)
-      return referrer[0]
+      const foundReferrer = referrer[0]
+      console.log(`   ✅ Found referrer with code "${normalizedCode}": ${foundReferrer.given_name} ${foundReferrer.family_name}`)
+      
+      // CRITICAL: Lazy-create ReferralProfile if it doesn't exist to avoid FK violations in rewards
+      try {
+        console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id}...`)
+        
+        await saveApplicationLog(prisma, {
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-start-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'processing',
+          payload: { customerId: foundReferrer.square_customer_id, source: 'legacy_lookup' }
+        })
+
+        await prisma.referralProfile.upsert({
+          where: {
+            organization_id_square_customer_id: {
+              organization_id: organizationId,
+              square_customer_id: foundReferrer.square_customer_id
+            }
+          },
+          update: {
+            personal_code: foundReferrer.personal_code || normalizedCode,
+            referral_code: foundReferrer.personal_code || normalizedCode,
+            activated_as_referrer: true,
+            updated_at: new Date()
+          },
+          create: {
+            organization_id: organizationId,
+            square_customer_id: foundReferrer.square_customer_id,
+            personal_code: foundReferrer.personal_code || normalizedCode,
+            referral_code: foundReferrer.personal_code || normalizedCode,
+            activated_as_referrer: true,
+            activated_at: new Date()
+          }
+        })
+        console.log(`   ✅ ReferralProfile synced successfully`)
+        
+        await saveApplicationLog(prisma, {
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-success-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'completed',
+          payload: { customerId: foundReferrer.square_customer_id, status: 'synced' }
+        })
+      } catch (syncError) {
+        console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
+        
+        await saveApplicationLog(prisma, {
+          organizationId: organizationId,
+          logType: 'REFERRAL_PROFILE_SYNC',
+          logId: `sync-error-${foundReferrer.square_customer_id}-${Date.now()}`,
+          status: 'error',
+          payload: { customerId: foundReferrer.square_customer_id, error: syncError.message }
+        })
+        // Continue anyway, but this might cause FK errors later
+      }
+      
+      return foundReferrer
     }
     
     // If not found, try case-sensitive match
     referrer = await prisma.$queryRaw`
       SELECT square_customer_id, given_name, family_name, email_address, personal_code, gift_card_id
       FROM square_existing_clients 
-      WHERE personal_code = ${referralCode}
+      WHERE organization_id = ${organizationId}::uuid
+        AND (personal_code = ${referralCode} OR referral_code = ${referralCode})
       LIMIT 1
     `
     
     if (referrer && referrer.length > 0) {
-      console.log(`   ✅ Found referrer with exact match "${referralCode}": ${referrer[0].given_name} ${referrer[0].family_name}`)
-      return referrer[0]
+      const foundReferrer = referrer[0]
+      console.log(`   ✅ Found referrer with exact match "${referralCode}": ${foundReferrer.given_name} ${foundReferrer.family_name}`)
+      
+      // CRITICAL: Lazy-create ReferralProfile if it doesn't exist
+      try {
+        console.log(`   🔄 Syncing ReferralProfile for legacy referrer ${foundReferrer.square_customer_id} (exact match)...`)
+        await prisma.referralProfile.upsert({
+          where: {
+            organization_id_square_customer_id: {
+              organization_id: organizationId,
+              square_customer_id: foundReferrer.square_customer_id
+            }
+          },
+          update: {
+            personal_code: foundReferrer.personal_code || referralCode,
+            referral_code: foundReferrer.personal_code || referralCode,
+            activated_as_referrer: true,
+            updated_at: new Date()
+          },
+          create: {
+            organization_id: organizationId,
+            square_customer_id: foundReferrer.square_customer_id,
+            personal_code: foundReferrer.personal_code || referralCode,
+            referral_code: foundReferrer.personal_code || referralCode,
+            activated_as_referrer: true,
+            activated_at: new Date()
+          }
+        })
+        console.log(`   ✅ ReferralProfile synced successfully`)
+      } catch (syncError) {
+        console.error(`   ⚠️ Failed to sync ReferralProfile for ${foundReferrer.square_customer_id}:`, syncError.message)
+      }
+      
+      return foundReferrer
     }
     
     console.log(`   ❌ No referrer found with code "${referralCode}" or "${normalizedCode}"`)
+    
+    await saveApplicationLog(prisma, {
+      organizationId: organizationId,
+      logType: 'REFERRAL_LOOKUP',
+      logId: `not-found-${normalizedCode}-${Date.now()}`,
+      status: 'completed',
+      payload: { referralCode, normalizedCode, found: false }
+    })
+
     return null
   } catch (error) {
     console.error(`Error finding referrer by code ${referralCode}:`, error.message)
@@ -965,6 +1375,7 @@ async function completePromotionOrderPayment(orderId, amountMoney, locationId, r
 async function saveGiftCardToDatabase(giftCardData) {
   try {
     const {
+      organization_id,
       square_customer_id,
       square_gift_card_id,
       gift_card_gan,
@@ -980,9 +1391,51 @@ async function saveGiftCardToDatabase(giftCardData) {
       state
     } = giftCardData
 
+    // Resolve organization_id if not provided - look up from customer
+    let orgId = organization_id
+    if (!orgId && square_customer_id) {
+      try {
+        const customer = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${square_customer_id}
+          LIMIT 1
+        `
+        if (customer && customer.length > 0) {
+          orgId = customer[0].organization_id
+        }
+      } catch (lookupErr) {
+        console.warn(`⚠️ Could not look up organization_id for customer ${square_customer_id}: ${lookupErr.message}`)
+      }
+    }
+    
+    // If still no organization_id, try to get from default organization
+    if (!orgId) {
+      try {
+        const defaultOrg = await prisma.$queryRaw`
+          SELECT id FROM organizations WHERE is_active = true ORDER BY created_at LIMIT 1
+        `
+        if (defaultOrg && defaultOrg.length > 0) {
+          orgId = defaultOrg[0].id
+          console.log(`ℹ️ Using default organization for gift card: ${orgId}`)
+        }
+      } catch (defaultOrgErr) {
+        console.warn(`⚠️ Could not get default organization: ${defaultOrgErr.message}`)
+      }
+    }
+    
+    if (!orgId) {
+      console.error(`❌ Cannot save gift card: organization_id is required but could not be resolved`)
+      return null
+    }
+
     // Upsert gift card record
     const giftCard = await prisma.giftCard.upsert({
-      where: { square_gift_card_id },
+      where: {
+        organization_id_square_gift_card_id: {
+          organization_id: orgId,
+          square_gift_card_id: square_gift_card_id
+        }
+      },
       update: {
         current_balance_cents,
         delivery_channel,
@@ -994,6 +1447,7 @@ async function saveGiftCardToDatabase(giftCardData) {
         updated_at: new Date()
       },
       create: {
+        organization_id: orgId,
         square_customer_id,
         square_gift_card_id,
         gift_card_gan,
@@ -1024,6 +1478,7 @@ async function saveGiftCardTransaction(transactionData) {
   try {
     const {
       gift_card_id,
+      organization_id,
       transaction_type,
       amount_cents,
       balance_before_cents,
@@ -1036,8 +1491,40 @@ async function saveGiftCardTransaction(transactionData) {
       metadata
     } = transactionData
 
+    // Resolve organization_id from gift_card if not provided
+    let resolvedOrganizationId = organization_id
+    if (!resolvedOrganizationId && gift_card_id) {
+      const giftCard = await prisma.giftCard.findUnique({
+        where: { id: gift_card_id },
+        select: { organization_id: true }
+      })
+      if (giftCard) {
+        resolvedOrganizationId = giftCard.organization_id
+      }
+    }
+
+    if (!resolvedOrganizationId) {
+      console.error('❌ Cannot save gift card transaction: organization_id is required')
+      return null
+    }
+
+    // Check if transaction already exists (idempotency)
+    if (square_activity_id) {
+      const existing = await prisma.giftCardTransaction.findFirst({
+        where: { 
+          square_activity_id,
+          organization_id: resolvedOrganizationId
+        }
+      })
+      if (existing) {
+        console.log(`ℹ️ Transaction already exists for activity ${square_activity_id}, skipping`)
+        return existing
+      }
+    }
+
     const transaction = await prisma.giftCardTransaction.create({
       data: {
+        organization_id: resolvedOrganizationId,
         gift_card_id,
         transaction_type,
         amount_cents,
@@ -1048,7 +1535,7 @@ async function saveGiftCardTransaction(transactionData) {
         square_payment_id,
         reason,
         context_label,
-        metadata: metadata ? JSON.parse(JSON.stringify(metadata)) : null
+        metadata: metadata ? JSON.parse(safeStringify(metadata)) : null
       }
     })
 
@@ -1060,8 +1547,180 @@ async function saveGiftCardTransaction(transactionData) {
   }
 }
 
+// Process and save REDEEM transactions when gift cards are used in payments
+async function processGiftCardRedemptions(paymentData, organizationId = null) {
+  try {
+    const paymentId = paymentData.id || paymentData.paymentId
+    if (!paymentId) {
+      return
+    }
+
+    console.log(`🔍 Checking for gift card redemptions in payment ${paymentId}`)
+
+    // Resolve organization_id from payment location if not provided
+    if (!organizationId) {
+      const squareLocationId = paymentData.location_id || paymentData.locationId
+      if (squareLocationId) {
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+      }
+    }
+
+    // Extract gift card IDs/GANs from payment tenders
+    const giftCardGans = await extractGiftCardGansFromPayment(paymentData)
+    
+    if (giftCardGans.length === 0) {
+      console.log(`   No gift cards used in this payment`)
+      return
+    }
+
+    console.log(`   Found ${giftCardGans.length} gift card(s) used: ${giftCardGans.join(', ')}`)
+
+    const giftCardsApi = getGiftCardsApi()
+    const giftCardActivitiesApi = getGiftCardActivitiesApi()
+
+    // Process each gift card
+    for (const gan of giftCardGans) {
+      try {
+        // Find gift card in database by GAN (with organization_id filter if available)
+        const giftCard = await prisma.giftCard.findFirst({
+          where: {
+            gift_card_gan: gan,
+            ...(organizationId ? { organization_id: organizationId } : {})
+          },
+          include: {
+            transactions: {
+              where: {
+                transaction_type: 'REDEEM',
+                square_payment_id: paymentId
+              }
+            }
+          }
+        })
+
+        if (!giftCard) {
+          console.log(`   ⚠️ Gift card with GAN ${gan} not found in database, skipping`)
+          continue
+        }
+
+        // Check if REDEEM transaction already exists for this payment
+        if (giftCard.transactions && giftCard.transactions.length > 0) {
+          console.log(`   ℹ️ REDEEM transaction already exists for gift card ${giftCard.square_gift_card_id} and payment ${paymentId}`)
+          continue
+        }
+
+        // Query Square for recent REDEEM activities for this gift card
+        // Look for activities in the last 5 minutes (to catch the current payment)
+        const activitiesResponse = await giftCardActivitiesApi.listGiftCardActivities(giftCard.square_gift_card_id)
+        const activities = activitiesResponse.result?.giftCardActivities || []
+
+        // Find REDEEM activities that match this payment
+        const redeemActivities = activities.filter(activity => {
+          if (activity.type !== 'REDEEM') return false
+          
+          // Check if activity matches this payment
+          const activityPaymentId = activity.redeemActivityDetails?.paymentId
+          if (activityPaymentId === paymentId) {
+            return true
+          }
+
+          // Also check by order ID if payment has an order
+          const orderId = paymentData.order_id || paymentData.orderId
+          if (orderId && activity.redeemActivityDetails?.orderId === orderId) {
+            return true
+          }
+
+          // Check by timestamp (within last 5 minutes)
+          const activityTime = new Date(activity.createdAt)
+          const paymentTime = new Date(paymentData.created_at || paymentData.createdAt || Date.now())
+          const timeDiff = Math.abs(paymentTime - activityTime)
+          if (timeDiff < 5 * 60 * 1000) { // 5 minutes
+            return true
+          }
+
+          return false
+        })
+
+        if (redeemActivities.length === 0) {
+          console.log(`   ⚠️ No REDEEM activity found in Square for gift card ${giftCard.square_gift_card_id} matching payment ${paymentId}`)
+          continue
+        }
+
+        // Process each REDEEM activity
+        for (const redeemActivity of redeemActivities) {
+          // Check if we already saved this activity
+          const existing = await prisma.giftCardTransaction.findFirst({
+            where: { square_activity_id: redeemActivity.id }
+          })
+
+          if (existing) {
+            console.log(`   ℹ️ REDEEM transaction already exists for activity ${redeemActivity.id}`)
+            continue
+          }
+
+          // Get amount and balance from activity
+          const redeemDetails = redeemActivity.redeemActivityDetails
+          const amountMoney = redeemDetails?.amountMoney
+          const amountCents = amountMoney 
+            ? (typeof amountMoney.amount === 'bigint' ? Number(amountMoney.amount) : (amountMoney.amount || 0))
+            : 0
+
+          const balanceAfter = redeemActivity.giftCardBalanceMoney
+          const balanceAfterCents = balanceAfter
+            ? (typeof balanceAfter.amount === 'bigint' ? Number(balanceAfter.amount) : (balanceAfter.amount || 0))
+            : 0
+
+          // Calculate balance before (balance after + amount redeemed)
+          const balanceBeforeCents = balanceAfterCents + amountCents
+
+          // Save REDEEM transaction
+          await saveGiftCardTransaction({
+            gift_card_id: giftCard.id,
+            transaction_type: 'REDEEM',
+            amount_cents: -Math.abs(amountCents), // Negative for redemption
+            balance_before_cents: balanceBeforeCents,
+            balance_after_cents: balanceAfterCents,
+            square_activity_id: redeemActivity.id,
+            square_order_id: redeemDetails?.orderId || null,
+            square_payment_id: redeemDetails?.paymentId || paymentId,
+            context_label: 'Gift card used for payment',
+            metadata: {
+              square_activity: redeemActivity,
+              payment_id: paymentId,
+              payment_data: {
+                id: paymentId,
+                order_id: paymentData.order_id || paymentData.orderId,
+                created_at: paymentData.created_at || paymentData.createdAt
+              }
+            }
+          })
+
+          // Update gift card balance
+          await prisma.giftCard.update({
+            where: { id: giftCard.id },
+            data: {
+              current_balance_cents: balanceAfterCents,
+              last_balance_check_at: new Date(),
+              updated_at: new Date()
+            }
+          })
+
+          console.log(`   ✅ Saved REDEEM transaction for gift card ${giftCard.square_gift_card_id}`)
+          console.log(`      Amount: $${(Math.abs(amountCents) / 100).toFixed(2)}`)
+          console.log(`      Balance: $${(balanceBeforeCents / 100).toFixed(2)} → $${(balanceAfterCents / 100).toFixed(2)}`)
+        }
+      } catch (error) {
+        console.error(`   ❌ Error processing gift card ${gan}:`, error.message)
+        // Continue with other gift cards
+      }
+    }
+  } catch (error) {
+    console.error('Error processing gift card redemptions:', error.message)
+    // Don't throw - this is a non-critical operation
+  }
+}
+
 // Create gift card with unique name and activate it
-async function createGiftCard(customerId, customerName, amountCents = 1000, isReferrer = false, options = {}) {
+async function createGiftCard(customerId, customerName, amountCents = 1000, isReferrer = false, options = {}, organizationId = null) {
   try {
     const locationId = process.env.SQUARE_LOCATION_ID?.trim()
     const noteContext = isReferrer ? 'Referrer reward gift card' : 'Signup bonus gift card'
@@ -1108,16 +1767,21 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     
     const giftCard = createResponse.result.giftCard
     const giftCardId = giftCard.id
-    let giftCardGan = giftCard.gan
+    let giftCardGan = giftCard.gan || null // Ensure it's never undefined
     const giftCardState = giftCard.state || 'PENDING'
     console.log(`✅ Created gift card for ${customerName}: ${giftCardId}`)
+    if (!giftCardGan) {
+      console.log(`   ⚠️ GAN not yet assigned (card is ${giftCardState}), will be updated after activation`)
+    }
     
     // Save CREATE transaction to database
+    let giftCardRecordFromDb = null
     try {
-      const createGiftCardRecord = await saveGiftCardToDatabase({
+      giftCardRecordFromDb = await saveGiftCardToDatabase({
+        organization_id: organizationId,
         square_customer_id: customerId,
         square_gift_card_id: giftCardId,
-        gift_card_gan,
+        gift_card_gan: giftCardGan, // Can be null if not yet assigned
         reward_type: isReferrer ? 'REFERRER_REWARD' : 'FRIEND_SIGNUP_BONUS',
         initial_amount_cents: amountCents,
         current_balance_cents: 0,
@@ -1125,10 +1789,10 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
         is_active: true
       })
 
-      if (createGiftCardRecord) {
+      if (giftCardRecordFromDb) {
         // Create CREATE transaction record
         await saveGiftCardTransaction({
-          gift_card_id: createGiftCardRecord.id,
+          gift_card_id: giftCardRecordFromDb.id,
           transaction_type: 'CREATE',
           amount_cents: 0,
           balance_before_cents: 0,
@@ -1350,13 +2014,32 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
                                   null
 
           if (transactionType) {
-            const giftCardRecord = await prisma.giftCard.findUnique({
-              where: { square_gift_card_id: giftCardId }
-            })
+            // Resolve organization_id from saved gift card record or customer
+            let giftCardOrgId = giftCardRecordFromDb?.organization_id || null
+            if (!giftCardOrgId && customerId) {
+              const customerOrg = await prisma.$queryRaw`
+                SELECT organization_id FROM square_existing_clients 
+                WHERE square_customer_id = ${customerId} 
+                LIMIT 1
+              `
+              giftCardOrgId = customerOrg?.[0]?.organization_id || null
+            }
+            
+            const giftCardRecord = giftCardOrgId
+              ? await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: giftCardOrgId,
+                    square_gift_card_id: giftCardId
+                  }
+                })
+              : await prisma.giftCard.findFirst({
+                  where: { square_gift_card_id: giftCardId }
+                })
 
             if (giftCardRecord) {
               await saveGiftCardTransaction({
                 gift_card_id: giftCardRecord.id,
+                organization_id: giftCardRecord.organization_id,
                 transaction_type: transactionType,
                 amount_cents: amountCents,
                 balance_before_cents: 0,
@@ -1399,7 +2082,7 @@ async function createGiftCard(customerId, customerName, amountCents = 1000, isRe
     const finalBalanceCents = typeof activityBalanceNumber === 'bigint'
       ? Number(activityBalanceNumber)
       : (Number.isFinite(activityBalanceNumber) ? Number(activityBalanceNumber) : 0)
-    
+
     return {
       giftCardId,
       giftCardGan,
@@ -1516,15 +2199,34 @@ async function loadGiftCard(
 
       // Save transaction to database
       try {
+        // Resolve organization_id from customer if available
+        let giftCardOrgId = null
+        if (customerId) {
+          const customerOrg = await prisma.$queryRaw`
+            SELECT organization_id FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId} 
+            LIMIT 1
+          `
+          giftCardOrgId = customerOrg?.[0]?.organization_id || null
+        }
+        
         // Find the gift card record in our database
-        const giftCardRecord = await prisma.giftCard.findUnique({
-          where: { square_gift_card_id: giftCardId }
-        })
+        const giftCardRecord = giftCardOrgId
+          ? await prisma.giftCard.findFirst({
+              where: {
+                organization_id: giftCardOrgId,
+                square_gift_card_id: giftCardId
+              }
+            })
+          : await prisma.giftCard.findFirst({
+              where: { square_gift_card_id: giftCardId }
+            })
 
         if (giftCardRecord) {
           // Save the transaction
           await saveGiftCardTransaction({
             gift_card_id: giftCardRecord.id,
+            organization_id: giftCardRecord.organization_id,
             transaction_type: transactionType,
             amount_cents: amountCents,
             balance_before_cents: balanceBeforeCents,
@@ -1612,77 +2314,6 @@ async function loadGiftCard(
   }
 }
 
-// Track IP address for anti-abuse
-async function trackIpAddress(customerId, ipAddress) {
-  try {
-    if (!ipAddress) return
-
-    // Get current IP addresses
-    const currentData = await prisma.$queryRaw`
-      SELECT ip_addresses, first_ip_address, last_ip_address
-      FROM square_existing_clients 
-      WHERE square_customer_id = ${customerId}
-    `
-
-    if (currentData && currentData.length > 0) {
-      const data = currentData[0]
-      let ipAddresses = Array.isArray(data.ip_addresses) ? data.ip_addresses : []
-      
-      // Add new IP if not already tracked
-      if (Array.isArray(ipAddresses) && !ipAddresses.includes(ipAddress)) {
-        ipAddresses.push(ipAddress)
-        
-        await prisma.$executeRaw`
-          UPDATE square_existing_clients 
-          SET 
-            ip_addresses = ${ipAddresses},
-            last_ip_address = ${ipAddress}
-          WHERE square_customer_id = ${customerId}
-        `
-        
-        console.log(`📍 IP address tracked for customer ${customerId}: ${ipAddress}`)
-      }
-    } else {
-      // First time tracking IP for this customer
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET 
-          ip_addresses = ARRAY[${ipAddress}],
-          first_ip_address = ${ipAddress},
-          last_ip_address = ${ipAddress}
-        WHERE square_customer_id = ${customerId}
-      `
-      
-      console.log(`📍 First IP address tracked for customer ${customerId}: ${ipAddress}`)
-    }
-  } catch (error) {
-    console.error(`Error tracking IP address for customer ${customerId}:`, error.message)
-  }
-}
-
-// Check for suspicious IP activity
-async function checkSuspiciousActivity(customerId, ipAddress) {
-  try {
-    if (!ipAddress) return false
-
-    // Check if this IP has been used by multiple customers
-    const ipUsage = await prisma.$queryRaw`
-      SELECT COUNT(DISTINCT square_customer_id) as customer_count
-      FROM square_existing_clients 
-      WHERE ${ipAddress} = ANY(ip_addresses)
-    `
-
-    if (ipUsage && ipUsage.length > 0 && ipUsage[0].customer_count > 3) {
-      console.log(`⚠️ Suspicious IP activity detected: ${ipAddress} used by ${ipUsage[0].customer_count} customers`)
-      return true
-    }
-
-    return false
-  } catch (error) {
-    console.error(`Error checking suspicious activity for IP ${ipAddress}:`, error.message)
-    return false
-  }
-}
 
 // Send referral code email to new client (now becoming a referrer)
 async function sendReferralCodeToNewClient(
@@ -1694,6 +2325,27 @@ async function sendReferralCodeToNewClient(
 ) {
   try {
     const locationId = options?.locationId || null
+    
+    // Resolve organization_id from locationId
+    let organizationId = null
+    if (locationId) {
+      organizationId = await resolveOrganizationIdFromLocationId(locationId)
+    }
+    
+    // Fallback: get organization_id from customer record if locationId not available
+    if (!organizationId) {
+      const orgCheck = await prisma.$queryRaw`
+        SELECT organization_id FROM square_existing_clients 
+        WHERE square_customer_id = ${customerId} 
+        LIMIT 1
+      `
+      organizationId = orgCheck?.[0]?.organization_id || null
+    }
+    
+    if (!organizationId) {
+      throw new Error(`Cannot resolve organization_id for customer ${customerId}`)
+    }
+    
     // Check if email already sent
     const customerData = await prisma.$queryRaw`
       SELECT gift_card_id, got_signup_bonus, referral_email_sent, personal_code, activated_as_referrer,
@@ -1702,6 +2354,7 @@ async function sendReferralCodeToNewClient(
              phone_number, referral_sms_sent, referral_sms_sent_at, referral_sms_sid
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     // If email already sent, skip
@@ -1717,7 +2370,7 @@ async function sendReferralCodeToNewClient(
       console.log(`✅ Using existing personal_code: ${referralCode}`)
     } else {
       // Generate new unique code in name+ID format (checking for duplicates)
-      referralCode = await generateUniquePersonalCode(customerName, customerId)
+      referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
       console.log(`✅ Generated new personal_code in name+ID format: ${referralCode}`)
     }
     
@@ -1759,7 +2412,8 @@ async function sendReferralCodeToNewClient(
           customerName, 
           0, // Start with $0 balance
           true, // This is a referrer gift card
-          pendingOrderInfo ? { orderInfo: pendingOrderInfo } : {}
+          pendingOrderInfo ? { orderInfo: pendingOrderInfo } : {},
+          organizationId
         )
         if (referrerGiftCard?.giftCardId) {
           referrerGiftCardId = referrerGiftCard.giftCardId
@@ -1780,7 +2434,12 @@ async function sendReferralCodeToNewClient(
     // Create/update ReferralProfile (new normalized table)
     try {
       await prisma.referralProfile.upsert({
-        where: { square_customer_id: customerId },
+        where: {
+          organization_id_square_customer_id: {
+            organization_id: organizationId,
+            square_customer_id: customerId
+          }
+        },
         update: {
           personal_code: referralCode,
           referral_code: referralCode, // Same as personal_code for now
@@ -1791,6 +2450,7 @@ async function sendReferralCodeToNewClient(
           updated_at: new Date()
         },
         create: {
+          organization_id: organizationId,
           square_customer_id: customerId,
           personal_code: referralCode,
           referral_code: referralCode,
@@ -1810,14 +2470,19 @@ async function sendReferralCodeToNewClient(
         let retrySuccess = false
         for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
           try {
-            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
             referralUrl = generateReferralUrl(referralCode)
             
             await upsertCustomerCustomAttribute(customerId, REFERRAL_CODE_ATTRIBUTE_KEY, referralCode)
             await appendReferralNote(customerId, referralCode, referralUrl)
             
             await prisma.referralProfile.upsert({
-              where: { square_customer_id: customerId },
+              where: {
+                organization_id_square_customer_id: {
+                  organization_id: organizationId,
+                  square_customer_id: customerId
+                }
+              },
               update: {
                 personal_code: referralCode,
                 referral_code: referralCode,
@@ -1828,6 +2493,7 @@ async function sendReferralCodeToNewClient(
                 updated_at: new Date()
               },
               create: {
+                organization_id: organizationId,
                 square_customer_id: customerId,
                 personal_code: referralCode,
                 referral_code: referralCode,
@@ -1861,17 +2527,18 @@ async function sendReferralCodeToNewClient(
     
     // Also update square_existing_clients for backward compatibility
     try {
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET 
-          personal_code = ${referralCode},
-          referral_url = ${referralUrl},
-          activated_as_referrer = TRUE,
-          got_signup_bonus = TRUE,
-          referral_email_sent = TRUE,
-          updated_at = NOW()
-        WHERE square_customer_id = ${customerId}
-      `
+    await prisma.$executeRaw`
+      UPDATE square_existing_clients 
+      SET 
+        personal_code = ${referralCode},
+        referral_url = ${referralUrl},
+        activated_as_referrer = TRUE,
+        got_signup_bonus = TRUE,
+        referral_email_sent = TRUE,
+        updated_at = NOW()
+      WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
+    `
     } catch (updateError) {
       // Handle duplicate key error (race condition - code was taken between check and update)
       if (updateError.code === '23505' && updateError.message?.includes('personal_code')) {
@@ -1882,7 +2549,7 @@ async function sendReferralCodeToNewClient(
         for (let retryAttempt = 0; retryAttempt < 3; retryAttempt++) {
           try {
             // Generate a new unique code
-            referralCode = await generateUniquePersonalCode(customerName, customerId)
+            referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
             referralUrl = generateReferralUrl(referralCode)
             
             // Update custom attribute and note with new code
@@ -1900,6 +2567,7 @@ async function sendReferralCodeToNewClient(
                 referral_email_sent = TRUE,
                 updated_at = NOW()
               WHERE square_customer_id = ${customerId}
+                AND organization_id = ${organizationId}::uuid
             `
             console.log(`✅ Retried with new unique code: ${referralCode}`)
             retrySuccess = true
@@ -1938,6 +2606,7 @@ async function sendReferralCodeToNewClient(
           gift_card_digital_email = ${referrerGiftCardMeta?.digitalEmail ?? null},
           updated_at = NOW()
         WHERE square_customer_id = ${customerId}
+          AND organization_id = ${organizationId}::uuid
       `
     }
     
@@ -1948,6 +2617,7 @@ async function sendReferralCodeToNewClient(
       reason: null
     }
 
+    let emailSent = false
     // Send email using email service
     if (email) {
       const emailResult = await sendReferralCodeEmail(
@@ -1964,6 +2634,7 @@ async function sendReferralCodeToNewClient(
         if (emailResult.skipped) {
           console.log(`⏸️ Email sending is disabled (skipped sending to ${email})`)
         } else {
+          emailSent = true
           console.log(`✅ Referral email sent successfully to ${email}`)
         }
       } else {
@@ -1975,7 +2646,11 @@ async function sendReferralCodeToNewClient(
     // Check if SMS sending is disabled
     const smsDisabled = process.env.DISABLE_SMS_SENDING === 'true' || process.env.SMS_ENABLED === 'false'
     
-    if (smsDisabled) {
+    if (emailSent) {
+      console.log(`ℹ️ Referral email was sent, skipping SMS for ${customerName}`)
+      smsAnalytics.skipped = true
+      smsAnalytics.reason = 'email-sent'
+    } else if (smsDisabled) {
       console.log('ℹ️ Referral SMS sending is disabled (DISABLE_SMS_SENDING or SMS_ENABLED=false)')
       smsAnalytics.skipped = true
       smsAnalytics.reason = 'sms-disabled'
@@ -2027,6 +2702,7 @@ async function sendReferralCodeToNewClient(
                 referral_sms_sid = ${smsResult.sid ?? null},
                 updated_at = NOW()
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
         }
       } else {
@@ -2052,10 +2728,24 @@ async function sendReferralCodeToNewClient(
 // Check if customer is new (first time booking)
 async function isNewCustomer(customerId) {
   try {
+    // First, get organization_id from customer record
+    const orgCheck = await prisma.$queryRaw`
+      SELECT organization_id FROM square_existing_clients 
+      WHERE square_customer_id = ${customerId} 
+      LIMIT 1
+    `
+    const organizationId = orgCheck?.[0]?.organization_id || null
+    
+    if (!organizationId) {
+      // Customer doesn't exist, they are new
+      return true
+    }
+    
     // Check if customer exists in our database
     const existingCustomer = await prisma.$queryRaw`
       SELECT square_customer_id FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     // If customer doesn't exist in our database, they are new
@@ -2067,6 +2757,7 @@ async function isNewCustomer(customerId) {
     const customerData = await prisma.$queryRaw`
       SELECT got_signup_bonus, activated_as_referrer FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     
     const customer = customerData[0]
@@ -2103,14 +2794,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
       })
     }
 
-    // Get IP address from request
-    const ipAddress = request.headers.get('x-forwarded-for') || 
-                     request.headers.get('x-real-ip') || 
-                     request.connection?.remoteAddress ||
-                     'unknown'
-
     console.log(`👤 Processing customer creation: ${customerId}`)
-    console.log(`📍 IP Address: ${ipAddress}`)
     let givenName = cleanValue(
       customerData.givenName ??
       customerData.given_name ??
@@ -2148,13 +2832,6 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     console.log(`📞 Phone: ${phoneNumber || 'None'}`)
     console.log(`👤 Name: ${givenName || ''} ${familyName || ''}`)
 
-    // Check for suspicious IP activity
-    const isSuspicious = await checkSuspiciousActivity(customerId, ipAddress)
-    if (isSuspicious) {
-      console.log(`⚠️ Suspicious activity detected for customer ${customerId}, flagging for review`)
-      // Could add a flag to database for manual review
-    }
-
     // 1. Check if customer is new
     const isNew = await isNewCustomer(customerId)
     if (!isNew) {
@@ -2164,10 +2841,42 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
 
     console.log(`🎉 New customer detected: ${customerId}`)
 
+    // Resolve organization_id from runContext
+    let organizationId = runContext?.organizationId || runContext?.context?.organizationId || null
+
+    // If not in runContext, try to resolve from merchantId
+    if (!organizationId && runContext?.merchantId) {
+      organizationId = await resolveOrganizationId(runContext.merchantId)
+    }
+
+    // If still not available, try to get from customer's existing record (if they exist)
+    if (!organizationId) {
+      try {
+        const existingCustomer = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${customerId}
+          LIMIT 1
+        `
+        if (existingCustomer && existingCustomer.length > 0) {
+          organizationId = existingCustomer[0].organization_id
+          console.log(`✅ Resolved organization_id from existing customer record: ${organizationId}`)
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not resolve organization_id from existing customer: ${error.message}`)
+      }
+    }
+
+    if (!organizationId) {
+      console.error(`❌ Cannot create customer: organization_id is required but could not be resolved`)
+      console.error(`   Customer ID: ${customerId}`)
+      console.error(`   Merchant ID: ${runContext?.merchantId || 'missing'}`)
+      throw new Error(`Cannot create customer: organization_id is required but could not be resolved`)
+    }
+
     // 2. Generate referral code immediately when customer creates profile
     // This allows customer to start sharing their referral code right away
     const customerName = `${givenName || ''} ${familyName || ''}`.trim() || 'Customer'
-    const referralCode = await generateUniquePersonalCode(customerName, customerId)
+    const referralCode = await generateUniquePersonalCode(customerName, customerId, organizationId)
     const referralUrl = generateReferralUrl(referralCode)
     
     console.log(`✅ Generated referral code: ${referralCode}`)
@@ -2176,6 +2885,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     // 3. Add customer to database with referral code (but no gift card yet)
     await prisma.$executeRaw`
       INSERT INTO square_existing_clients (
+        organization_id,
         square_customer_id,
         given_name,
         family_name,
@@ -2187,12 +2897,11 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         referral_url,
         gift_card_id,
         used_referral_code,
-        first_ip_address,
-        ip_addresses,
         referral_email_sent,
         created_at,
         updated_at
       ) VALUES (
+        ${organizationId}::uuid,
         ${customerId},
         ${givenName},
         ${familyName},
@@ -2204,13 +2913,11 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
         ${referralUrl}, -- Referral URL created immediately
         NULL, -- No gift card yet (will create on booking or after first payment)
         NULL, -- No referral code stored yet (will check on booking)
-        ${ipAddress},
-        ARRAY[${ipAddress}],
         FALSE, -- No email sent yet (will send immediately if email exists)
         NOW(),
         NOW()
       )
-      ON CONFLICT (square_customer_id) DO UPDATE SET
+      ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
         given_name = COALESCE(square_existing_clients.given_name, EXCLUDED.given_name),
         family_name = COALESCE(square_existing_clients.family_name, EXCLUDED.family_name),
         email_address = COALESCE(square_existing_clients.email_address, EXCLUDED.email_address),
@@ -2263,6 +2970,7 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
             SET referral_email_sent = TRUE,
                 updated_at = NOW()
             WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
           `
           
           console.log(`✅ Referral code email sent successfully`)
@@ -2287,7 +2995,9 @@ async function processCustomerCreated(customerData, request, runContext = {}) {
     
     // Verify customer was added
     const verifyCustomer = await prisma.$queryRaw`
-      SELECT * FROM square_existing_clients WHERE square_customer_id = ${customerId}
+      SELECT * FROM square_existing_clients 
+      WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     console.log(`✅ Verification: Customer found in DB:`, verifyCustomer.length > 0)
 
@@ -2346,12 +3056,41 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       console.log(`📍 Payment attributed to location: ${paymentLocationId}`)
     }
 
+    // Resolve organization_id from payment location or customer record
+    let organizationId = null
+    if (paymentLocationId) {
+      // Try to resolve from Square location ID (need to convert friendly location ID to square location ID)
+      const squareLocationId = paymentData.location_id || paymentData.locationId
+      if (squareLocationId) {
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+      }
+    }
+    
+    // Fallback: get organization_id from customer record
+    if (!organizationId) {
+      const orgCheck = await prisma.$queryRaw`
+        SELECT organization_id FROM square_existing_clients 
+        WHERE square_customer_id = ${customerId} 
+        LIMIT 1
+      `
+      organizationId = orgCheck?.[0]?.organization_id || null
+    }
+    
+    if (!organizationId) {
+      console.warn(`⚠️ Cannot resolve organization_id for customer ${customerId}, skipping payment processing`)
+      return
+    }
+
+    // Process gift card redemptions (for ALL payments, not just first payment)
+    await processGiftCardRedemptions(paymentData, organizationId)
+
     // 1. Check if this is a new customer's first payment
     const customerData = await prisma.$queryRaw`
       SELECT square_customer_id, used_referral_code, got_signup_bonus, gift_card_id, 
              given_name, family_name, email_address, first_payment_completed, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
 
     if (!customerData || customerData.length === 0) {
@@ -2370,6 +3109,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
           SELECT COUNT(*) as count 
           FROM square_existing_clients 
           WHERE gift_card_order_id = ${orderId}
+            AND organization_id = ${organizationId}::uuid
         `
         if (isOurOrder && isOurOrder[0]?.count > 0) {
           console.log(`⚠️ Payment ${paymentId || 'unknown'} is for our gift card order ${orderId}, skipping...`)
@@ -2393,7 +3133,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
     if (customer.used_referral_code) {
       console.log(`🎯 Customer used referral code: ${customer.used_referral_code}`)
       // Find the referrer
-      const referrer = await findReferrerByCode(customer.used_referral_code)
+      const referrer = await findReferrerByCode(customer.used_referral_code, organizationId)
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
         referrerCustomerId = referrer.square_customer_id
@@ -2402,16 +3142,33 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
         const isSelfReferral = referrer.square_customer_id === customerId
         if (isSelfReferral) {
           console.log(`⚠️ Skipping referrer reward because this looks like self-referral (customerId=${customerId})`)
-          referrerCustomerId = null
+          
+          await saveApplicationLog(prisma, {
+            organizationId: organizationId,
+            logType: 'REWARD_PROCESSING',
+            logId: `reward-self-${customerId}-${Date.now()}`,
+            status: 'completed',
+            payload: { customerId, referrerId: referrer.square_customer_id, reason: 'self_referral' }
+          })
+          return
         }
 
         // Check if referrer already has a gift card
+        // First get referrer's organization_id
+        const referrerOrgCheck = await prisma.$queryRaw`
+          SELECT organization_id FROM square_existing_clients 
+          WHERE square_customer_id = ${referrer.square_customer_id} 
+          LIMIT 1
+        `
+        const referrerOrganizationId = referrerOrgCheck?.[0]?.organization_id || organizationId
+        
         const referrerData = await prisma.$queryRaw`
           SELECT square_customer_id, total_rewards, gift_card_id,
                  gift_card_order_id, gift_card_line_item_uid, gift_card_delivery_channel,
                  gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email
           FROM square_existing_clients 
           WHERE square_customer_id = ${referrer.square_customer_id}
+            AND organization_id = ${referrerOrganizationId}::uuid
         `
 
         if (referrerData && referrerData.length > 0) {
@@ -2484,7 +3241,8 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               `${referrer.given_name} ${referrer.family_name}`, 
               rewardAmountCents,
               true, // This is a referrer gift card
-              referrerGiftCardOptions
+              referrerGiftCardOptions,
+              organizationId
             )
 
             if (referrerGiftCard?.giftCardId) {
@@ -2503,6 +3261,18 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   gift_card_pass_kit_url = ${referrerGiftCard.passKitUrl ?? null},
                   gift_card_digital_email = ${referrerGiftCard.digitalEmail ?? null}
                 WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
+              `
+
+              // Also update referral_profiles stats
+              await prisma.$executeRaw`
+                UPDATE referral_profiles
+                SET 
+                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                  updated_at = NOW()
+                WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
               `
 
               console.log(`✅ Referrer gets NEW gift card:`)
@@ -2523,38 +3293,58 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 })
               }
 
-              const referrerNameBase = `${referrer.given_name || ''} ${referrer.family_name || ''}`.trim()
-              const referrerEmail = referrer.email_address || referrerGiftCard.digitalEmail || null
-              if (referrerEmail) {
-                await sendGiftCardEmailNotification({
-                  customerName: referrerNameBase || referrerEmail || 'there',
-                  email: referrerEmail,
-                  giftCardGan: referrerGiftCard.giftCardGan,
-                  amountCents: referrerGiftCard.amountCents,
-                  balanceCents: referrerGiftCard.balanceCents,
-                  activationUrl: referrerGiftCard.activationUrl,
-                  passKitUrl: referrerGiftCard.passKitUrl,
-                  giftCardId: referrerGiftCard.giftCardId,
-                  waitForPassKit: true,
-                  locationId: paymentLocationId,
-                  notificationMetadata: {
+              if (referrerEmail || referrer.phone_number) {
+                // Enqueue notification job for reliability
+                await enqueueGiftCardJob(prisma, {
+                  correlationId: runContext?.correlationId || `notification-${Date.now()}`,
+                  triggerType: 'payment.completed',
+                  stage: 'send_notification',
+                  payload: {
+                    type: 'REFERRER_ACTIVATION',
+                    customerName: referrerNameBase || referrerEmail || 'there',
+                    email: referrerEmail,
+                    phoneNumber: referrer.phone_number,
+                    giftCardGan: referrerGiftCard.giftCardGan,
+                    amountCents: referrerGiftCard.amountCents,
+                    balanceCents: referrerGiftCard.balanceCents,
+                    activationUrl: referrerGiftCard.activationUrl,
+                    passKitUrl: referrerGiftCard.passKitUrl,
+                    giftCardId: referrerGiftCard.giftCardId,
+                    locationId: paymentLocationId,
+                    organizationId,
                     customerId: referrer.square_customer_id,
-                    friendCustomerId: customerId
-                  }
+                    notificationMetadata: {
+                      friendCustomerId: customerId
+                    }
+                  },
+                  organizationId
                 })
+                console.log(`✅ Enqueued referrer notification job for ${referrer.square_customer_id}`)
               } else {
-                console.log('⚠️ Referrer gift card email skipped – missing email address')
+                console.log('⚠️ Referrer notification skipped – missing email and phone')
+                await trackNotification({
+                  channel: 'EMAIL',
+                  templateType: 'REFERRER_ACTIVATION',
+                  status: 'skipped',
+                  customerId: referrer.square_customer_id,
+                  organizationId,
+                  metadata: { reason: 'missing-contact-info', friendCustomerId: customerId }
+                })
               }
 
               // Create ReferralReward record for tracking
               try {
                 // Find the gift card ID from the new gift_cards table
-                const giftCardRecord = await prisma.giftCard.findUnique({
-                  where: { square_gift_card_id: referrerGiftCard.giftCardId }
+                const giftCardRecord = await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: organizationId,
+                    square_gift_card_id: referrerGiftCard.giftCardId
+                  }
                 })
                 
                 await prisma.referralReward.create({
                   data: {
+                    organization_id: organizationId,
                     referrer_customer_id: referrer.square_customer_id,
                     referred_customer_id: customerId,
                     reward_amount_cents: rewardAmountCents, // 1000 cents = $10
@@ -2580,7 +3370,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               // Send notification to admin about referral code usage (referrer reward)
               try {
                 await sendReferralCodeUsageNotification({
-                  referralCode: customer.used_referral_code,
+            referralCode: customer.used_referral_code,
                   customer: {
                     square_customer_id: customerId,
                     given_name: customer.given_name,
@@ -2640,6 +3430,18 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   gift_card_pass_kit_url = ${loadResult.passKitUrl ?? referrerInfo.gift_card_pass_kit_url ?? null},
                   gift_card_digital_email = ${loadResult.digitalEmail ?? referrerInfo.gift_card_digital_email ?? null}
                 WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
+              `
+
+              // Also update referral_profiles stats
+              await prisma.$executeRaw`
+                UPDATE referral_profiles
+                SET 
+                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                  updated_at = NOW()
+                WHERE square_customer_id = ${referrer.square_customer_id}
+                  AND organization_id = ${referrerOrganizationId}::uuid
               `
 
               if (runContext?.correlationId) {
@@ -2660,37 +3462,57 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               console.log(`   - Amount loaded: $10`)
               console.log(`   - Referrer: ${referrer.given_name} ${referrer.family_name}`)
 
-              const referrerNameBase = `${referrer.given_name || ''} ${referrer.family_name || ''}`.trim()
-              const referrerEmail = referrer.email_address || loadResult.digitalEmail || null
-              if (referrerEmail && loadResult.giftCardGan) {
-                await sendGiftCardEmailNotification({
-                  customerName: referrerNameBase || referrerEmail || 'there',
-                  email: referrerEmail,
-                  giftCardGan: loadResult.giftCardGan,
-                  amountCents: rewardAmountCents,
-                  balanceCents: loadResult.balanceCents,
-                  activationUrl: loadResult.activationUrl,
-                  passKitUrl: loadResult.passKitUrl,
-                  giftCardId: referrerInfo.gift_card_id,
-                  waitForPassKit: true,
-                  locationId: paymentLocationId,
-                  notificationMetadata: {
+              if (referrerEmail || referrer.phone_number) {
+                // Enqueue notification job for reliability
+                await enqueueGiftCardJob(prisma, {
+                  correlationId: runContext?.correlationId || `notification-load-${Date.now()}`,
+                  triggerType: 'payment.completed',
+                  stage: 'send_notification',
+                  payload: {
+                    type: 'REFERRER_ACTIVATION',
+                    customerName: referrerNameBase || referrerEmail || 'there',
+                    email: referrerEmail,
+                    phoneNumber: referrer.phone_number,
+                    giftCardGan: loadResult.giftCardGan,
+                    amountCents: rewardAmountCents,
+                    balanceCents: loadResult.balanceCents,
+                    activationUrl: loadResult.activationUrl,
+                    passKitUrl: loadResult.passKitUrl,
+                    giftCardId: referrerInfo.gift_card_id,
+                    locationId: paymentLocationId,
+                    organizationId,
                     customerId: referrer.square_customer_id,
-                    friendCustomerId: customerId
-                  }
+                    notificationMetadata: {
+                      friendCustomerId: customerId
+                    }
+                  },
+                  organizationId
                 })
+                console.log(`✅ Enqueued referrer load notification job for ${referrer.square_customer_id}`)
               } else {
-                console.log('⚠️ Referrer load email skipped – missing email address or card number')
+                console.log('⚠️ Referrer load notification skipped – missing email and phone')
+                await trackNotification({
+                  channel: 'EMAIL',
+                  templateType: 'REFERRER_ACTIVATION',
+                  status: 'skipped',
+                  customerId: referrer.square_customer_id,
+                  organizationId,
+                  metadata: { reason: 'missing-contact-info', friendCustomerId: customerId }
+                })
               }
 
               // Create ReferralReward record for tracking
               try {
-                const giftCardRecord = await prisma.giftCard.findUnique({
-                  where: { square_gift_card_id: referrerInfo.gift_card_id }
+                const giftCardRecord = await prisma.giftCard.findFirst({
+                  where: {
+                    organization_id: referrerOrganizationId,
+                    square_gift_card_id: referrerInfo.gift_card_id
+                  }
                 })
                 
                 await prisma.referralReward.create({
                   data: {
+                    organization_id: organizationId,
                     referrer_customer_id: referrer.square_customer_id,
                     referred_customer_id: customerId,
                     reward_amount_cents: rewardAmountCents,
@@ -2716,7 +3538,7 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
               // Send notification to admin about referral code usage (referrer reward - loaded)
               try {
                 await sendReferralCodeUsageNotification({
-                  referralCode: customer.used_referral_code,
+            referralCode: customer.used_referral_code,
                   customer: {
                     square_customer_id: customerId,
                     given_name: customer.given_name,
@@ -2757,61 +3579,80 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       console.log(`❌ Referrer not found for code: ${customer.used_referral_code}`)
     }
 
-    // 3. Send referral code to NEW client (regardless of referral code usage)
-    if (customer.email_address) {
-      if (runContext?.correlationId) {
-        await updateGiftCardRunStage(prisma, runContext.correlationId, {
-          stage: 'referrer_promotion:issuing',
-          status: 'running',
-          incrementAttempts: true,
-          context: {
-            customerId,
-            email: customer.email_address
-          }
-        })
+    // 4. Handle friend reward (signup bonus)
+    if (customer.used_referral_code && !customer.got_signup_bonus) {
+      console.log(`🎁 Issuing friend reward for ${customer.given_name}`)
+      
+      const rewardAmountCents = 1000
+      const friendGiftCardOptions = {
+        idempotencyKeySeed: runContext?.correlationId
+          ? buildStageKey(runContext.correlationId, 'friend_reward', 'issue')
+          : undefined
       }
 
-      const referralResult = await sendReferralCodeToNewClient(
+      const friendGiftCard = await createGiftCard(
         customerId,
         `${customer.given_name} ${customer.family_name}`,
-        customer.email_address,
-        customer.phone_number,
-        { locationId: paymentLocationId }
+        rewardAmountCents,
+        false, // Not a referrer card
+        friendGiftCardOptions,
+        organizationId
       )
-      
-      if (referralResult.success) {
-        console.log(`✅ Referral code sent to new client:`)
-        console.log(`   - Customer: ${customer.given_name} ${customer.family_name}`)
-        console.log(`   - Email: ${customer.email_address}`)
-        console.log(`   - Referral Code: ${referralResult.referralCode}`)
-        console.log(`   - Status: Customer is now a referrer`)
-        if (runContext?.correlationId) {
-          await updateGiftCardRunStage(prisma, runContext.correlationId, {
-            stage: 'referrer_promotion:completed',
-            status: 'running',
-            clearError: true,
-            context: {
-              customerId,
-              referralCode: referralResult.referralCode
-            }
+
+      if (friendGiftCard?.giftCardId) {
+        await prisma.$executeRaw`
+          UPDATE square_existing_clients 
+          SET 
+            got_signup_bonus = TRUE,
+            gift_card_id = ${friendGiftCard.giftCardId},
+            gift_card_gan = ${friendGiftCard.giftCardGan ?? null},
+            gift_card_order_id = ${friendGiftCard.orderId ?? null},
+            gift_card_line_item_uid = ${friendGiftCard.lineItemUid ?? null},
+            gift_card_delivery_channel = ${friendGiftCard.activationChannel ?? null},
+            gift_card_activation_url = ${friendGiftCard.activationUrl ?? null},
+            gift_card_pass_kit_url = ${friendGiftCard.passKitUrl ?? null},
+            gift_card_digital_email = ${friendGiftCard.digitalEmail ?? null}
+          WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
+        `
+
+        // Enqueue notification job for friend reward
+        if (customer.email_address || customer.phone_number) {
+          await enqueueGiftCardJob(prisma, {
+            correlationId: runContext?.correlationId || `friend-notification-${Date.now()}`,
+            triggerType: 'payment.completed',
+            stage: 'send_notification',
+            payload: {
+              type: 'FRIEND_ACTIVATION',
+              customerName: `${customer.given_name} ${customer.family_name}`,
+              email: customer.email_address,
+              phoneNumber: customer.phone_number,
+              giftCardGan: friendGiftCard.giftCardGan,
+              amountCents: friendGiftCard.amountCents,
+              balanceCents: friendGiftCard.balanceCents,
+              activationUrl: friendGiftCard.activationUrl,
+              passKitUrl: friendGiftCard.passKitUrl,
+              giftCardId: friendGiftCard.giftCardId,
+              locationId: paymentLocationId,
+              organizationId,
+              customerId
+            },
+            organizationId
           })
+          console.log(`✅ Enqueued friend reward notification job for ${customerId}`)
         }
-      } else if (runContext?.correlationId) {
-        paymentHadError = true
-        await markGiftCardRunError(prisma, runContext.correlationId, 'Failed to send referral code email', {
-          stage: 'referrer_promotion:error'
-        })
       }
     }
 
-    // 4. Mark first payment as completed ONLY if there were no errors
+    // 5. Mark first payment as completed ONLY if there were no errors
     // This allows the client to retry processing if something failed
     if (!paymentHadError) {
-      await prisma.$executeRaw`
-        UPDATE square_existing_clients 
-        SET first_payment_completed = TRUE
-        WHERE square_customer_id = ${customerId}
-      `
+    await prisma.$executeRaw`
+      UPDATE square_existing_clients 
+      SET first_payment_completed = TRUE
+      WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
+    `
     }
 
     const paymentAmountCents = extractPaymentAmountCents(paymentData)
@@ -2886,13 +3727,36 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     // Extract merchant_id from bookingData if not provided
     const finalMerchantId = merchantId || bookingData.merchantId || bookingData.merchant_id || null
     
-    // Resolve organization_id from merchant_id if not provided
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let finalOrganizationId = organizationId
+    
+    // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
     if (!finalOrganizationId && finalMerchantId) {
       finalOrganizationId = await resolveOrganizationId(finalMerchantId)
+      if (finalOrganizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${finalOrganizationId}`)
+      }
+    }
+
+    // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
+    if (!finalOrganizationId) {
+      const squareLocationId = 
+        bookingData.location_id || 
+        bookingData.locationId || 
+        bookingData.location?.id ||
+        bookingData.extendedProperties?.locationId ||
+        (bookingData.raw_json && (bookingData.raw_json.location_id || bookingData.raw_json.locationId))
+      
+      if (squareLocationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+        finalOrganizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        if (finalOrganizationId) {
+          console.log(`✅ Resolved organization_id from location: ${finalOrganizationId}`)
+        }
+      }
     }
     
-    // If still no organization_id, try to get it from customer
+    // STEP 2: Fallback to customer (if both location and merchant failed)
     if (!finalOrganizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -2902,6 +3766,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         `
         if (customerOrg && customerOrg.length > 0) {
           finalOrganizationId = customerOrg[0].organization_id
+          console.log(`✅ Resolved organization_id from customer: ${finalOrganizationId}`)
         }
       } catch (error) {
         console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
@@ -2910,6 +3775,11 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     
     if (!finalOrganizationId) {
       console.error(`❌ Cannot save booking: organization_id is required but could not be resolved`)
+      console.error(`   Booking ID: ${bookingId}`)
+      console.error(`   Customer ID: ${customerId || 'missing'}`)
+      console.error(`   Merchant ID: ${finalMerchantId || 'missing'}`)
+      console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+      console.error(`   Attempted: merchant_id lookup, customer lookup, location_id lookup (with Square API)`)
       return
     }
     
@@ -2933,24 +3803,47 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     
     if (squareLocationId) {
       try {
-        // Ensure location exists first
+        // Fetch location from Square API to get merchant_id and other details
+        const locationData = await fetchAndUpdateLocationFromSquare(squareLocationId)
+        const locationMerchantId = locationData?.merchantId || null
+        const locationName = locationData?.name || `Location ${squareLocationId.substring(0, 8)}...`
+        const locationAddress = locationData?.address || null
+        
+        // Ensure location exists first (with merchant_id if available)
         await prisma.$executeRaw`
           INSERT INTO locations (
             id,
             organization_id,
             square_location_id,
+            square_merchant_id,
             name,
+            address_line_1,
+            locality,
+            administrative_district_level_1,
+            postal_code,
             created_at,
             updated_at
           ) VALUES (
             gen_random_uuid(),
             ${finalOrganizationId}::uuid,
             ${squareLocationId},
-            ${`Location ${squareLocationId.substring(0, 8)}...`},
+            ${locationMerchantId},
+            ${locationName},
+            ${locationAddress?.address_line_1 || locationAddress?.addressLine1 || null},
+            ${locationAddress?.locality || null},
+            ${locationAddress?.administrative_district_level_1 || locationAddress?.administrativeDistrictLevel1 || null},
+            ${locationAddress?.postal_code || locationAddress?.postalCode || null},
             NOW(),
             NOW()
           )
-          ON CONFLICT (organization_id, square_location_id) DO NOTHING
+          ON CONFLICT (organization_id, square_location_id) DO UPDATE SET
+            square_merchant_id = COALESCE(EXCLUDED.square_merchant_id, locations.square_merchant_id),
+            name = COALESCE(EXCLUDED.name, locations.name),
+            address_line_1 = COALESCE(EXCLUDED.address_line_1, locations.address_line_1),
+            locality = COALESCE(EXCLUDED.locality, locations.locality),
+            administrative_district_level_1 = COALESCE(EXCLUDED.administrative_district_level_1, locations.administrative_district_level_1),
+            postal_code = COALESCE(EXCLUDED.postal_code, locations.postal_code),
+            updated_at = NOW()
         `
         
         // Get location UUID
@@ -2975,6 +3868,82 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       return
     }
     
+    // Resolve service_variation_id from Square ID to internal UUID
+    let serviceVariationUuid = null
+    const squareServiceVariationId = segment?.service_variation_id || segment?.serviceVariationId
+    if (squareServiceVariationId && finalOrganizationId) {
+      try {
+        const svRecord = await prisma.$queryRaw`
+          SELECT uuid::text as id FROM service_variation
+          WHERE square_variation_id = ${squareServiceVariationId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        serviceVariationUuid = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+        if (serviceVariationUuid) {
+          console.log(`✅ Resolved service variation ${squareServiceVariationId} to UUID ${serviceVariationUuid}`)
+        } else {
+          console.warn(`⚠️ Service variation ${squareServiceVariationId} not found in database`)
+        }
+      } catch (error) {
+        console.error(`❌ Error resolving service variation: ${error.message}`)
+      }
+    }
+    
+    // Resolve technician_id from Square ID to internal UUID
+    let technicianUuid = null
+    const squareTeamMemberId = segment?.team_member_id || segment?.teamMemberId
+    if (squareTeamMemberId && finalOrganizationId) {
+      try {
+        const tmRecord = await prisma.$queryRaw`
+          SELECT id::text as id FROM team_members
+          WHERE square_team_member_id = ${squareTeamMemberId}
+            AND organization_id = ${finalOrganizationId}::uuid
+          LIMIT 1
+        `
+        technicianUuid = tmRecord && tmRecord.length > 0 ? tmRecord[0].id : null
+        if (technicianUuid) {
+          console.log(`✅ Resolved team member ${squareTeamMemberId} to UUID ${technicianUuid}`)
+        }
+      } catch (error) {
+        console.error(`❌ Error resolving team member: ${error.message}`)
+      }
+    }
+    
+    // Resolve administrator_id from creator_details.team_member_id
+    // ONLY if creator_type is TEAM_MEMBER
+    let administratorUuid = null
+    const creatorType = creatorDetails.creator_type || creatorDetails.creatorType
+    if (creatorType === 'TEAM_MEMBER') {
+      const creatorTeamMemberId = creatorDetails.team_member_id || creatorDetails.teamMemberId
+      if (creatorTeamMemberId && finalOrganizationId) {
+        try {
+          const adminRecord = await prisma.$queryRaw`
+            SELECT id::text as id FROM team_members
+            WHERE square_team_member_id = ${creatorTeamMemberId}
+              AND organization_id = ${finalOrganizationId}::uuid
+            LIMIT 1
+          `
+          administratorUuid = adminRecord && adminRecord.length > 0 ? adminRecord[0].id : null
+          if (administratorUuid) {
+            console.log(`✅ Resolved administrator ${creatorTeamMemberId} to UUID ${administratorUuid}`)
+          }
+        } catch (error) {
+          console.error(`❌ Error resolving administrator: ${error.message}`)
+        }
+      }
+    }
+    
+    // Defensive check: ensure locationUuid is not null before INSERT
+    // This prevents NOT NULL constraint violations
+    if (!locationUuid) {
+      console.error(`❌ Cannot save booking ${bookingId}: locationUuid is null`)
+      console.error(`   This should have been caught earlier - location resolution may have failed silently`)
+      console.error(`   Organization ID: ${finalOrganizationId}`)
+      console.error(`   Square Location ID: ${squareLocationId || 'missing'}`)
+      return
+    }
+    
     await prisma.$executeRaw`
       INSERT INTO bookings (
         id, organization_id, booking_id, version, customer_id, location_id, location_type, source,
@@ -2983,6 +3952,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         address_line_1, locality, administrative_district_level_1, postal_code,
         service_variation_id, service_variation_version, duration_minutes,
         intermission_minutes, technician_id, any_team_member,
+        customer_note, seller_note,
         merchant_id, created_at, updated_at, raw_json
       ) VALUES (
         gen_random_uuid(),
@@ -2999,37 +3969,486 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${bookingData.transition_time_minutes || bookingData.transitionTimeMinutes || 0},
         ${creatorDetails.creator_type || creatorDetails.creatorType || null},
         ${creatorDetails.customer_id || creatorDetails.customerId || null},
-        ${creatorDetails.team_member_id || creatorDetails.teamMemberId || null},
+        ${administratorUuid ? Prisma.sql`${administratorUuid}::uuid` : Prisma.sql`NULL`},
         ${address.address_line_1 || address.addressLine1 || null},
         ${address.locality || null},
         ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
         ${address.postal_code || address.postalCode || null},
-        ${segment?.service_variation_id || segment?.serviceVariationId || null},
+        ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
         ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
         ${segment?.duration_minutes || segment?.durationMinutes || null},
         ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
-        ${segment?.team_member_id || segment?.teamMemberId || null},
+        ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
         ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
+        ${bookingData.customer_note || bookingData.customerNote || null},
+        ${bookingData.seller_note || bookingData.sellerNote || null},
         ${finalMerchantId},
         ${bookingData.created_at || bookingData.createdAt ? new Date(bookingData.created_at || bookingData.createdAt) : new Date()}::timestamptz,
         ${bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updatedAt || bookingData.updated_at) : new Date()}::timestamptz,
-        ${JSON.stringify(bookingData)}::jsonb
+        ${safeStringify(bookingData)}::jsonb
       )
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         version = EXCLUDED.version,
         status = EXCLUDED.status,
         merchant_id = COALESCE(EXCLUDED.merchant_id, bookings.merchant_id),
-        service_variation_id = COALESCE(EXCLUDED.service_variation_id, bookings.service_variation_id),
-        service_variation_version = COALESCE(EXCLUDED.service_variation_version, bookings.service_variation_version),
-        technician_id = COALESCE(EXCLUDED.technician_id, bookings.technician_id),
+        service_variation_id = EXCLUDED.service_variation_id,
+        service_variation_version = EXCLUDED.service_variation_version,
+        technician_id = EXCLUDED.technician_id,
+        customer_note = COALESCE(EXCLUDED.customer_note, bookings.customer_note),
+        seller_note = COALESCE(EXCLUDED.seller_note, bookings.seller_note),
         updated_at = EXCLUDED.updated_at,
-        raw_json = EXCLUDED.raw_json
+        raw_json = EXCLUDED.raw_json,
+        source = COALESCE(bookings.source, EXCLUDED.source),
+        customer_id = COALESCE(bookings.customer_id, EXCLUDED.customer_id),
+        creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type)
     `
     
     console.log(`✅ Saved booking ${bookingId} with service ${segment?.service_variation_id || segment?.serviceVariationId || 'N/A'}`)
   } catch (error) {
     console.error(`❌ Error saving booking:`, error.message)
     // Don't throw - allow referral processing to continue
+  }
+}
+
+async function ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId) {
+  const baseBookingId = bookingData.id || bookingData.bookingId
+  if (!baseBookingId) {
+    return null
+  }
+
+  const existing = await prisma.$queryRaw`
+    SELECT id FROM bookings
+    WHERE booking_id = ${baseBookingId}
+      AND organization_id = ${organizationId}::uuid
+    LIMIT 1
+  `
+
+  if (existing && existing.length > 0) {
+    return existing[0].id
+  }
+
+  // Create a header booking row if missing (segment-less)
+  await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
+  const created = await prisma.$queryRaw`
+    SELECT id FROM bookings
+    WHERE booking_id = ${baseBookingId}
+      AND organization_id = ${organizationId}::uuid
+    LIMIT 1
+  `
+
+  return created?.[0]?.id || null
+}
+
+async function upsertBookingSegments(bookingUuid, bookingData, organizationId) {
+  if (!bookingUuid) return
+
+  const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return
+  }
+
+  const bookingVersion = Number.isFinite(bookingData.version) ? bookingData.version : 0
+
+  // Soft-delete old segments when version changes
+  await prisma.$executeRaw`
+    UPDATE booking_segments
+    SET is_active = false,
+        deleted_at = NOW(),
+        updated_at = NOW()
+    WHERE booking_id = ${bookingUuid}::uuid
+      AND is_active = true
+      AND booking_version != ${bookingVersion}
+  `
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i] || {}
+    const segmentIndex = i
+    const squareServiceVariationId = segment.service_variation_id || segment.serviceVariationId || null
+    const squareTeamMemberId = segment.team_member_id || segment.teamMemberId || null
+    const squareSegmentUid = segment.segment_uid || segment.uid || segment.id || null
+
+    let serviceVariationUuid = null
+    if (squareServiceVariationId) {
+      const svRecord = await prisma.$queryRaw`
+        SELECT uuid::text as id FROM service_variation
+        WHERE square_variation_id = ${squareServiceVariationId}
+          AND organization_id = ${organizationId}::uuid
+        LIMIT 1
+      `
+      serviceVariationUuid = svRecord?.[0]?.id || null
+    }
+
+    let technicianUuid = null
+    if (squareTeamMemberId) {
+      const tmRecord = await prisma.$queryRaw`
+        SELECT id::text as id FROM team_members
+        WHERE square_team_member_id = ${squareTeamMemberId}
+          AND organization_id = ${organizationId}::uuid
+        LIMIT 1
+      `
+      technicianUuid = tmRecord?.[0]?.id || null
+    }
+
+    const anyTeamMember = segment.any_team_member ?? segment.anyTeamMember ?? false
+    const durationMinutes = segment.duration_minutes || segment.durationMinutes || null
+    const intermissionMinutes = segment.intermission_minutes || segment.intermissionMinutes || 0
+    const serviceVariationVersion = segment.service_variation_version || segment.serviceVariationVersion || null
+
+    // Extract booking times from bookingData
+    const bookingCreatedAt = bookingData.created_at || bookingData.createdAt || null
+    const bookingStartAt = bookingData.start_at || bookingData.startAt || null
+
+    await prisma.$executeRaw`
+      INSERT INTO booking_segments (
+        id,
+        booking_id,
+        segment_index,
+        square_segment_uid,
+        square_service_variation_id,
+        service_variation_id,
+        service_variation_version,
+        duration_minutes,
+        intermission_minutes,
+        square_team_member_id,
+        technician_id,
+        any_team_member,
+        booking_version,
+        booking_created_at,
+        booking_start_at,
+        is_active,
+        created_at,
+        updated_at
+      ) VALUES (
+        gen_random_uuid(),
+        ${bookingUuid}::uuid,
+        ${segmentIndex},
+        ${squareSegmentUid},
+        ${squareServiceVariationId},
+        ${serviceVariationUuid}::uuid,
+        ${serviceVariationVersion ? BigInt(serviceVariationVersion) : null},
+        ${durationMinutes},
+        ${intermissionMinutes},
+        ${squareTeamMemberId},
+        ${technicianUuid}::uuid,
+        ${anyTeamMember},
+        ${bookingVersion},
+        ${bookingCreatedAt ? new Date(bookingCreatedAt) : null}::timestamp,
+        ${bookingStartAt ? new Date(bookingStartAt) : null}::timestamp,
+        true,
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (booking_id, segment_index, booking_version) DO UPDATE SET
+        square_segment_uid = COALESCE(EXCLUDED.square_segment_uid, booking_segments.square_segment_uid),
+        square_service_variation_id = COALESCE(EXCLUDED.square_service_variation_id, booking_segments.square_service_variation_id),
+        service_variation_id = COALESCE(EXCLUDED.service_variation_id, booking_segments.service_variation_id),
+        service_variation_version = COALESCE(EXCLUDED.service_variation_version, booking_segments.service_variation_version),
+        duration_minutes = COALESCE(EXCLUDED.duration_minutes, booking_segments.duration_minutes),
+        intermission_minutes = COALESCE(EXCLUDED.intermission_minutes, booking_segments.intermission_minutes),
+        square_team_member_id = COALESCE(EXCLUDED.square_team_member_id, booking_segments.square_team_member_id),
+        technician_id = COALESCE(EXCLUDED.technician_id, booking_segments.technician_id),
+        any_team_member = COALESCE(EXCLUDED.any_team_member, booking_segments.any_team_member),
+        booking_created_at = COALESCE(EXCLUDED.booking_created_at, booking_segments.booking_created_at),
+        booking_start_at = COALESCE(EXCLUDED.booking_start_at, booking_segments.booking_start_at),
+        is_active = true,
+        deleted_at = NULL,
+        updated_at = NOW()
+    `
+  }
+}
+
+/**
+ * Process booking.updated webhook event
+ * Updates existing booking with new data from Square
+ */
+async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt = null) {
+  try {
+    const baseBookingId = bookingData.id || bookingData.bookingId
+    if (!baseBookingId) {
+      console.error('❌ booking.updated: Missing booking ID')
+      return
+    }
+
+    console.log(`📅 Processing booking.updated for booking: ${baseBookingId}`)
+    // Extract data from webhook payload
+    const customerId = bookingData.customer_id || bookingData.customerId || null
+    const squareLocationId = bookingData.location_id || bookingData.locationId || null
+    const status = bookingData.status || null
+    const customerNote = bookingData.customer_note || bookingData.customerNote || null
+    const sellerNote = bookingData.seller_note || bookingData.sellerNote || null
+    const version = bookingData.version || null
+    const updatedAt = bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updated_at || bookingData.updatedAt) : new Date()
+    const appointmentSegments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+
+    // Find existing booking(s) - there may be multiple records for multi-service bookings
+    const existingBookings = await prisma.$queryRaw`
+      SELECT id, organization_id, booking_id, service_variation_id, technician_id, administrator_id, version, status
+      FROM bookings
+      WHERE booking_id LIKE ${`${baseBookingId}%`}
+      ORDER BY created_at ASC
+    `
+
+    if (!existingBookings || existingBookings.length === 0) {
+      console.warn(`⚠️ booking.updated: Booking ${baseBookingId} not found in database`)
+      console.warn(`   This might be a booking that was created before webhook handling was implemented`)
+      console.warn(`   OR the booking.created webhook was missed/failed`)
+      console.log(`   Creating booking from booking.updated webhook data...`)
+      
+      // Create booking if it doesn't exist (fallback for missed booking.created webhooks)
+      const customerId = bookingData.customer_id || bookingData.customerId || 
+                        bookingData.creator_details?.customer_id || 
+                        bookingData.creatorDetails?.customerId || null
+      
+    if (!customerId) {
+        console.error(`❌ Cannot create booking: customer_id is missing from booking data`)
+      return
+    }
+
+      // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
+      let organizationId = null
+      
+      // Extract merchantId from webhook data at this scope so it's available for saveBookingToDatabase
+      const merchantId = bookingData.merchant_id || bookingData.merchantId || null
+      
+      // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
+      if (!organizationId && merchantId) {
+        organizationId = await resolveOrganizationId(merchantId)
+        if (organizationId) {
+          console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+        }
+      }
+
+      // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
+      if (!organizationId) {
+        const squareLocationId = bookingData.location_id || bookingData.locationId
+        if (squareLocationId) {
+          console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+          organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+          if (organizationId) {
+            console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+          }
+        }
+      }
+      
+      // STEP 2: Fallback to customer (if both location and merchant failed)
+      if (!organizationId && customerId) {
+        try {
+          const customerOrg = await prisma.$queryRaw`
+            SELECT organization_id FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId}
+            LIMIT 1
+          `
+          if (customerOrg && customerOrg.length > 0) {
+            organizationId = customerOrg[0].organization_id
+            console.log(`✅ Resolved organization_id from customer: ${organizationId}`)
+          }
+        } catch (error) {
+          console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
+        }
+      }
+      
+      if (!organizationId) {
+        console.error(`❌ Cannot create booking: organization_id is required but could not be resolved`)
+        console.error(`   Booking ID: ${baseBookingId}`)
+        console.error(`   Customer ID: ${customerId || 'missing'}`)
+        console.error(`   Merchant ID: ${merchantId || 'missing'}`)
+        console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+        console.error(`   Attempted: customer lookup, merchant_id lookup, location_id lookup (with Square API)`)
+          return
+        }
+        
+      // Save booking using the same logic as processBookingCreated
+      const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+      
+      if (segments.length === 0) {
+        // No services, save booking as-is
+        await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
+      } else {
+        // Multiple services - create one booking per service
+        for (const segment of segments) {
+          await saveBookingToDatabase(bookingData, segment, customerId, merchantId, organizationId)
+        }
+        console.log(`✅ Created ${segments.length} booking record(s) from booking.updated webhook`)
+      }
+
+      // After creating the booking records, we should return early because we've already done the work
+      // and processBookingUpdated would otherwise try to update the records we just created.
+      const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
+      await upsertBookingSegments(headerBookingId, bookingData, organizationId)
+      
+      console.log(`✅ Successfully created booking ${baseBookingId} from booking.updated webhook`)
+      return
+    }
+
+    console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
+    // Update each booking record (for multi-service bookings)
+    for (const existingBooking of existingBookings) {
+      const organizationId = existingBooking.organization_id
+      const bookingUuid = existingBooking.id
+      // Resolve location UUID if location_id changed
+      let locationUuid = null
+      if (squareLocationId) {
+        const locationRecord = await prisma.$queryRaw`
+          SELECT id FROM locations 
+          WHERE square_location_id = ${squareLocationId}
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
+      }
+
+      // Process appointment segments to update service-specific fields
+      let serviceVariationId = existingBooking.service_variation_id
+      let technicianId = existingBooking.technician_id
+      let durationMinutes = null
+      let serviceVariationVersion = null
+
+      // NOTE: administrator_id and creator_type are NOT updated on booking.updated.
+      // We keep the original values from booking.created (team member who created the booking).
+
+      // Process appointment segments to resolve Square IDs to UUIDs
+      if (appointmentSegments.length > 0) {
+        // Try to match existing booking's service variation with segments
+        let matchingSegment = null
+        
+        if (existingBooking.service_variation_id) {
+          // Find the Square ID for the existing service variation
+          const squareServiceVariationId = await prisma.$queryRaw`
+            SELECT square_variation_id FROM service_variation
+            WHERE uuid = ${existingBooking.service_variation_id}::uuid
+            LIMIT 1
+          `
+          
+          if (squareServiceVariationId && squareServiceVariationId.length > 0) {
+            const svId = squareServiceVariationId[0].square_variation_id
+            matchingSegment = appointmentSegments.find(seg => 
+              (seg.service_variation_id || seg.serviceVariationId) === svId
+            )
+          }
+        }
+        
+        // If no match found, use first segment
+        if (!matchingSegment && appointmentSegments.length > 0) {
+          matchingSegment = appointmentSegments[0]
+        }
+        
+        if (matchingSegment) {
+          // Resolve service variation Square ID to UUID
+          const squareServiceVariationId = matchingSegment.service_variation_id || matchingSegment.serviceVariationId
+          if (squareServiceVariationId) {
+            const svRecord = await prisma.$queryRaw`
+              SELECT uuid::text as id FROM service_variation
+              WHERE square_variation_id = ${squareServiceVariationId}
+                AND organization_id = ${organizationId}::uuid
+              LIMIT 1
+            `
+            serviceVariationId = svRecord && svRecord.length > 0 ? svRecord[0].id : null
+          }
+          
+          // Resolve team member Square ID to UUID
+          const squareTeamMemberId = matchingSegment.team_member_id || matchingSegment.teamMemberId
+          if (squareTeamMemberId) {
+            const teamMemberRecord = await prisma.$queryRaw`
+              SELECT id::text as id FROM team_members
+              WHERE square_team_member_id = ${squareTeamMemberId}
+                AND organization_id = ${organizationId}::uuid
+              LIMIT 1
+            `
+            technicianId = teamMemberRecord && teamMemberRecord.length > 0 ? teamMemberRecord[0].id : null
+          }
+          
+          durationMinutes = matchingSegment.duration_minutes || matchingSegment.durationMinutes || null
+          serviceVariationVersion = matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion
+            ? BigInt(matchingSegment.service_variation_version || matchingSegment.serviceVariationVersion)
+            : null
+        }
+      }
+
+      // Build update query
+      const updateFields = []
+      const updateValues = []
+      
+      if (status) {
+        updateFields.push('status = $' + (updateValues.length + 1))
+        updateValues.push(status)
+      }
+      
+      if (customerNote !== null) {
+        updateFields.push('customer_note = $' + (updateValues.length + 1))
+        updateValues.push(customerNote)
+      }
+      
+      if (sellerNote !== null) {
+        updateFields.push('seller_note = $' + (updateValues.length + 1))
+        updateValues.push(sellerNote)
+      }
+      
+      if (version !== null) {
+        updateFields.push('version = $' + (updateValues.length + 1))
+        updateValues.push(version)
+      }
+      
+      if (locationUuid) {
+        updateFields.push('location_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(locationUuid)
+      }
+      
+      if (serviceVariationId) {
+        updateFields.push('service_variation_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(serviceVariationId)
+      }
+      
+      if (technicianId) {
+        updateFields.push('technician_id = $' + (updateValues.length + 1) + '::uuid')
+        updateValues.push(technicianId)
+      }
+      
+      if (durationMinutes !== null) {
+        updateFields.push('duration_minutes = $' + (updateValues.length + 1))
+        updateValues.push(durationMinutes)
+      }
+      
+      if (serviceVariationVersion !== null) {
+        updateFields.push('service_variation_version = $' + (updateValues.length + 1) + '::bigint')
+        updateValues.push(serviceVariationVersion.toString())
+      } else if (appointmentSegments.length > 0) {
+        // If version is null but we have segments, try to get it from raw_json
+        const firstSegment = appointmentSegments[0]
+        const rawVersion = firstSegment.serviceVariationVersion || firstSegment.service_variation_version
+        if (rawVersion) {
+          updateFields.push('service_variation_version = $' + (updateValues.length + 1) + '::bigint')
+          updateValues.push(BigInt(rawVersion).toString())
+        }
+      }
+      
+      // Always update updated_at and raw_json
+      updateFields.push('updated_at = $' + (updateValues.length + 1) + '::timestamptz')
+      updateValues.push(updatedAt)
+      
+      updateFields.push('raw_json = $' + (updateValues.length + 1) + '::jsonb')
+      updateValues.push(safeStringify(bookingData))
+      if (updateFields.length > 0) {
+        const updateQuery = `
+          UPDATE bookings
+          SET ${updateFields.join(', ')}
+          WHERE id = $${updateValues.length + 1}::uuid
+        `
+        updateValues.push(bookingUuid)        
+        await prisma.$executeRawUnsafe(updateQuery, ...updateValues)
+        console.log(`✅ Updated booking ${bookingUuid} (${baseBookingId})`)
+      } else {
+        console.log(`ℹ️ No fields to update for booking ${bookingUuid}`)
+      }
+    }
+
+    const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, bookingData.merchant_id || bookingData.merchantId || null, existingBookings[0]?.organization_id)
+    await upsertBookingSegments(headerBookingId, bookingData, existingBookings[0]?.organization_id)
+
+    console.log(`✅ Successfully processed booking.updated for ${baseBookingId}`)
+      } catch (error) {
+    console.error(`❌ Error processing booking.updated:`, error.message)
+    console.error(`   Stack:`, error.stack)
+    throw error // Re-throw so webhook returns 500 and Square retries
   }
 }
 
@@ -3072,13 +4491,30 @@ async function processBookingCreated(bookingData, runContext = {}) {
     // Extract merchant_id from runContext or bookingData
     const merchantId = runContext?.merchantId || bookingData.merchantId || bookingData.merchant_id || null
     
-    // Resolve organization_id from merchant_id
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = runContext?.organizationId || null
+    
+    // STEP 0: Try to get organization_id from merchant_id if it's already in the payload
     if (!organizationId && merchantId) {
       organizationId = await resolveOrganizationId(merchantId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+      }
+    }
+
+    // STEP 1: Try location_id (always available in webhooks, fast DB lookup)
+    if (!organizationId) {
+      const squareLocationId = bookingData.location_id || bookingData.locationId
+      if (squareLocationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${squareLocationId}`)
+        organizationId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        if (organizationId) {
+          console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+        }
+      }
     }
     
-    // If still no organization_id, try to get it from customer
+    // STEP 2: Fallback to customer (if both location and merchant failed)
     if (!organizationId && customerId) {
       try {
         const customerOrg = await prisma.$queryRaw`
@@ -3088,6 +4524,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
         `
         if (customerOrg && customerOrg.length > 0) {
           organizationId = customerOrg[0].organization_id
+          console.log(`✅ Resolved organization_id from customer: ${organizationId}`)
         }
       } catch (error) {
         console.warn(`⚠️ Could not resolve organization_id from customer: ${error.message}`)
@@ -3095,8 +4532,13 @@ async function processBookingCreated(bookingData, runContext = {}) {
     }
     
     if (!organizationId) {
-      console.error(`❌ Cannot process booking: organization_id is required but could not be resolved`)
-      return
+      console.error(`❌ CRITICAL: Cannot process booking: organization_id is required but could not be resolved`)
+      console.error(`   Booking ID: ${bookingId}`)
+      console.error(`   Customer ID: ${customerId}`)
+      console.error(`   Merchant ID: ${merchantId || 'missing'}`)
+      console.error(`   Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
+      console.error(`   Attempted: merchant_id lookup, customer lookup, location_id lookup (with Square API)`)
+      throw new Error(`Cannot process booking: organization_id is required but could not be resolved. Booking ID: ${bookingId}, Customer ID: ${customerId}, Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
     }
     
     if (segments.length === 0) {
@@ -3110,6 +4552,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
       console.log(`✅ Saved ${segments.length} booking record(s) for booking ${bookingId}`)
     }
 
+    const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
+    await upsertBookingSegments(headerBookingId, bookingData, organizationId)
+
     // Check if customer exists in our database
     console.log('🔍 Step 1: Checking if customer exists in database...')
     let customerExists = await prisma.$queryRaw`
@@ -3120,6 +4565,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
              personal_code, activated_as_referrer
       FROM square_existing_clients 
       WHERE square_customer_id = ${customerId}
+        AND organization_id = ${organizationId}::uuid
     `
     console.log(`   Found ${customerExists?.length || 0} customer(s) in database`)
 
@@ -3135,8 +4581,6 @@ async function processBookingCreated(bookingData, runContext = {}) {
         console.log(`📥 Fetching customer from Square:`, safeStringify(squareCustomer))
         
         // Add customer to database
-        const ipAddress = 'unknown' // No IP from Square API
-        
         const squareGivenName = cleanValue(squareCustomer.givenName)
         const squareFamilyName = cleanValue(squareCustomer.familyName)
         const squareEmail = cleanValue(squareCustomer.emailAddress)
@@ -3144,6 +4588,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
         await prisma.$executeRaw`
           INSERT INTO square_existing_clients (
+            organization_id,
             square_customer_id,
             given_name,
             family_name,
@@ -3154,12 +4599,12 @@ async function processBookingCreated(bookingData, runContext = {}) {
             personal_code,
             gift_card_id,
             used_referral_code,
-            first_ip_address,
-            ip_addresses,
             referral_email_sent,
+            raw_json,
             created_at,
             updated_at
           ) VALUES (
+            ${organizationId}::uuid,
             ${customerId},
             ${squareGivenName},
             ${squareFamilyName},
@@ -3170,17 +4615,17 @@ async function processBookingCreated(bookingData, runContext = {}) {
             NULL,
             NULL,
             NULL,
-            ${ipAddress},
-            ARRAY[${ipAddress}],
             FALSE,
+            ${safeStringify(squareCustomer)}::jsonb,
             NOW(),
             NOW()
           )
-          ON CONFLICT (square_customer_id) DO UPDATE SET
+          ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
             given_name = COALESCE(square_existing_clients.given_name, EXCLUDED.given_name),
             family_name = COALESCE(square_existing_clients.family_name, EXCLUDED.family_name),
             email_address = COALESCE(square_existing_clients.email_address, EXCLUDED.email_address),
             phone_number = COALESCE(square_existing_clients.phone_number, EXCLUDED.phone_number),
+            raw_json = COALESCE(square_existing_clients.raw_json, EXCLUDED.raw_json),
             updated_at = NOW()
         `
         
@@ -3194,17 +4639,63 @@ async function processBookingCreated(bookingData, runContext = {}) {
                  gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email
           FROM square_existing_clients 
           WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
         `
         customerExists = newCustomerData
       } catch (error) {
         console.error(`❌ Error fetching/adding customer from Square:`, error.message)
+        
+        // Try to find customer again in case they were added by another process
+        try {
+          const retryCustomer = await prisma.$queryRaw`
+            SELECT square_customer_id, got_signup_bonus, used_referral_code, email_address,
+                   given_name, family_name, phone_number, gift_card_id,
+                   gift_card_order_id, gift_card_line_item_uid, gift_card_delivery_channel,
+                   gift_card_activation_url, gift_card_pass_kit_url, gift_card_digital_email,
+                   personal_code, activated_as_referrer
+            FROM square_existing_clients 
+            WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
+          `
+          if (retryCustomer && retryCustomer.length > 0) {
+            console.log(`✅ Customer found on retry after insert error`)
+            customerExists = retryCustomer
+          } else {
+            console.error(`❌ Customer insert failed and customer not found in DB. Cannot proceed with referral check.`)
         return
+          }
+        } catch (retryError) {
+          console.error(`❌ Error retrying customer lookup: ${retryError.message}`)
+          return
+        }
       }
     }
 
     console.log('🔍 Step 2: Getting customer record...')
     const customer = customerExists[0]
     console.log(`   Customer: ${customer.given_name} ${customer.family_name}`)
+
+    // Set first_visit_at when this is customer's first booking (no prior bookings, no prior service payments)
+    const bookingStartAt = bookingData.start_at || bookingData.startAt
+    if (bookingStartAt) {
+      const hasPriorBookings = await checkCustomerHasPreviousBookings(
+        organizationId, customerId, bookingId, bookingStartAt
+      )
+      const hasPriorServicePayments = await checkCustomerHasPriorServicePayments(
+        organizationId, customerId, bookingStartAt
+      )
+      if (!hasPriorBookings && !hasPriorServicePayments) {
+        await prisma.$executeRaw`
+          UPDATE square_existing_clients
+          SET first_visit_at = ${new Date(bookingStartAt)}::timestamptz,
+              updated_at = NOW()
+          WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
+            AND (first_visit_at IS NULL OR first_visit_at > ${new Date(bookingStartAt)}::timestamptz)
+        `
+        console.log(`   ✅ Set first_visit_at = ${bookingStartAt} for customer ${customerId}`)
+      }
+    }
 
     if ((!customer.given_name || !customer.family_name || !customer.email_address || !customer.phone_number)) {
       const squareCustomer = await fetchSquareCustomerProfile(customerId)
@@ -3221,8 +4712,10 @@ async function processBookingCreated(bookingData, runContext = {}) {
             family_name = COALESCE(square_existing_clients.family_name, ${squareFamilyName}),
             email_address = COALESCE(square_existing_clients.email_address, ${squareEmail}),
             phone_number = COALESCE(square_existing_clients.phone_number, ${squarePhone}),
+            raw_json = COALESCE(square_existing_clients.raw_json, ${safeStringify(squareCustomer)}::jsonb),
             updated_at = NOW()
           WHERE square_customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
         `
       }
     }
@@ -3287,7 +4780,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             fieldKey.includes('ref')
 
           if (looksLikeReferralField || (value && value.length <= 20 && value.split(' ').length <= 3)) {
-            const testReferrer = await findReferrerByCode(value)
+            const testReferrer = await findReferrerByCode(value, organizationId)
             if (testReferrer) {
               referralCode = value
               referralCodeSource = 'booking.custom_fields'
@@ -3333,7 +4826,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
               fieldKey.includes('ref')
 
             if (looksLikeReferralField || (value && value.length <= 20 && value.split(' ').length <= 3)) {
-              const testReferrer = await findReferrerByCode(value)
+              const testReferrer = await findReferrerByCode(value, organizationId)
               if (testReferrer) {
                 referralCode = value
                 referralCodeSource = 'appointment_segments.custom_fields'
@@ -3362,7 +4855,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
       if (attributes['referral_code']) {
         const codeValue = attributes['referral_code']
         console.log(`   🎯 Found 'referral_code' attribute with value: "${codeValue}"`)
-        const testReferrer = await findReferrerByCode(codeValue)
+        const testReferrer = await findReferrerByCode(codeValue, organizationId)
         if (testReferrer) {
           referralCode = codeValue
           referralCodeSource = 'customer.custom_attributes[referral_code]'
@@ -3392,7 +4885,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
             
             // Try to match this value as a referral code by checking if it exists in our database
             // If code exists in database, it means referrer completed first payment and has personal_code
-            const testReferrer = await findReferrerByCode(value)
+            const testReferrer = await findReferrerByCode(value, organizationId)
             console.log(`   🔍 Database lookup result for "${value}":`, testReferrer ? `FOUND - ${testReferrer.given_name} ${testReferrer.family_name}` : 'NOT FOUND')
             
             if (testReferrer) {
@@ -3431,6 +4924,19 @@ async function processBookingCreated(bookingData, runContext = {}) {
       }
     }
 
+    // Update referral_checked_at to track that validation was performed
+    try {
+      await prisma.$executeRaw`
+        UPDATE square_existing_clients
+        SET referral_checked_at = NOW()
+        WHERE square_customer_id = ${customerId}
+          AND organization_id = ${organizationId}::uuid
+      `
+    } catch (updateError) {
+      console.warn(`⚠️ Failed to update referral_checked_at: ${updateError.message}`)
+      // Non-critical, continue processing
+    }
+
     // NOW check for referral code and give gift card
     if (referralCode) {
       console.log(`🎁 Customer used referral code: ${referralCode}`)
@@ -3439,8 +4945,51 @@ async function processBookingCreated(bookingData, runContext = {}) {
       console.log(`   📋 Customer personal_code: ${customer.personal_code || 'N/A'}`)
       console.log(`   📍 Code source: ${referralCodeSource || 'unknown'}`)
 
+      // CRITICAL: Validate that this is a NEW customer (never booked before)
+      // Use start_at (service time) not created_at (booking creation time)
+      // Square allows booking creation at arbitrary times, so created_at ≠ service chronology
+      const currentBookingStartAt = bookingData.start_at || 
+                                    bookingData.startAt || 
+                                    bookingData.appointment_segments?.[0]?.start_at ||
+                                    bookingData.appointmentSegments?.[0]?.startAt ||
+                                    null
+
+      if (!currentBookingStartAt) {
+        console.warn(`⚠️ Cannot determine booking start_at, skipping referral validation`)
+        // Continue processing but log warning
+      } else {
+        // Check if customer has previous bookings (using start_at for chronological accuracy)
+        const hasPreviousBookings = await checkCustomerHasPreviousBookings(
+          organizationId, // CRITICAL: Must pass organization_id
+          customerId, 
+          bookingId, 
+          currentBookingStartAt
+        )
+
+        if (hasPreviousBookings) {
+          console.log(`❌ BLOCKED: Customer has previous bookings`)
+          console.log(`   ⚠️ Referral codes can only be used by NEW customers (never booked before)`)
+          console.log(`   📝 Referral code will NOT be saved`)
+          return // Don't process referral code
+        }
+
+        // Check if customer has previous payments
+        const hasPreviousPayments = await checkCustomerHasPreviousPayments(
+          organizationId, // CRITICAL: Must pass organization_id
+          customerId,
+          currentBookingStartAt
+        )
+
+        if (hasPreviousPayments) {
+          console.log(`❌ BLOCKED: Customer has previous payments`)
+          console.log(`   ⚠️ Referral codes can only be used by NEW customers (never paid before)`)
+          console.log(`   📝 Referral code will NOT be saved`)
+          return
+        }
+      }
+
       // Find the referrer
-      const referrer = await findReferrerByCode(referralCode)
+      const referrer = await findReferrerByCode(referralCode, organizationId)
 
       if (referrer) {
         console.log(`👤 Found referrer: ${referrer.given_name} ${referrer.family_name}`)
@@ -3541,32 +5090,35 @@ async function processBookingCreated(bookingData, runContext = {}) {
           `${customer.given_name || ''} ${customer.family_name || ''}`.trim(),
           rewardAmountCents, // $10
           false, // Friend gift card
-          friendGiftCardOptions
+          friendGiftCardOptions,
+          organizationId
         )
 
         if (friendGiftCard?.giftCardId) {
-          // Update customer with gift card
-          // Save used_referral_code to ReferralProfile (new normalized table)
+          // Update customer with gift card in a transaction for atomicity
           try {
-            await prisma.referralProfile.upsert({
-              where: { square_customer_id: customerId },
-              update: {
-                used_referral_code: referralCode,
-                updated_at: new Date()
-              },
-              create: {
-                square_customer_id: customerId,
-                used_referral_code: referralCode
-              }
-            })
-            console.log(`✅ Updated ReferralProfile with used_referral_code: ${referralCode}`)
-          } catch (profileError) {
-            console.warn(`⚠️ Failed to update ReferralProfile with used_referral_code: ${profileError.message}`)
-            // Continue - non-critical error
-          }
-          
-          // Also update square_existing_clients for backward compatibility
-          await prisma.$executeRaw`
+            await prisma.$transaction(async (tx) => {
+              // Save used_referral_code to ReferralProfile (new normalized table)
+              await tx.referralProfile.upsert({
+                where: {
+                  organization_id_square_customer_id: {
+                    organization_id: organizationId,
+                    square_customer_id: customerId
+                  }
+                },
+                update: {
+                  used_referral_code: referralCode,
+                  updated_at: new Date()
+                },
+                create: {
+                  organization_id: organizationId,
+                  square_customer_id: customerId,
+                  used_referral_code: referralCode
+                }
+              })
+              
+              // Also update square_existing_clients for backward compatibility
+              await tx.$executeRaw`
             UPDATE square_existing_clients 
             SET 
               got_signup_bonus = TRUE,
@@ -3581,7 +5133,17 @@ async function processBookingCreated(bookingData, runContext = {}) {
               used_referral_code = ${referralCode},
               updated_at = NOW()
             WHERE square_customer_id = ${customerId}
-          `
+                  AND organization_id = ${organizationId}::uuid
+              `
+            }, {
+              timeout: 30000,
+              isolationLevel: 'ReadCommitted'
+            })
+            console.log(`✅ Updated ReferralProfile and square_existing_clients with gift card info and used_referral_code: ${referralCode}`)
+          } catch (profileError) {
+            console.warn(`⚠️ Failed to update ReferralProfile and square_existing_clients: ${profileError.message}`)
+            // Continue - non-critical error, but log it
+          }
 
           console.log(`✅ Friend received $10 gift card IMMEDIATELY: ${friendGiftCard.giftCardId}`)
           console.log(`   - Customer: ${customer.given_name} ${customer.family_name}`)
@@ -3612,21 +5174,22 @@ async function processBookingCreated(bookingData, runContext = {}) {
             
             try {
               const emailResult = await sendGiftCardEmailNotification({
-                customerName: friendNameBase || friendEmail || 'there',
-                email: friendEmail,
-                giftCardGan: friendGiftCard.giftCardGan,
-                amountCents: friendGiftCard.amountCents,
-                balanceCents: friendGiftCard.balanceCents,
-                activationUrl: friendGiftCard.activationUrl,
-                passKitUrl: friendGiftCard.passKitUrl,
-                giftCardId: friendGiftCard.giftCardId,
-                waitForPassKit: true,
-                locationId: bookingLocationId,
-                notificationMetadata: {
-                  customerId,
-                  referralCode
-                }
-              })
+              customerName: friendNameBase || friendEmail || 'there',
+              email: friendEmail,
+              giftCardGan: friendGiftCard.giftCardGan,
+              amountCents: friendGiftCard.amountCents,
+              balanceCents: friendGiftCard.balanceCents,
+              activationUrl: friendGiftCard.activationUrl,
+              passKitUrl: friendGiftCard.passKitUrl,
+              giftCardId: friendGiftCard.giftCardId,
+              waitForPassKit: true,
+              locationId: bookingLocationId,
+              notificationMetadata: {
+                customerId,
+                referralCode,
+                organizationId // Add organizationId here
+              }
+            })
               
               if (emailResult?.success === false && emailResult?.skipped) {
                 console.log(`⚠️ Email skipped: ${emailResult.reason}`)
@@ -3647,12 +5210,16 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
           // Create ReferralReward record for friend signup bonus
           try {
-            const giftCardRecord = await prisma.giftCard.findUnique({
-              where: { square_gift_card_id: friendGiftCard.giftCardId }
+            const giftCardRecord = await prisma.giftCard.findFirst({
+              where: {
+                organization_id: organizationId,
+                square_gift_card_id: friendGiftCard.giftCardId
+              }
             })
             
             await prisma.referralReward.create({
               data: {
+                organization_id: organizationId,
                 referrer_customer_id: referrer.square_customer_id,
                 referred_customer_id: customerId,
                 reward_amount_cents: rewardAmountCents, // 1000 cents = $10
@@ -3757,6 +5324,8 @@ async function processBookingCreated(bookingData, runContext = {}) {
 
 // Note: These functions are available via lib/webhooks/giftcard-processors.js
 // We cannot export them here as Next.js routes only allow HTTP method exports
+
+export const dynamic = 'force-dynamic'
 
 export async function POST(request) {
   try {
@@ -4006,10 +5575,11 @@ export async function POST(request) {
     const webhookData = JSON.parse(body)
     console.log('📡 Received Square webhook:', webhookData.type)
     console.log('📦 Full webhook data:', safeStringify(webhookData))
-
     // Process customer.created events (new customer detected)
     if (webhookData.type === 'customer.created') {
-      const customerData = webhookData.data.object.customer
+      const customerData = webhookData.data?.object?.customer || 
+                          webhookData.data?.customer || 
+                          webhookData.customer
       
       if (customerData && (customerData.id || customerData.customerId || customerData.customer_id)) {
         const customerResourceId = customerData.id || customerData.customerId || customerData.customer_id
@@ -4019,7 +5589,31 @@ export async function POST(request) {
           resourceId: customerResourceId
         })
 
-        const runContext = { correlationId }
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || customerData.merchantId || customerData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
+        // STEP 1: Fallback to location_id if merchant_id resolution failed
+        if (!organizationId) {
+          const locationId = 
+            webhookData.location_id || 
+            webhookData.locationId || 
+            customerData?.location_id || 
+            customerData?.locationId ||
+            null
+            
+          if (locationId) {
+            console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+            organizationId = await resolveOrganizationIdFromLocationId(locationId)
+          }
+        }
+
+        const runContext = { correlationId, merchantId, organizationId }
         const requestStub = { headers: { get: () => null }, connection: null }
 
         // Try to queue the job (async processing)
@@ -4031,7 +5625,9 @@ export async function POST(request) {
           context: {
             customerId: customerResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4123,7 +5719,9 @@ export async function POST(request) {
 
     // Process booking.created events (when customer actually books)
     if (webhookData.type === 'booking.created') {
-      const bookingData = webhookData.data.object.booking
+      const bookingData = webhookData.data?.object?.booking || 
+                         webhookData.data?.booking || 
+                         webhookData.booking
       
       console.log('🚀 About to process booking.created')
       console.log('   bookingData.customer_id:', bookingData?.customer_id)
@@ -4141,13 +5739,55 @@ export async function POST(request) {
         // Extract merchant_id from webhook event
         const merchantId = webhookData.merchant_id || webhookData.merchantId || bookingData.merchantId || bookingData.merchant_id || null
         
-        // Resolve organization_id from merchant_id
-        let organizationId = null
-        if (merchantId) {
-          organizationId = await resolveOrganizationId(merchantId)
-        }
+    // Resolve organization_id from merchant_id
+    let organizationId = null
+    if (merchantId) {
+      organizationId = await resolveOrganizationId(merchantId)
+    }
+    
+    // STEP 1: Fallback to location_id if merchant_id resolution failed
+    if (!organizationId) {
+      const locationId = 
+        webhookData.location_id || 
+        webhookData.locationId || 
+        bookingData?.location_id || 
+        bookingData?.locationId ||
+        bookingData?.location?.id ||
+        null
         
-        const runContext = { correlationId, merchantId, organizationId }
+      if (locationId) {
+        console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+        organizationId = await resolveOrganizationIdFromLocationId(locationId)
+      }
+    }
+
+    const runContext = { correlationId, merchantId, organizationId }
+
+        // Best-effort enqueue for bookings table persistence (webhook-jobs)
+        let queuePrisma = null
+        try {
+          // eslint-disable-next-line global-require
+          const { enqueueWebhookJob } = require('../../../../../lib/workflows/webhook-job-queue')
+          // eslint-disable-next-line global-require
+          const { PrismaClient } = require('@prisma/client')
+          queuePrisma = new PrismaClient()
+
+          await enqueueWebhookJob(queuePrisma, {
+            eventType: 'booking.created',
+            eventId: webhookData.event_id,
+            eventCreatedAt: webhookData.created_at,
+            payload: webhookData.data || {},
+            organizationId: organizationId
+          })
+
+          console.log(`📦 Enqueued booking.created (${webhookData.event_id}) for bookings persistence`)
+        } catch (enqueueError) {
+          console.warn(`⚠️ Failed to enqueue booking.created for persistence:`, enqueueError.message)
+        } finally {
+          if (queuePrisma) {
+            await queuePrisma.$disconnect().catch(() => {})
+          }
+        }
 
         // Try to queue the job (async processing)
         const jobQueued = await enqueueGiftCardJob(prisma, {
@@ -4159,7 +5799,9 @@ export async function POST(request) {
             customerId: bookingData.customerId || bookingData.customer_id || null,
             bookingId: bookingResourceId || null,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4257,10 +5899,117 @@ export async function POST(request) {
         })
       }
     }
+    // Process booking.updated events (when booking is modified)
+    if (webhookData.type === 'booking.updated') {      
+      const bookingData = webhookData.data?.object?.booking || webhookData.data?.booking      
+      console.log('📅 Processing booking.updated event')
+      console.log('   Booking ID:', bookingData?.id || bookingData?.bookingId || 'missing')
+      console.log('   Status:', bookingData?.status || 'missing')
+      
+      if (bookingData) {
+        try {          
+          await processBookingUpdated(bookingData, webhookData.event_id, webhookData.created_at)          
+          console.log('✅ Booking updated webhook processed successfully')
+          
+          return Response.json({
+            success: true,
+            processed: true,
+            bookingId: bookingData.id || bookingData.bookingId
+          }, { status: 200 })
+        } catch (bookingError) {          
+          console.error(`❌ Error processing booking.updated webhook:`, bookingError.message)
+          console.error(`   Stack:`, bookingError.stack)
+          // Re-throw to return 500 so Square will retry
+          throw bookingError
+        }
+      } else {        
+        console.warn(`⚠️ Booking updated webhook received but booking data is missing`)
+        console.warn(`   Tried: webhookData.data?.object?.booking, webhookData.data?.booking`)
+        console.warn(`   webhookData.data keys:`, webhookData.data ? Object.keys(webhookData.data).join(', ') : 'N/A')
+        
+        return Response.json({
+          success: false,
+          error: 'Booking data missing from webhook'
+        }, { status: 400 })
+      }
+    }
 
     // Process payment.created events (any payment type including cash)
     if (webhookData.type === 'payment.created') {
       const paymentData = webhookData.data.object.payment
+      
+      // Debug: Log payment data structure to verify location_id is present
+      if (paymentData) {
+        console.log(`🔍 Payment.created webhook - checking location_id:`)
+        console.log(`   Payment ID: ${paymentData.id || paymentData.paymentId || 'unknown'}`)
+        console.log(`   location_id (snake_case): ${paymentData.location_id || 'MISSING'}`)
+        console.log(`   locationId (camelCase): ${paymentData.locationId || 'MISSING'}`)
+        console.log(`   order_id: ${paymentData.order_id || paymentData.orderId || 'MISSING'}`)
+      }
+      
+      // CRITICAL: Save payment to database first (before gift card processing)
+      // This ensures payments are stored even if gift card processing fails
+      if (paymentData) {
+        let paymentSaveSuccess = false
+        try {
+          console.log(`💾 Attempting to save payment ${paymentData.id || paymentData.paymentId || 'unknown'} to database...`)
+          const savePayment = await getSavePaymentToDatabase()
+          if (savePayment && typeof savePayment === 'function') {
+            await savePayment(paymentData, webhookData.type, webhookData.event_id, webhookData.created_at)
+            console.log('✅ Payment saved to database')
+            paymentSaveSuccess = true
+          } else {
+            console.error('❌ savePaymentToDatabase function not available or not a function')
+            console.error(`   Type: ${typeof savePayment}, Value: ${savePayment}`)
+          }
+        } catch (paymentSaveError) {
+          console.error(`❌ Error saving payment to database: ${paymentSaveError.message}`)
+          console.error('   Stack:', paymentSaveError.stack)
+          // Don't throw - we'll enqueue a job as fallback
+        }
+        
+        // FALLBACK: If immediate save failed, enqueue a payment_save job for cron to process
+        if (!paymentSaveSuccess) {
+          console.warn('⚠️ Immediate payment save failed, enqueueing payment_save job as fallback...')
+          try {
+            const paymentResourceId = paymentData.id || paymentData.paymentId
+            const customerIdFromPayment = paymentData.customerId || paymentData.customer_id || null
+            const correlationId = buildCorrelationId({
+              triggerType: webhookData.type,
+              eventId: webhookData.event_id,
+              resourceId: paymentResourceId || customerIdFromPayment || 'payment-save-fallback'
+            })
+            
+            // Extract merchant_id for context
+            const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+            let organizationId = null
+            if (merchantId) {
+              organizationId = await resolveOrganizationId(merchantId)
+            }
+            
+            await enqueueGiftCardJob(prisma, {
+              correlationId,
+              triggerType: webhookData.type,
+              stage: 'payment_save', // New stage for payment saving
+              payload: paymentData,
+              context: {
+                squareEventId: webhookData.event_id,
+                squareEventType: webhookData.type,
+                squareCreatedAt: webhookData.created_at,
+                merchantId,
+                organizationId,
+                paymentId: paymentResourceId,
+                customerId: customerIdFromPayment,
+                fallback: true // Mark as fallback job
+              }
+            })
+            console.log('✅ Payment save job enqueued as fallback')
+          } catch (enqueueError) {
+            console.error(`❌ Failed to enqueue payment save job: ${enqueueError.message}`)
+            // Still continue with gift card processing
+          }
+        }
+      }
       
       console.log('💰 Received payment.created event')
       console.log('   Payment data:', safeStringify(paymentData))
@@ -4275,7 +6024,16 @@ export async function POST(request) {
           resourceId: paymentResourceId || customerIdFromPayment
         })
 
-        const runContext = { correlationId }
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
+        const runContext = { correlationId, merchantId, organizationId }
 
         // Try to queue the job (async processing)
         const jobQueued = await enqueueGiftCardJob(prisma, {
@@ -4287,7 +6045,9 @@ export async function POST(request) {
             customerId: customerIdFromPayment,
             paymentId: paymentResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4380,7 +6140,103 @@ export async function POST(request) {
 
     // Process payment.updated events (status changes like refunds, voids, etc.)
     if (webhookData.type === 'payment.updated') {
-      const paymentData = webhookData.data.object.payment
+      const paymentData = webhookData.data?.object?.payment ||
+                         webhookData.data?.payment ||
+                         webhookData.payment
+      // Debug: Log payment data structure to verify location_id is present
+      if (paymentData) {
+        console.log(`🔍 Payment.updated webhook - checking location_id:`)
+        console.log(`   Payment ID: ${paymentData.id || paymentData.paymentId || 'unknown'}`)
+        console.log(`   location_id (snake_case): ${paymentData.location_id || 'MISSING'}`)
+        console.log(`   locationId (camelCase): ${paymentData.locationId || 'MISSING'}`)
+        console.log(`   order_id: ${paymentData.order_id || paymentData.orderId || 'MISSING'}`)
+        console.log(`   merchant_id: ${paymentData.merchant_id || paymentData.merchantId || 'MISSING'}`)
+        
+        // According to Square docs, payment.updated should include location_id
+        // If it's missing, this might indicate a data issue or API version difference
+        if (!paymentData.location_id && !paymentData.locationId) {
+          console.warn(`⚠️ WARNING: Payment.updated webhook missing location_id (should be present per Square API docs)`)
+          console.warn(`   Payment object keys:`, Object.keys(paymentData).join(', '))
+        }
+      }
+      
+      // CRITICAL: Save payment to database first (before gift card processing)
+      // This ensures payments are stored even if gift card processing fails
+      if (paymentData) {
+        let paymentSaveSuccess = false
+        try {
+          console.log(`💾 Attempting to save payment ${paymentData.id || paymentData.paymentId || 'unknown'} to database...`)
+          const savePayment = await getSavePaymentToDatabase()
+          if (savePayment && typeof savePayment === 'function') {
+            await savePayment(paymentData, webhookData.type, webhookData.event_id, webhookData.created_at)
+            console.log('✅ Payment saved to database')
+            paymentSaveSuccess = true
+          } else {
+            console.error('❌ savePaymentToDatabase function not available or not a function')
+            console.error(`   Type: ${typeof savePayment}, Value: ${savePayment}`)
+          }
+        } catch (paymentSaveError) {
+          console.error(`❌ Error saving payment to database: ${paymentSaveError.message}`)
+          console.error('   Stack:', paymentSaveError.stack)
+          // Don't throw - we'll enqueue a job as fallback
+        }
+        
+        // FALLBACK: If immediate save failed, enqueue a payment_save job for cron to process
+        if (!paymentSaveSuccess) {
+          console.warn('⚠️ Immediate payment save failed, enqueueing payment_save job as fallback...')
+          try {
+            const paymentResourceId = paymentData.id || paymentData.paymentId
+            const customerIdFromPayment = paymentData.customerId || paymentData.customer_id || null
+            const correlationId = buildCorrelationId({
+              triggerType: webhookData.type,
+              eventId: webhookData.event_id,
+              resourceId: paymentResourceId || customerIdFromPayment || 'payment-save-fallback'
+            })
+            
+            // Extract merchant_id for context
+            const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+            let organizationId = null
+            if (merchantId) {
+              organizationId = await resolveOrganizationId(merchantId)
+            }
+            
+            await enqueueGiftCardJob(prisma, {
+              correlationId,
+              triggerType: webhookData.type,
+              stage: 'payment_save', // New stage for payment saving
+              payload: paymentData,
+              context: {
+                squareEventId: webhookData.event_id,
+                squareEventType: webhookData.type,
+                squareCreatedAt: webhookData.created_at,
+                merchantId,
+                organizationId,
+                paymentId: paymentResourceId,
+                customerId: customerIdFromPayment,
+                fallback: true // Mark as fallback job
+              }
+            })
+            console.log('✅ Payment save job enqueued as fallback')
+          } catch (enqueueError) {
+            console.error(`❌ Failed to enqueue payment save job: ${enqueueError.message}`)
+            // Still continue with gift card processing
+          }
+        }
+      } else {
+        console.warn('⚠️ payment.updated webhook: paymentData is null, cannot save payment')
+      }
+      
+      // Process gift card redemptions for ALL payment updates (not just first payment)
+      // This ensures we capture REDEEM transactions even if payment processing logic skips
+      // Resolve organization_id from payment location
+      let paymentOrgId = null
+      if (paymentData) {
+        const squareLocationId = paymentData.location_id || paymentData.locationId
+        if (squareLocationId) {
+          paymentOrgId = await resolveOrganizationIdFromLocationId(squareLocationId)
+        }
+      }
+      await processGiftCardRedemptions(paymentData, paymentOrgId)
       
       console.log('💰 Received payment.updated event')
       
@@ -4394,6 +6250,15 @@ export async function POST(request) {
           resourceId: paymentResourceId || customerIdFromPayment
         })
 
+        // Extract merchant_id from webhook event
+        const merchantId = webhookData.merchant_id || webhookData.merchantId || paymentData.merchantId || paymentData.merchant_id || null
+        
+        // Resolve organization_id from merchant_id
+        let organizationId = null
+        if (merchantId) {
+          organizationId = await resolveOrganizationId(merchantId)
+        }
+
         await ensureGiftCardRun(prisma, {
           correlationId,
           triggerType: webhookData.type,
@@ -4405,7 +6270,9 @@ export async function POST(request) {
           payload: paymentData,
           context: {
             customerId: customerIdFromPayment,
-            paymentId: paymentResourceId
+            paymentId: paymentResourceId,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4418,7 +6285,9 @@ export async function POST(request) {
             customerId: customerIdFromPayment,
             paymentId: paymentResourceId,
             squareEventId: webhookData.event_id,
-            squareEventType: webhookData.type
+            squareEventType: webhookData.type,
+            merchantId: merchantId,
+            organizationId: organizationId
           }
         })
 
@@ -4449,7 +6318,72 @@ export async function POST(request) {
       }
     }
 
-    // For other event types, just acknowledge receipt
+    // Process order.created and order.updated events
+    if (webhookData.type === 'order.created' || webhookData.type === 'order.updated') {
+      console.log(`📦 Order ${webhookData.type === 'order.created' ? 'created' : 'updated'} event received`)
+      
+      // Extract merchant_id from webhook event
+      const merchantId = webhookData.merchant_id || webhookData.merchantId || null
+      // Resolve organization_id from merchant_id
+      let organizationId = null
+      if (merchantId) {
+        organizationId = await resolveOrganizationId(merchantId)
+      }
+
+      // STEP 1: Fallback to location_id if merchant_id resolution failed
+      if (!organizationId) {
+        const orderData = webhookData.data?.object?.order_created || 
+                         webhookData.data?.object?.order_updated ||
+                         webhookData.data?.object?.order ||
+                         webhookData.data?.order ||
+                         webhookData.order
+        
+        const locationId = 
+          webhookData.location_id || 
+          webhookData.locationId || 
+          orderData?.location_id || 
+          orderData?.locationId ||
+          null
+        if (locationId) {
+          console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+          organizationId = await resolveOrganizationIdFromLocationId(locationId)
+        }
+      }
+
+      try {
+        const processOrder = await getProcessOrderWebhook()
+        if (processOrder) {
+          // Pass organizationId in context if available
+          await processOrder(webhookData.data, webhookData.type, { organizationId })
+          console.log(`✅ Order webhook processed successfully`)
+        return Response.json({
+          success: true,
+            message: `Order ${webhookData.type} processed`,
+            eventType: webhookData.type,
+            organizationId
+          })
+        } else {
+          console.error('❌ processOrderWebhook function not available')
+        return Response.json({
+            success: false,
+            message: 'Order processing unavailable',
+            eventType: webhookData.type
+          }, { status: 500 })
+        }
+      } catch (orderError) {
+        console.error(`❌ Error processing order webhook:`, orderError.message)
+        console.error('Stack:', orderError.stack)
+        // Return 200 to acknowledge receipt but log the error
+        return Response.json({
+          success: false,
+          message: `Order processing error: ${orderError.message}`,
+          eventType: webhookData.type,
+          acknowledged: true
+        })
+      }
+    }
+
+    // For other event types, just acknowledge receipt    
     return Response.json({
       success: true,
       message: 'Webhook received',
@@ -4477,6 +6411,9 @@ export async function POST(request) {
     )
   }
 }
+
+// Export processBookingUpdated for use in main webhook route
+export { processBookingUpdated }
 
 // Handle GET requests for webhook verification
 export async function GET(request) {

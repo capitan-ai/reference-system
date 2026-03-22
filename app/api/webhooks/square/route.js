@@ -1,43 +1,419 @@
 import crypto from 'crypto'
+import { createRequire } from 'module'
+import { Prisma } from '@prisma/client'
 import prisma from '../../../../lib/prisma-client'
+import locationResolver from '../../../../lib/location-resolver'
+
+const require = createRequire(import.meta.url)
+const { logInfo, logWarn, logError, logDebug } = require('../../../../lib/observability/logger')
+const { resolveLocationUuidForSquareLocationId } = locationResolver
+
+// Helper to safely stringify objects with BigInt values
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value, (_key, val) => 
+      typeof val === 'bigint' ? val.toString() : val
+    )
+  } catch (error) {
+    // If stringification fails (circular reference, etc.), return a safe fallback
+    console.warn('⚠️ safeStringify failed, using fallback:', error.message)
+    try {
+      // Try again with a more aggressive replacer that handles more edge cases
+      return JSON.stringify(value, (_key, val) => {
+        if (typeof val === 'bigint') return val.toString()
+        if (val === undefined) return null
+        if (typeof val === 'function') return '[Function]'
+        if (val instanceof Error) return val.message
+        return val
+      })
+    } catch (fallbackError) {
+      return '[Unserializable value]'
+    }
+  }
+}
+
+// Helper to safely serialize data for JSON responses (converts BigInt to string)
+function serializeBigInt(data) {
+  return JSON.parse(
+    JSON.stringify(data, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value
+    )
+  )
+}
+
+// Helper to safely log errors that might contain BigInt values
+function safeLogError(message, error) {
+  const errorInfo = {
+    message: error?.message || String(error),
+    name: error?.name,
+    code: error?.code,
+    stack: error?.stack?.split('\n').slice(0, 5).join('\n')
+  }
+  console.error(message, safeStringify(errorInfo))
+}
 
 // Import square-env using dynamic require inside function to avoid webpack static analysis
 function getSquareEnvironmentName() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  // eslint-disable-next-line global-require
   const squareEnv = require('../../../../lib/utils/square-env')
   return squareEnv.getSquareEnvironmentName()
 }
 
-// Get Square Orders API
-function getOrdersApi() {
-  // Use dynamic require so bundlers don't evaluate Square SDK at build-time
-  // eslint-disable-next-line global-require
-  const squareModule = require('square')
-  const candidates = [squareModule, squareModule?.default].filter(Boolean)
-  const pick = (selector) => {
-    for (const candidate of candidates) {
-      const value = selector(candidate)
-      if (value) return value
+const { 
+  getOrdersApi, 
+  getLocationsApi, 
+  getBookingsApi 
+} = require('../../../../lib/utils/square-client')
+
+/**
+ * Derive booking_id from Square API
+ * 
+ * This function:
+ * 1. Calls Square Orders API to get full order with line_items
+ * 2. Calls Square Bookings API (listBookings) with customerId, locationId, date range
+ * 3. Matches bookings by service_variation_id overlap
+ * 4. Filters by time: booking.start_at <= order.created_at (service finished before payment)
+ * 5. Selects the closest match by time proximity
+ * 
+ * @param {string} squareOrderId - Square order ID
+ * @returns {Promise<{bookingId: string|null, confidence: string, source: string}>}
+ */
+async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
+  logInfo('derive_booking.start', { logId: correlationId, squareOrderId })
+  
+  try {
+    // Step 1: Get full order from Square API
+    const ordersApi = getOrdersApi()
+    const orderResponse = await ordersApi.retrieveOrder(squareOrderId)
+    const order = orderResponse.result?.order
+    
+    if (!order) {
+      logWarn('derive_booking.order_not_found', { logId: correlationId, squareOrderId })
+      return { bookingId: null, confidence: 'none', source: 'order_not_found' }
     }
+    
+    const customerId = order.customerId
+    const locationId = order.locationId
+    const orderCreatedAt = order.createdAt ? new Date(order.createdAt) : new Date()
+    const lineItems = order.lineItems || []
+    
+    logDebug('derive_booking.order_details', {
+      logId: correlationId,
+      customerId,
+      locationId,
+      orderCreatedAt: orderCreatedAt.toISOString(),
+      lineItemsCount: lineItems.length
+    })
+    
+    if (!customerId) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no customer_id`)
+      return { bookingId: null, confidence: 'none', source: 'no_customer_id' }
+    }
+    
+    if (!locationId) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no location_id`)
+      return { bookingId: null, confidence: 'none', source: 'no_location_id' }
+    }
+    
+    // Extract service_variation_ids (catalog_object_id) from line items
+    const serviceVariationIds = lineItems
+      .map(li => li.catalogObjectId)
+      .filter(id => id && id.startsWith && !id.startsWith('CUSTOM_AMOUNT'))
+    
+    console.log(`   Service Variation IDs: ${serviceVariationIds.join(', ') || 'none'}`)
+    
+    if (serviceVariationIds.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] Order ${squareOrderId} has no service variation IDs`)
+      return { bookingId: null, confidence: 'none', source: 'no_service_variations' }
+    }
+    
+    // Step 2: Get bookings from Square API
+    // Time window: Start of order day to order time (booking happened before payment)
+    const startOfDay = new Date(orderCreatedAt)
+    startOfDay.setHours(0, 0, 0, 0)
+    
+    // End of day + 4 hours buffer (in case of late payment)
+    const endOfWindow = new Date(orderCreatedAt)
+    endOfWindow.setHours(23, 59, 59, 999)
+    
+    console.log(`📅 [DERIVE-BOOKING] Searching bookings:`)
+    console.log(`   Start: ${startOfDay.toISOString()}`)
+    console.log(`   End: ${endOfWindow.toISOString()}`)
+    
+    const bookingsApi = getBookingsApi()
+    let allBookings = []
+    let cursor = null
+    let pageCount = 0
+    const maxPages = 5 // Safety limit
+    
+    do {
+      try {
+        // Square SDK listBookings signature (positional parameters):
+        // listBookings(limit?, cursor?, customerId?, teamMemberId?, locationId?, startAt?, endAt?)
+        const response = await bookingsApi.listBookings(
+          100, // limit
+          cursor || undefined,
+          customerId, // filter by customer
+          undefined, // teamMemberId
+          locationId, // filter by location
+          startOfDay.toISOString(), // start_at_min
+          endOfWindow.toISOString() // start_at_max
+        )
+        
+        const bookings = response.result?.bookings || []
+        allBookings = allBookings.concat(bookings)
+        cursor = response.result?.cursor
+        pageCount++
+        
+        console.log(`   Page ${pageCount}: Found ${bookings.length} bookings (total: ${allBookings.length})`)
+      } catch (apiError) {
+        console.error(`❌ [DERIVE-BOOKING] Square Bookings API error:`, apiError.message)
+        break
+      }
+    } while (cursor && pageCount < maxPages)
+    
+    console.log(`📚 [DERIVE-BOOKING] Total bookings found: ${allBookings.length}`)
+    
+    if (allBookings.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] No bookings found for customer ${customerId} on ${startOfDay.toDateString()}`)
+      return { bookingId: null, confidence: 'none', source: 'no_bookings_found' }
+    }
+    
+    // Step 3: Match bookings by service_variation_id and time
+    const matchedBookings = []
+    
+    for (const booking of allBookings) {
+      const bookingId = booking.id
+      const appointmentSegments = booking.appointmentSegments || []
+      const bookingStartAt = booking.startAt ? new Date(booking.startAt) : null
+      
+      // Get end time (last segment end or calculate from duration)
+      let bookingEndAt = null
+      if (appointmentSegments.length > 0) {
+        const lastSegment = appointmentSegments[appointmentSegments.length - 1]
+        // Duration is in minutes
+        const durationMinutes = lastSegment.durationMinutes || 60
+        if (bookingStartAt) {
+          bookingEndAt = new Date(bookingStartAt.getTime() + durationMinutes * 60 * 1000)
+        }
+      }
+      
+      // Check service_variation_id overlap
+      const bookingServiceIds = appointmentSegments
+        .map(seg => seg.serviceVariationId)
+        .filter(Boolean)
+      
+      const hasServiceOverlap = serviceVariationIds.some(svcId => 
+        bookingServiceIds.includes(svcId)
+      )
+      
+      if (!hasServiceOverlap) {
+        continue // Skip bookings with no matching services
+      }
+      
+      // Check time window: booking ended before or around order time
+      // Allow 4 hours after booking end for payment
+      const maxPaymentDelay = 4 * 60 * 60 * 1000 // 4 hours in ms
+      const latestPaymentTime = bookingEndAt 
+        ? new Date(bookingEndAt.getTime() + maxPaymentDelay)
+        : null
+      
+      // Booking should have started before order was created
+      if (bookingStartAt && bookingStartAt > orderCreatedAt) {
+        continue // Booking is in the future relative to order
+      }
+      
+      // Order should be within 4 hours after booking ended
+      if (latestPaymentTime && orderCreatedAt > latestPaymentTime) {
+        continue // Order too late after booking
+      }
+      
+      // Calculate time difference (for selecting closest match)
+      const timeDiff = bookingEndAt 
+        ? Math.abs(orderCreatedAt.getTime() - bookingEndAt.getTime())
+        : Infinity
+      
+      matchedBookings.push({
+        bookingId,
+        bookingStartAt,
+        bookingEndAt,
+        timeDiff,
+        serviceIds: bookingServiceIds
+      })
+      
+      console.log(`   ✅ Match: Booking ${bookingId}`)
+      console.log(`      Start: ${bookingStartAt?.toISOString()}`)
+      console.log(`      End: ${bookingEndAt?.toISOString()}`)
+      console.log(`      Services: ${bookingServiceIds.join(', ')}`)
+      console.log(`      Time diff: ${Math.round(timeDiff / 60000)} minutes`)
+    }
+    
+    if (matchedBookings.length === 0) {
+      console.warn(`⚠️ [DERIVE-BOOKING] No matching bookings found for order ${squareOrderId}`)
+      return { bookingId: null, confidence: 'none', source: 'no_matching_bookings' }
+    }
+    
+    // Step 4: Select the closest match
+    matchedBookings.sort((a, b) => a.timeDiff - b.timeDiff)
+    const bestMatch = matchedBookings[0]
+    
+    const confidence = matchedBookings.length === 1 ? 'high' : 'medium'
+    
+    console.log(`🎯 [DERIVE-BOOKING] Best match: ${bestMatch.bookingId}`)
+    console.log(`   Confidence: ${confidence} (${matchedBookings.length} candidates)`)
+    console.log(`   Time diff: ${Math.round(bestMatch.timeDiff / 60000)} minutes`)
+    
+    return {
+      bookingId: bestMatch.bookingId,
+      confidence,
+      source: 'derived_via_square_api'
+    }
+    
+  } catch (error) {
+    console.error(`❌ [DERIVE-BOOKING] Error deriving booking for order ${squareOrderId}:`, error.message)
+    if (error.stack) {
+      console.error(`   Stack:`, error.stack.split('\n').slice(0, 3).join('\n'))
+    }
+    return { bookingId: null, confidence: 'none', source: 'error' }
+  }
+}
+
+// Helper: Resolve organization_id from merchant_id
+async function resolveOrganizationId(merchantId) {
+  if (!merchantId) {
     return null
   }
-
-  const Client = pick((mod) => (typeof mod?.Client === 'function' ? mod.Client : null)) ||
-    (typeof candidates[0] === 'function' ? candidates[0] : null)
-  const Environment = pick((mod) => mod?.Environment)
-
-  if (typeof Client !== 'function' || !Environment) {
-    throw new Error('Square SDK exports missing (Client/Environment)')
+  
+  try {
+    const org = await prisma.$queryRaw`
+      SELECT id FROM organizations 
+      WHERE square_merchant_id = ${merchantId}
+      LIMIT 1
+    `
+    
+    if (org && org.length > 0) {
+      return org[0].id
+    }
+    
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id from merchant_id: ${error.message}`)
+    return null
   }
+}
 
-  const squareEnvName = getSquareEnvironmentName()
-  const resolvedEnvironment = squareEnvName === 'sandbox' ? Environment.Sandbox : Environment.Production
-  const squareClient = new Client({
-    accessToken: process.env.SQUARE_ACCESS_TOKEN?.trim(),
-    environment: resolvedEnvironment,
-  })
-
-  return squareClient.ordersApi
+// Helper: Resolve organization_id from location_id (FAST - database first, Square API fallback)
+async function resolveOrganizationIdFromLocationId(squareLocationId) {
+  if (!squareLocationId) {
+    return null
+  }
+  
+  try {
+    // STEP 1: Fast database lookup (most common case)
+    const location = await prisma.$queryRaw`
+      SELECT organization_id, square_merchant_id
+      FROM locations
+      WHERE square_location_id = ${squareLocationId}
+      LIMIT 1
+    `
+    
+    if (location && location.length > 0) {
+      const loc = location[0]
+      
+      // If we have organization_id, return it immediately (fastest path)
+      if (loc.organization_id) {
+        return loc.organization_id
+      }
+      
+      // If we have merchant_id but no organization_id, resolve it
+      if (loc.square_merchant_id) {
+        const org = await prisma.$queryRaw`
+          SELECT id FROM organizations 
+          WHERE square_merchant_id = ${loc.square_merchant_id}
+          LIMIT 1
+        `
+        if (org && org.length > 0) {
+          const orgId = org[0].id
+          // Update location with organization_id for future use
+          await prisma.$executeRaw`
+            UPDATE locations
+            SET organization_id = ${orgId}::uuid,
+                updated_at = NOW()
+            WHERE square_location_id = ${squareLocationId}
+          `
+          return orgId
+        }
+      }
+    }
+    
+    // STEP 2: Location not in DB or missing merchant_id - fetch from Square API
+    console.log(`📍 Location ${squareLocationId} not in database or missing merchant_id, fetching from Square API...`)
+    try {
+      const locationsApi = getLocationsApi()
+      const response = await locationsApi.retrieveLocation(squareLocationId)
+      const location = response.result?.location
+      
+      if (!location) {
+        console.warn(`⚠️ Location ${squareLocationId} not found in Square API`)
+        return null
+      }
+      
+      const merchantId = location.merchant_id || null
+      
+      if (!merchantId) {
+        console.warn(`⚠️ Location ${squareLocationId} missing merchant_id in Square API response`)
+        return null
+      }
+      
+      // Resolve organization_id from merchant_id
+      const org = await prisma.$queryRaw`
+        SELECT id FROM organizations 
+        WHERE square_merchant_id = ${merchantId}
+        LIMIT 1
+      `
+      
+      if (org && org.length > 0) {
+        const orgId = org[0].id
+        
+        // Update or create location with merchant_id and organization_id
+        await prisma.$executeRaw`
+          INSERT INTO locations (
+            id,
+            organization_id,
+            square_location_id,
+            square_merchant_id,
+            name,
+            created_at,
+            updated_at
+          ) VALUES (
+            gen_random_uuid(),
+            ${orgId}::text,
+            ${squareLocationId},
+            ${merchantId},
+            ${location.name || `Location ${squareLocationId.substring(0, 8)}...`},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT (organization_id, square_location_id) DO UPDATE SET
+            square_merchant_id = COALESCE(EXCLUDED.square_merchant_id, locations.square_merchant_id),
+            organization_id = COALESCE(EXCLUDED.organization_id, locations.organization_id),
+            updated_at = NOW()
+        `
+        
+        return orgId
+      }
+    } catch (apiError) {
+      console.error(`❌ Error fetching location from Square API: ${apiError.message}`)
+      if (apiError.errors) {
+        console.error(`   Square API errors:`, JSON.stringify(apiError.errors, null, 2))
+      }
+    }
+    
+    return null
+  } catch (error) {
+    console.error(`❌ Error resolving organization_id from location_id: ${error.message}`)
+    return null
+  }
 }
 
 function verifySquareSignature(payload, signature, webhookSecret) {
@@ -56,93 +432,505 @@ function verifySquareSignature(payload, signature, webhookSecret) {
   }
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const rawBody = await request.text()
-    const signatureHeader = request.headers.get('x-square-hmacsha256-signature') ||
-                           request.headers.get('x-square-signature')
+    const signatureHeader = request.headers.get("x-square-hmacsha256-signature") ||
+                           request.headers.get("x-square-signature")
 
-    console.log('🔔 Webhook received:', {
-      hasSignature: !!signatureHeader,
-      contentType: request.headers.get('content-type')
-    })
-
-    const isTestMode = signatureHeader === 'test-signature-mock'
+    const isTestMode = signatureHeader === "test-signature-mock"
     
     if (!signatureHeader) {
-      console.warn('Missing webhook signature')
-      return new Response(JSON.stringify({ error: 'Missing signature' }), { 
+      logWarn("webhook.missing_signature")
+      return new Response(JSON.stringify({ error: "Missing signature" }), { 
         status: 401,
-        headers: { 'Content-Type': 'application/json' }
+        headers: { "Content-Type": "application/json" }
       })
     }
 
     if (!isTestMode) {
       const webhookSecret = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY
       if (!webhookSecret) {
-        console.error('Missing SQUARE_WEBHOOK_SIGNATURE_KEY environment variable')
-        return new Response(JSON.stringify({ error: 'Webhook secret not configured' }), { 
+        logError("webhook.missing_secret_config")
+        return new Response(JSON.stringify({ error: "Webhook secret not configured" }), { 
           status: 500,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { "Content-Type": "application/json" }
         })
       }
 
       if (!verifySquareSignature(rawBody, signatureHeader, webhookSecret)) {
-        console.error('Invalid Square webhook signature')
-        return new Response(JSON.stringify({ error: 'Invalid signature' }), { 
+        logError("webhook.invalid_signature")
+        return new Response(JSON.stringify({ error: "Invalid signature" }), { 
           status: 401,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { "Content-Type": "application/json" }
         })
       }
-
-      console.log('✅ Webhook signature verified')
-    } else {
-      console.log('🧪 Test mode: processing webhook...')
     }
 
     // Парсим JSON
     const eventData = JSON.parse(rawBody)
-    console.log('📝 Raw event data:', JSON.stringify(eventData, null, 2))
+    const correlationId = eventData.event_id || `webhook-${crypto.randomUUID()}`
+    
+    logInfo("webhook.received", {
+      logId: correlationId,
+      eventType: eventData.type,
+      eventId: eventData.event_id,
+      isTestMode
+    })
 
-    // Простая обработка событий
-    if (eventData.type === 'booking.created') {
-      console.log('📅 Booking created event received')
-      console.log('📊 Data:', eventData.data)
-    } else if (eventData.type === 'payment.created' || eventData.type === 'payment.updated') {
-      console.log(`💳 Payment ${eventData.type === 'payment.created' ? 'created' : 'updated'} event received`)
-      const paymentData = eventData.data?.object?.payment
-      if (paymentData) {
-        // Save payment to database in real-time
-        await savePaymentToDatabase(paymentData, eventData.type, eventData.event_id, eventData.created_at)
+    // Save webhook event to application_logs (non-blocking)
+    let webhookOrganizationId = null
+    try {
+      // Resolve organization_id from webhook payload - try multiple strategies
+      const payload = eventData.data || {}
+      
+      // Strategy 1: Try location_id from various payload structures
+      const locationId = 
+        payload.object?.location_id || 
+        payload.object?.locationId || 
+        payload.location_id || 
+        payload.locationId ||
+        eventData.location_id ||
+        eventData.locationId ||
+        null
+      
+      if (locationId) {
+        webhookOrganizationId = await resolveOrganizationIdFromLocationId(locationId)
+      }
+      
+      // Strategy 2: Fallback to merchant_id if location_id resolution failed
+      if (!webhookOrganizationId) {
+        const merchantId = 
+          eventData.merchant_id || 
+          payload.object?.merchant_id ||
+          payload.merchant_id ||
+          null
         
-        const orderId = paymentData.order_id || paymentData.orderId
-        if (orderId) {
-          // Update order_line_items with technician_id and administrator_id when payment arrives
-          await updateOrderLineItemsWithTechnician(orderId)
+        if (merchantId) {
+          webhookOrganizationId = await resolveOrganizationId(merchantId)
         }
       }
-      console.log('📊 Data:', eventData.data)
-    } else if (eventData.type === 'order.created' || eventData.type === 'order.updated') {
-      console.log(`📦 Order ${eventData.type === 'order.created' ? 'created' : 'updated'} event received`)
-      await processOrderWebhook(eventData.data, eventData.type)
-    } else {
-      console.log('ℹ️ Unhandled event type:', eventData.type)
+      
+      // Save to application_logs (non-blocking, don't fail webhook if this fails)
+      if (eventData.event_id) {
+        // eslint-disable-next-line global-require
+        const { saveApplicationLog } = require("../../../../lib/workflows/application-log-queue")
+        
+        await saveApplicationLog(prisma, {
+          logType: "webhook",
+          logId: eventData.event_id,
+          logCreatedAt: eventData.created_at ? new Date(eventData.created_at) : new Date(),
+          payload: eventData, // COMPLETE webhook payload
+          organizationId: webhookOrganizationId,
+          status: "received",
+          maxAttempts: 0
+        }).catch((logError) => {
+          logWarn("webhook.log_save_failed", { 
+            logId: correlationId, 
+            error: logError.message,
+            organizationId: webhookOrganizationId
+          })
+        })
+      }
+    } catch (logError) {
+      // Don't fail webhook if logging fails
+      logWarn("webhook.org_resolution_failed", { 
+        logId: correlationId, 
+        error: logError.message 
+      })
     }
 
-    return new Response(JSON.stringify({ 
+    // Простая обработка событий
+    if (eventData.type === "booking.created") {
+      logInfo("booking.created.received", { 
+        logId: correlationId, 
+        organizationId: webhookOrganizationId
+      })
+    } else if (eventData.type === "booking.updated") {
+      logInfo("booking.updated.received", { 
+        logId: correlationId, 
+        organizationId: webhookOrganizationId 
+      })
+      const bookingData = eventData.data?.object?.booking
+
+      if (bookingData) {
+        try {
+          // Import processBookingUpdated from referrals route
+          const referralsRoute = await import("./referrals/route.js")
+          if (referralsRoute.processBookingUpdated) {
+            logInfo("booking.updated.processing", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              bookingId: bookingData.id || bookingData.bookingId
+            })
+            await referralsRoute.processBookingUpdated(bookingData, eventData.event_id, eventData.created_at)
+            logInfo("booking.updated.success", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              bookingId: bookingData.id || bookingData.bookingId
+            })
+          } else {
+            logError("booking.updated.handler_missing", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId
+            })
+            throw new Error("processBookingUpdated function not available")
+          }
+        } catch (bookingError) {
+          logError("booking.updated.error", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            error: bookingError.message,
+            bookingId: bookingData?.id || bookingData?.bookingId
+          })
+          // Re-throw to return 500 so Square will retry
+          const cleanBookingError = new Error(bookingError?.message || "Booking webhook processing failed")
+          cleanBookingError.name = bookingError?.name || "BookingWebhookError"
+          cleanBookingError.code = bookingError?.code
+          throw cleanBookingError
+        }
+      } else {
+        logWarn("booking.updated.missing_data", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId
+        })
+      }
+    } else if (eventData.type === "payment.created" || eventData.type === "payment.updated") {
+      logInfo("payment.received", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })
+      
+      const paymentData = eventData.data?.object?.payment
+      if (paymentData) {
+        try {
+          logInfo("payment.processing", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            paymentId: paymentData.id
+          })
+          
+          // Save payment to database in real-time
+          await savePaymentToDatabase(paymentData, eventData.type, eventData.event_id, eventData.created_at, correlationId)          
+          logInfo("payment.saved", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            paymentId: paymentData.id
+          })
+          
+          const orderId = paymentData.order_id || paymentData.orderId
+          const paymentId = paymentData.id
+          if (orderId) {
+            logInfo("payment.reconciling", {
+              logId: correlationId,
+              organizationId: webhookOrganizationId,
+              orderId,
+              paymentId
+            })
+            
+            // Reconcile booking links (try to find and populate booking_id)
+            await reconcileBookingLinks(orderId, paymentId, correlationId)
+            
+            // Update order_line_items with technician_id and administrator_id when payment arrives
+            await updateOrderLineItemsWithTechnician(orderId, correlationId)
+          }
+        } catch (paymentError) {
+          logError("payment.error", {
+            logId: correlationId,
+            organizationId: webhookOrganizationId,
+            error: paymentError.message,
+            paymentId: paymentData?.id
+          })
+          // Re-throw to return 500 so Square will retry
+          const cleanPaymentError = new Error(paymentError?.message || "Payment webhook processing failed")
+          cleanPaymentError.name = paymentError?.name || "PaymentWebhookError"
+          cleanPaymentError.code = paymentError?.code
+          throw cleanPaymentError
+        }
+      } else {
+        logWarn("payment.missing_data", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId,
+          eventType: eventData.type
+        })
+      }
+    } else if (eventData.type === "order.created" || eventData.type === "order.updated") {
+      logInfo("order.received", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })
+      try {
+        // Pass merchant_id from webhook if available (for faster organization_id resolution)
+        await processOrderWebhook(eventData.data, eventData.type, eventData.merchant_id, correlationId)
+        logInfo("order.success", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId
+        })
+      } catch (orderError) {
+        logError("order.error", {
+          logId: correlationId,
+          organizationId: webhookOrganizationId,
+          error: orderError.message
+        })
+        // Re-throw a clean error without BigInt values so Next.js can serialize it
+        const cleanError = new Error(orderError?.message || "Order webhook processing failed")
+        cleanError.name = orderError?.name || "OrderWebhookError"
+        cleanError.code = orderError?.code
+        throw cleanError
+      }
+    } else {
+      logInfo("webhook.unhandled_type", {
+        logId: correlationId,
+        organizationId: webhookOrganizationId,
+        eventType: eventData.type
+      })      
+      // Enqueue unhandled events for processing via webhook-jobs cron
+      // These include: customer.created, gift_card.*, refund.*, team_member.created
+      const queueableEventTypes = [
+        'customer.created',
+        'gift_card.activity.created',
+        'gift_card.activity.updated',
+        'gift_card.customer_linked',
+        'gift_card.updated',
+        'refund.created',
+        'refund.updated',
+        'team_member.created'
+      ]
+      
+      if (queueableEventTypes.includes(eventData.type)) {
+        try {
+          // Resolve organization_id from webhook payload - try multiple strategies
+          let organizationId = null
+          const payload = eventData.data || {}
+          
+          // Strategy 1: Try location_id from various payload structures
+          const locationId = 
+            payload.object?.location_id || 
+            payload.object?.locationId || 
+            payload.location_id || 
+            payload.locationId ||
+            eventData.location_id ||
+            eventData.locationId ||
+            null
+          
+          if (locationId) {
+            console.log(`📍 Attempting to resolve organization_id from location_id: ${locationId}`)
+            organizationId = await resolveOrganizationIdFromLocationId(locationId)
+            if (organizationId) {
+              console.log(`✅ Resolved organization_id from location_id: ${organizationId}`)
+            } else {
+              console.warn(`⚠️ Failed to resolve organization_id from location_id: ${locationId}`)
+            }
+          }
+          
+          // Strategy 2: Fallback to merchant_id if location_id resolution failed
+          if (!organizationId) {
+            const merchantId = 
+              eventData.merchant_id || 
+              payload.object?.merchant_id ||
+              payload.merchant_id ||
+              null
+            
+            if (merchantId) {
+              console.log(`🏢 Attempting to resolve organization_id from merchant_id: ${merchantId}`)
+              organizationId = await resolveOrganizationId(merchantId)
+              if (organizationId) {
+                console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
+              } else {
+                console.warn(`⚠️ Failed to resolve organization_id from merchant_id: ${merchantId}`)
+              }
+            }
+          }
+          
+          // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
+          if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
+            // Try nested location_id in order/booking/payment objects
+            const nestedLocationId = 
+              payload.object?.order?.location_id ||
+              payload.object?.booking?.location_id ||
+              payload.object?.payment?.location_id ||
+              null
+            
+            if (nestedLocationId) {
+              console.log(`📍 Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
+              organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
+              if (organizationId) {
+                console.log(`✅ Resolved organization_id from nested location_id: ${organizationId}`)
+              }
+            }
+          }
+          
+          if (!organizationId) {
+            console.warn(`⚠️ Cannot enqueue ${eventData.type}: organization_id could not be resolved from location_id or merchant_id`)
+            console.warn(`   Payload keys: ${Object.keys(payload).join(', ')}`)
+            console.warn(`   Event data keys: ${Object.keys(eventData).filter(k => k !== 'data').join(', ')}`)
+            // Don't fail the webhook - just log the warning
+          } else {
+          // eslint-disable-next-line global-require
+          const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
+          
+          await enqueueWebhookJob(prisma, {
+            eventType: eventData.type,
+            eventId: eventData.event_id,
+            eventCreatedAt: eventData.created_at,
+            payload: payload,
+            organizationId: organizationId
+          })
+          
+          console.log(`📦 Enqueued ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId}`)
+          }
+        } catch (enqueueError) {
+          console.error(`❌ Failed to enqueue ${eventData.type}:`, enqueueError.message)
+          // Don't fail the webhook - just log the error
+        }
+      }
+    }
+
+    // Update application_log status to completed (non-blocking)
+    if (eventData?.event_id) {
+      try {
+        await prisma.$executeRaw`
+          UPDATE application_logs
+          SET status = 'completed',
+              updated_at = NOW()
+          WHERE log_id = ${eventData.event_id}
+            AND log_type = 'webhook'
+            ${webhookOrganizationId ? Prisma.sql`AND organization_id = ${webhookOrganizationId}::uuid` : Prisma.sql`AND organization_id IS NULL`}
+        `.catch(() => {}) // Silently fail
+      } catch (updateError) {
+        // Don't fail webhook if status update fails
+        logWarn("webhook.app_log_status_update_failed", { logId: correlationId, error: updateError.message })
+      }
+    }
+
+    return new Response(JSON.stringify(serializeBigInt({ 
       ok: true, 
       message: 'Webhook processed successfully',
       eventType: eventData.type 
-    }), {
+    })), {
       headers: { 'Content-Type': 'application/json' }
     })
   } catch (error) {
-    console.error('❌ Webhook processing error:', error)
+    safeLogError('❌ Webhook processing error:', error)
     
-    return new Response(JSON.stringify({ 
+    // Update application_log status to error (non-blocking)
+    if (eventData?.event_id) {
+      try {
+        await prisma.$executeRaw`
+          UPDATE application_logs
+          SET status = 'error',
+              last_error = ${error?.message || String(error)},
+              updated_at = NOW()
+          WHERE log_id = ${eventData.event_id}
+            AND log_type = 'webhook'
+        `.catch(() => {}) // Silently fail
+      } catch (updateError) {
+        // Don't fail if status update fails
+        console.warn('⚠️ Failed to update application_log error status:', updateError.message)
+        logWarn("webhook.app_log_error_status_update_failed", { logId: correlationId, error: updateError.message })
+      }
+    }
+    
+    // Enqueue failed webhook for retry via cron
+    if (eventData?.type && eventData?.event_id) {
+      try {
+        // Resolve organization_id from webhook payload - try multiple strategies
+        let organizationId = null
+        const payload = eventData.data || {}
+        
+        // Strategy 1: Try location_id from various payload structures
+        const locationId = 
+          payload.object?.location_id || 
+          payload.object?.locationId || 
+          payload.location_id || 
+          payload.locationId ||
+          eventData.location_id ||
+          eventData.locationId ||
+          null
+        
+        if (locationId) {
+          console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from location_id: ${locationId}`)
+          organizationId = await resolveOrganizationIdFromLocationId(locationId)
+          if (organizationId) {
+            logInfo("webhook.error_handler.org_resolved_location", { logId: correlationId, organizationId })
+          } else {
+            logWarn("webhook.error_handler.org_resolve_failed_location", { logId: correlationId, locationId })
+          }
+        }
+
+        // Strategy 2: Fallback to merchant_id if location_id resolution failed
+        if (!organizationId) {
+          const merchantId = 
+            eventData.merchant_id || 
+            payload.object?.merchant_id ||
+            payload.merchant_id ||
+            null
+          
+          if (merchantId) {
+            console.log(`🏢 [ERROR HANDLER] Attempting to resolve organization_id from merchant_id: ${merchantId}`)
+            organizationId = await resolveOrganizationId(merchantId)
+            if (organizationId) {
+              logInfo("webhook.error_handler.org_resolved_merchant", { logId: correlationId, organizationId })
+            } else {
+              logWarn("webhook.error_handler.org_resolve_failed_merchant", { logId: correlationId, merchantId })
+            }
+          }
+        }
+
+        // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
+        if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
+          // Try nested location_id in order/booking/payment objects
+          const nestedLocationId = 
+            payload.object?.order?.location_id ||
+            payload.object?.booking?.location_id ||
+            payload.object?.payment?.location_id ||
+            null
+          
+          if (nestedLocationId) {
+            console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
+            organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
+            if (organizationId) {
+              console.log(`✅ [ERROR HANDLER] Resolved organization_id from nested location_id: ${organizationId}`)
+              logInfo("webhook.error_handler.org_resolved_nested", { logId: correlationId, organizationId })
+            }
+          }
+        }
+        
+        if (organizationId) {
+          const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
+          
+          await enqueueWebhookJob(prisma, {
+            eventType: eventData.type,
+            eventId: eventData.event_id,
+            eventCreatedAt: eventData.created_at,
+            payload: payload,
+            organizationId: organizationId,
+            error: error.message || String(error)
+          })
+          
+          console.log(`📦 [ERROR HANDLER] Enqueued failed webhook ${eventData.type} (${eventData.event_id}) with organization_id: ${organizationId} for retry`)
+          logInfo("webhook.error_handler.enqueued", { logId: correlationId, eventType: eventData.type, organizationId })
+        } else {
+          console.warn(`⚠️ [ERROR HANDLER] Cannot enqueue failed webhook ${eventData.type}: organization_id could not be resolved`)
+          console.warn(`   Payload keys: ${Object.keys(payload).join(', ')}`)
+          console.warn(`   Event data keys: ${Object.keys(eventData).filter(k => k !== 'data').join(', ')}`)
+          logWarn("webhook.error_handler.enqueue_failed_no_org", { logId: correlationId, eventType: eventData.type })
+        }
+      } catch (enqueueError) {
+        console.error(`❌ Failed to enqueue webhook job:`, enqueueError.message)
+        logError("webhook.error_handler.enqueue_error", { logId: correlationId, eventType: eventData.type, error: enqueueError.message })
+      }
+    }
+    
+    return new Response(JSON.stringify(serializeBigInt({ 
       error: 'Processing failed',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    }), { 
+      details: error instanceof Error ? error.message : 'Unknown error',
+      eventType: eventData?.type || 'unknown'
+    })), { 
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     })
@@ -153,7 +941,8 @@ export async function POST(request) {
  * Save payment from webhook to database
  * Uses the same transform logic as backfill-payments.js
  */
-async function savePaymentToDatabase(paymentData, eventType, squareEventId = null, squareCreatedAt = null) {
+export async function savePaymentToDatabase(paymentData, eventType, squareEventId = null, squareCreatedAt = null, correlationId = null) {
+  logInfo('save_payment.start', { logId: correlationId, paymentId: paymentData?.id, eventType })
   try {
     // Helper to get value from either camelCase or snake_case (same as backfill script)
     const getValue = (obj, ...keys) => {
@@ -175,10 +964,43 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
     let locationId = getValue(paymentData, 'locationId', 'location_id')
     const orderId = getValue(paymentData, 'orderId', 'order_id')
     const merchantId = getValue(paymentData, 'merchantId', 'merchant_id')
-
-    // Resolve organization_id from merchant_id
+    
+    // Debug: Log all location-related fields to see what's actually in the payment data
+    // According to Square API docs, payment.updated should include location_id
+    const locationFields = {
+      locationId_camelCase: paymentData.locationId,
+      location_id_snake_case: paymentData.location_id,
+      location_object: paymentData.location,
+      locationId_extracted: locationId,
+      allPaymentKeys: Object.keys(paymentData).filter(k => k.toLowerCase().includes('location'))
+    }
+    console.log(`🔍 Payment ${paymentId} location fields check:`)
+    console.log(`   location_id (snake_case): ${paymentData.location_id || 'MISSING'}`)
+    console.log(`   locationId (camelCase): ${paymentData.locationId || 'MISSING'}`)
+    console.log(`   Extracted locationId: ${locationId || 'MISSING'}`)
+    console.log(`   All location-related keys: ${locationFields.allPaymentKeys.join(', ') || 'NONE'}`)
+    
+    // According to Square API docs, location_id should be present
+    // If missing, log a warning but continue (we'll try to get it from order)
+    if (!locationId) {
+      console.warn(`⚠️ Payment ${paymentId} missing location_id in webhook payload`)
+      console.warn(`   According to Square API docs, payment.updated should include location_id`)
+      console.warn(`   Will attempt to resolve from order_id: ${orderId || 'MISSING'}`)
+    }
+    // Resolve organization_id - PRIORITIZE location_id (always available, fast database lookup)
     let organizationId = null
-    if (merchantId) {
+    
+    // STEP 1: Try location_id FIRST (always available in webhooks, fast DB lookup)
+    if (locationId) {
+      console.log(`📍 Resolving organization_id from location_id: ${locationId}`)
+      organizationId = await resolveOrganizationIdFromLocationId(locationId)
+      if (organizationId) {
+        console.log(`✅ Resolved organization_id from location: ${organizationId}`)
+      }
+    }
+    
+    // STEP 2: Fallback to merchant_id (if location lookup failed)
+    if (!organizationId && merchantId) {
       try {
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
@@ -187,6 +1009,7 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
         `
         if (org && org.length > 0) {
           organizationId = org[0].id
+          console.log(`✅ Resolved organization_id from merchant_id: ${organizationId}`)
         }
       } catch (err) {
         console.warn(`⚠️ Could not resolve organization_id from merchant_id: ${err.message}`)
@@ -211,6 +1034,7 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
         } else {
           // If order not in DB yet, try to fetch from Square API
           try {
+            console.log(`📡 Fetching order ${orderId} from Square API to get location_id...`)
             const ordersApi = getOrdersApi()
             const orderResponse = await ordersApi.retrieveOrder(orderId)
             const order = orderResponse.result?.order
@@ -219,9 +1043,15 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
               console.log(`✅ Found locationId from Square API order: ${locationId}`)
             } else {
               console.warn(`⚠️ Order ${orderId} from Square API also missing location_id`)
+              console.warn(`   Order data:`, JSON.stringify({
+                id: order?.id,
+                state: order?.state,
+                hasLocationId: !!order?.location_id
+              }))
             }
           } catch (apiError) {
             console.warn(`⚠️ Could not fetch order ${orderId} from Square API: ${apiError.message}`)
+            console.warn(`   This might be a temporary API issue - Square will retry the webhook`)
           }
         }
       } catch (err) {
@@ -229,25 +1059,39 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       }
     }
     
-    if (!locationId) {
-      console.warn(`⚠️ Payment ${paymentId} still missing location_id after all attempts`)
-    }
-
-    // If still no organization_id, try to get it from location
-    if (!organizationId && locationId) {
+    // If still no locationId and we have merchant_id + organization_id, try to get default location
+    // This is a fallback for cases where order lookup fails but we know the merchant
+    if (!locationId && merchantId && organizationId) {
+      console.log(`📍 Payment ${paymentId} still missing locationId, attempting to get default location for merchant ${merchantId}`)
       try {
-        const loc = await prisma.$queryRaw`
-          SELECT organization_id FROM locations 
-          WHERE square_location_id = ${locationId}
+        // Get the most recently used location for this merchant/organization
+        // This is a reasonable fallback since most merchants have one primary location
+        const defaultLocation = await prisma.$queryRaw`
+          SELECT square_location_id 
+          FROM locations 
+          WHERE organization_id = ${organizationId}::uuid
+          ORDER BY updated_at DESC, created_at DESC
           LIMIT 1
         `
-        if (loc && loc.length > 0) {
-          organizationId = loc[0].organization_id
+        if (defaultLocation && defaultLocation.length > 0) {
+          locationId = defaultLocation[0].square_location_id
+          console.log(`⚠️ Using default/most recent location for merchant: ${locationId}`)
+          console.log(`   Note: This is a fallback - ideally location should come from order`)
+        } else {
+          console.warn(`⚠️ No locations found for organization ${organizationId}`)
         }
       } catch (err) {
-        console.warn(`⚠️ Could not resolve organization_id from location: ${err.message}`)
+        console.warn(`⚠️ Could not get default location: ${err.message}`)
       }
     }
+    
+    if (!locationId) {
+      console.warn(`⚠️ Payment ${paymentId} still missing location_id after all attempts`)
+      console.warn(`   Attempted: order lookup, Square API, default location fallback`)
+    } else {
+    }
+
+    // Location lookup already done above (STEP 1), skip duplicate lookup
 
     // If still no organization_id, try to get it from order
     if (!organizationId && orderId) {
@@ -259,15 +1103,21 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
         `
         if (orderOrg && orderOrg.length > 0) {
           organizationId = orderOrg[0].organization_id
+          console.log(`✅ Found organization_id from order: ${organizationId}`)
         }
       } catch (err) {
         console.warn(`⚠️ Could not resolve organization_id from order: ${err.message}`)
       }
     }
+    
+    // IMPORTANT: Resolve organization_id BEFORE trying location fallback
+    // This ensures we have organization_id when using merchant fallback
 
     if (!organizationId) {
       console.error(`❌ Cannot save payment: organization_id is required but could not be resolved`)
-      return
+      // CRITICAL: Throw error so webhook returns 500 and Square retries
+      // This prevents silent failures that cause Square to stop sending webhooks
+      throw new Error(`Cannot save payment: organization_id is required but could not be resolved. paymentId: ${paymentId}, merchantId: ${merchantId || 'missing'}, locationId: ${locationId || 'missing'}`)
     }
 
     // Ensure location exists (required foreign key)
@@ -297,7 +1147,9 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       }
     } else {
       console.warn(`⚠️ Payment ${paymentId} missing location_id, cannot save`)
-      return
+      // CRITICAL: Throw error so webhook returns 500 and Square retries
+      // This prevents silent failures that cause Square to stop sending webhooks
+      throw new Error(`Cannot save payment: location_id is required but missing. paymentId: ${paymentId}`)
     }
 
     // Ensure customer exists if provided
@@ -305,17 +1157,17 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       try {
         await prisma.$executeRaw`
           INSERT INTO square_existing_clients (
-            id,
             organization_id,
             square_customer_id,
             got_signup_bonus,
+            raw_json,
             created_at,
             updated_at
           ) VALUES (
-            gen_random_uuid(),
             ${organizationId}::uuid,
             ${customerId},
             false,
+            NULL,
             NOW(),
             NOW()
           )
@@ -327,36 +1179,34 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       }
     }
 
+    const locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
+
     // Ensure order exists if provided
     if (orderId) {
       try {
-        // Get location UUID from square_location_id
-        const locationRecord = await prisma.$queryRaw`
-          SELECT id FROM locations 
-          WHERE square_location_id = ${locationId}
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        const locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-
-        await prisma.$executeRaw`
-          INSERT INTO orders (
-            id,
-            organization_id,
-            order_id,
-            location_id,
-            created_at,
-            updated_at
-          ) VALUES (
-            gen_random_uuid(),
-            ${organizationId}::uuid,
-            ${orderId},
-            ${locationUuid}::uuid,
-            NOW(),
-            NOW()
-          )
-          ON CONFLICT (organization_id, order_id) DO NOTHING
-        `
+        // ✅ FIX: Only insert order if locationUuid exists (required foreign key)
+        if (locationUuid) {
+          await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              created_at,
+              updated_at
+            ) VALUES (
+              gen_random_uuid(),
+              ${organizationId}::uuid,
+              ${orderId},
+              ${locationUuid}::uuid,
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (organization_id, order_id) DO NOTHING
+          `
+        } else {
+          console.warn(`⚠️ Cannot insert order ${orderId}: locationUuid is null (location ${locationId} not found)`)
+        }
       } catch (err) {
         // Order might already exist
         console.warn(`⚠️ Order upsert warning: ${err.message}`)
@@ -385,18 +1235,10 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
     const appDetails = getValue(paymentData, 'applicationDetails', 'application_details') || {}
     const deviceDetails = getValue(paymentData, 'deviceDetails', 'device_details') || {}
 
-    // Get location UUID from square_location_id
-    const locationRecord = await prisma.$queryRaw`
-      SELECT id FROM locations 
-      WHERE square_location_id = ${locationId}
-        AND organization_id = ${organizationId}::uuid
-      LIMIT 1
-    `
-    const locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-
     if (!locationUuid) {
       console.error(`❌ Cannot save payment: location UUID not found for square_location_id ${locationId}`)
-      return
+      // CRITICAL: Throw error so webhook returns 500 and Square retries
+      throw new Error(`Cannot save payment: location UUID not found for square_location_id ${locationId}. paymentId: ${paymentId}`)
     }
 
     // Get order UUID if orderId exists
@@ -410,14 +1252,42 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
           LIMIT 1
         `
         orderUuid = orderRecord && orderRecord.length > 0 ? orderRecord[0].id : null
+        if (!orderUuid) {
+          console.warn(`⚠️ Order ${orderId} not found in database yet (payment webhook arrived before order webhook)`)
+        }
       } catch (err) {
         console.warn(`⚠️ Could not find order UUID: ${err.message}`)
       }
     }
 
+    // Look up team member UUID from Square team_member_id
+    // The administrator_id field expects an internal UUID, not Square's team_member_id
+    const squareTeamMemberId = getValue(paymentData, 'teamMemberId', 'team_member_id') || 
+                               getValue(paymentData, 'employeeId', 'employee_id') || null
+    let administratorUuid = null
+    if (squareTeamMemberId && organizationId) {
+      try {
+        const teamMember = await prisma.$queryRaw`
+          SELECT id FROM team_members 
+          WHERE square_team_member_id = ${squareTeamMemberId}
+            AND organization_id = ${organizationId}::uuid
+          LIMIT 1
+        `
+        if (teamMember && teamMember.length > 0) {
+          administratorUuid = teamMember[0].id
+          console.log(`✅ Resolved administrator UUID from team_member_id ${squareTeamMemberId}: ${administratorUuid}`)
+        } else {
+          console.log(`ℹ️ Team member ${squareTeamMemberId} not found in database (will save payment without administrator_id)`)
+        }
+      } catch (teamMemberErr) {
+        console.warn(`⚠️ Could not look up team member UUID: ${teamMemberErr.message}`)
+      }
+    }
+
     // Build payment record (exactly matching schema and backfill script)
     const paymentRecord = {
-      id: paymentId,
+      // id is auto-generated UUID, do not set it
+      payment_id: paymentId, // ✅ FIX: Square payment ID (external identifier)
       organization_id: organizationId, // ✅ ADDED: Required field
       square_event_id: squareEventId,
       event_type: eventType,
@@ -440,7 +1310,7 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       approved_money_currency: approvedMoney.currency || 'USD',
       
       // Status
-      status: paymentData.status || null,
+      status: paymentData.status || 'UNKNOWN', // Required field, cannot be null
       source_type: getValue(paymentData, 'sourceType', 'source_type'),
       delay_action: getValue(paymentData, 'delayAction', 'delay_action'),
       delay_duration: getValue(paymentData, 'delayDuration', 'delay_duration'),
@@ -448,10 +1318,8 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
         ? new Date(getValue(paymentData, 'delayedUntil', 'delayed_until'))
         : null,
       
-      // Staff/Team Member
-      administrator_id: getValue(paymentData, 'teamMemberId', 'team_member_id') || 
-                        getValue(paymentData, 'employeeId', 'employee_id') ||
-                        null,
+      // Staff/Team Member - use resolved UUID (looked up above from team_members table)
+      administrator_id: administratorUuid,
       
       // Application details
       application_details_square_product: appDetails.squareProduct || appDetails.square_product || null,
@@ -519,22 +1387,70 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       // Version
       version: paymentData.versionToken ? 1 : (paymentData.version || 0),
     }
-
     // Upsert payment
-    await prisma.payment.upsert({
-      where: { id: paymentId },
-      update: paymentRecord,
-      create: paymentRecord,
-    })
-
+    // ✅ FIX: Use raw SQL for composite unique constraint upsert (more reliable than Prisma's findUnique + update/create)
+    // Validate required fields before attempting database operation
+    if (!paymentId) {
+      throw new Error(`Cannot save payment: paymentId is required but missing`)
+    }
+    if (!organizationId) {
+      throw new Error(`Cannot save payment: organizationId is required but missing`)
+    }
+    if (!paymentRecord.payment_id) {
+      throw new Error(`Cannot save payment: paymentRecord.payment_id is required but missing. paymentId: ${paymentId}`)
+    }    
+    // First, try to find existing payment
+    const existingPayment = await prisma.$queryRaw`
+      SELECT id FROM payments
+      WHERE organization_id = ${organizationId}::uuid
+        AND payment_id = ${paymentId}
+      LIMIT 1
+    `
+    
+    let payment
+    try {
+      if (existingPayment && existingPayment.length > 0) {
+        // Update existing payment
+        const paymentUuid = existingPayment[0].id
+        console.log(`[DEBUG] Updating payment ${paymentId} with UUID ${paymentUuid}`)
+        payment = await prisma.payment.update({
+          where: { id: paymentUuid },
+          data: paymentRecord,
+        })
+      } else {
+        // Create new payment
+        console.log(`[DEBUG] Payment record keys:`, Object.keys(paymentRecord))
+        console.log(`[DEBUG] Payment record payment_id:`, paymentRecord.payment_id)
+        // Double-check payment_id is set before creating
+        if (!paymentRecord.payment_id) {
+          throw new Error(`Cannot create payment: paymentRecord.payment_id is missing. paymentId: ${paymentId}, paymentRecord keys: ${Object.keys(paymentRecord).join(', ')}`)
+        }
+        // Ensure payment_id is explicitly set (defensive programming)
+        const createData = {
+          ...paymentRecord,
+          payment_id: paymentRecord.payment_id || paymentId, // Explicitly ensure it's set
+        }
+        console.log(`[DEBUG] Creating payment with payment_id:`, createData.payment_id)
+        payment = await prisma.payment.create({
+          data: createData,
+        })
+      }
+    } catch (paymentError) {
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanPaymentError = new Error(paymentError?.message || 'Failed to save payment')
+      cleanPaymentError.name = paymentError?.name || 'PaymentSaveError'
+      cleanPaymentError.code = paymentError?.code
+      throw cleanPaymentError
+    }
     // Handle tenders (extract from payment data)
     const tenders = paymentData.tenders || paymentData.tender || []
     
     // Delete existing tenders and recreate (to handle updates)
+    // ✅ FIX: Use payment UUID (internal id), not Square payment ID
+    const paymentUuid = payment.id
     await prisma.paymentTender.deleteMany({
-      where: { payment_id: paymentId }
+      where: { payment_id: paymentUuid } // ✅ FIX: Use UUID, not Square ID
     })
-
     // Create tenders if they exist
     if (Array.isArray(tenders) && tenders.length > 0) {
       const tenderRecords = tenders.map((tender, index) => {
@@ -548,7 +1464,7 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
 
         return {
           id: `${paymentId}-${tender.id || index}-${Date.now()}`,
-          payment_id: paymentId,
+          payment_id: paymentUuid, // ✅ FIX: Use UUID, not Square ID
           tender_id: tender.id || null,
           type: tender.type || null,
           amount_money_amount: tenderAmountMoney.amount || 0,
@@ -626,21 +1542,339 @@ async function savePaymentToDatabase(paymentData, eventType, squareEventId = nul
       })
     }
 
-    console.log(`✅ Payment ${paymentId} saved to database (${eventType}) with organization_id: ${organizationId}`)
+    console.log(`✅ Payment ${paymentId} saved to database (${eventType}) with organization_id: ${organizationId}`)    
+    // Try to populate booking_id in payment if order exists
+    if (orderId && organizationId) {
+      // First, try to get booking_id from order if it already has one
+      const orderWithBooking = await prisma.$queryRaw`
+        SELECT booking_id FROM orders
+        WHERE order_id = ${orderId}
+          AND booking_id IS NOT NULL
+        LIMIT 1
+      `
+      
+      if (orderWithBooking && orderWithBooking.length > 0) {
+        // Order already has booking_id, copy to payment
+        // Use payment_id (Square ID) and organization_id to find the payment
+        await prisma.$executeRaw`
+          UPDATE payments
+          SET booking_id = ${orderWithBooking[0].booking_id}::uuid,
+              updated_at = NOW()
+          WHERE payment_id = ${paymentId}
+            AND organization_id = ${organizationId}::uuid
+            AND booking_id IS NULL
+        `
+        console.log(`✅ Copied booking_id from order to payment`)
+      }
+    }
   } catch (error) {
     console.error(`❌ Failed to save payment to database:`, error.message)
     if (error.stack) {
       console.error('Stack:', error.stack.split('\n').slice(0, 3).join('\n'))
     }
     // Don't throw - allow webhook to continue processing
+    // BUT: This might be hiding errors! Consider re-throwing for critical errors
+  }
+}
+
+/**
+ * Reconcile booking_id across payments, orders, and order_line_items
+ * Called by payment and order webhooks to ensure eventual consistency
+ * Uses 2 methods in priority order:
+ * 1. PRIMARY: Square API (deriveBookingFromSquareApi)
+ * 2. FALLBACK: Database match by Customer + Location + Time
+ */
+async function reconcileBookingLinks(orderId, paymentId = null, correlationId = null) {
+  logInfo('reconcile.start', { logId: correlationId, orderId, paymentId })
+  try {
+    // Get order UUID and details
+    const orderRecord = await prisma.$queryRaw`
+      SELECT id, organization_id, customer_id, location_id, created_at, booking_id
+      FROM orders 
+      WHERE order_id = ${orderId}
+      LIMIT 1
+    `
+    
+    if (!orderRecord || orderRecord.length === 0) {
+      logInfo('reconcile.order_not_found', { logId: correlationId, orderId })
+      return { bookingId: null, source: 'order_not_in_db', confidence: 'none' }
+    }
+    
+    const orderUuid = orderRecord[0].id
+    const organizationId = orderRecord[0].organization_id
+    const customerId = orderRecord[0].customer_id
+    const locationId = orderRecord[0].location_id
+    const orderCreatedAt = orderRecord[0].created_at
+    const existingBookingId = orderRecord[0].booking_id
+    
+    // If order already has booking_id, we can still update payments and line items
+    let bookingId = existingBookingId
+    let bookingLinkSource = existingBookingId ? 'existing' : null
+    let bookingLinkConfidence = existingBookingId ? 'high' : null
+    
+    // ============================================================
+    // PRIMARY METHOD: Square API
+    // ============================================================
+    if (!bookingId && orderId) {
+      logDebug('reconcile.trying_square_api', { logId: correlationId, orderId })
+      
+      const squareResult = await deriveBookingFromSquareApi(orderId, correlationId)
+      
+      if (squareResult.bookingId) {
+        // Square API returned a booking ID - find or create in our database
+        const existingBooking = await prisma.$queryRaw`
+          SELECT id FROM bookings 
+          WHERE booking_id = ${squareResult.bookingId}
+          LIMIT 1
+        `
+        
+        if (existingBooking && existingBooking.length > 0) {
+          bookingId = existingBooking[0].id
+          logInfo('reconcile.found_in_db', { logId: correlationId, bookingId })
+        } else {
+          // Booking not in database - fetch and save it
+          logInfo('reconcile.fetching_from_square', { logId: correlationId, bookingId: squareResult.bookingId })
+          try {
+            const bookingsApi = getBookingsApi()
+            const bookingResponse = await bookingsApi.retrieveBooking(squareResult.bookingId)
+            const squareBooking = bookingResponse.result?.booking
+            
+            if (squareBooking) {
+              const newBookingId = squareBooking.id
+              const bookingCustomerId = squareBooking.customerId
+              const bookingLocationId = squareBooking.locationId
+              const bookingStatus = squareBooking.status
+              const bookingVersion = squareBooking.version
+              const bookingStartAt = squareBooking.startAt ? new Date(squareBooking.startAt) : null
+              
+              let bookingOrgId = organizationId
+              if (!bookingOrgId && bookingLocationId) {
+                bookingOrgId = await resolveOrganizationIdFromLocationId(bookingLocationId)
+              }
+              
+              if (!bookingOrgId) {
+                console.error('[BOOKING-INSERT] organization_id missing', {
+                  bookingId: newBookingId,
+                  squareLocationId: bookingLocationId,
+                })
+              } else {
+                const bookingLocationUuid = await resolveLocationUuidForSquareLocationId(
+                  prisma,
+                  bookingLocationId,
+                  bookingOrgId
+                )
+
+                if (!bookingLocationUuid) {
+                  console.error('[BOOKING-INSERT] Location UUID resolution failed', {
+                    bookingId: newBookingId,
+                    squareLocationId: bookingLocationId,
+                    organizationId: bookingOrgId,
+                  })
+                } else {
+                  await prisma.$executeRaw`
+                    INSERT INTO bookings (
+                      organization_id, booking_id, customer_id, location_id, status, version,
+                      start_at, created_at, updated_at, raw_json
+                    ) VALUES (
+                      ${bookingOrgId}::uuid, ${newBookingId}, ${bookingCustomerId}, ${bookingLocationUuid}::uuid, 
+                      ${bookingStatus}, ${bookingVersion || 1}, ${bookingStartAt}::timestamptz,
+                      NOW(), NOW(), ${safeStringify(squareBooking)}::jsonb
+                    )
+                    ON CONFLICT (organization_id, booking_id) DO UPDATE SET
+                      status = EXCLUDED.status,
+                      version = EXCLUDED.version,
+                      updated_at = NOW(),
+                      raw_json = EXCLUDED.raw_json
+                    RETURNING id
+                  `
+                  
+                  const insertedBooking = await prisma.$queryRaw`
+                    SELECT id FROM bookings WHERE booking_id = ${newBookingId} LIMIT 1
+                  `
+                  if (insertedBooking && insertedBooking.length > 0) {
+                    bookingId = insertedBooking[0].id
+                    console.log(`✅ [RECONCILE] Saved and linked booking: ${bookingId}`)
+                  }
+                }
+              }
+            }
+          } catch (fetchError) {
+            console.error(`❌ [RECONCILE] Error fetching booking from Square:`, fetchError.message)
+          }
+        }
+        
+        bookingLinkSource = squareResult.source
+        bookingLinkConfidence = squareResult.confidence
+      } else {
+        console.log(`ℹ️ [RECONCILE] Square API found no booking. Reason: ${squareResult.source}`)
+      }
+    }
+    
+    // ============================================================
+    // FALLBACK METHOD: Database Customer + Location + Time
+    // ============================================================
+    if (!bookingId && customerId && locationId) {
+      console.log(`🔄 [RECONCILE] Square API failed, trying database fallback...`)
+      
+      // Time window: 7 days before order, 1 day after
+      const startWindow = new Date(orderCreatedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
+      const endWindow = new Date(orderCreatedAt.getTime() + 1 * 24 * 60 * 60 * 1000)
+      
+      // Determine if location is UUID or square_location_id
+      let squareLocationId = null
+      let locationUuid = null
+      
+      if (locationId && locationId.length < 36) {
+        // It's a square_location_id
+        squareLocationId = locationId
+        locationUuid = await resolveLocationUuidForSquareLocationId(prisma, locationId, organizationId)
+      } else {
+        // It's a UUID
+        locationUuid = locationId
+        const loc = await prisma.$queryRaw`
+          SELECT square_location_id FROM locations 
+          WHERE id = ${locationId}::uuid
+          LIMIT 1
+        `
+        if (loc && loc.length > 0) {
+          squareLocationId = loc[0].square_location_id
+        }
+      }
+      
+      // Find booking by customer + location + time
+      let fallbackBookings = null
+      if (squareLocationId) {
+        fallbackBookings = await prisma.$queryRaw`
+          SELECT b.id, b.start_at
+          FROM bookings b
+          INNER JOIN locations l ON l.id::text = b.location_id::text
+          WHERE b.customer_id = ${customerId}
+            AND l.square_location_id = ${squareLocationId}
+            AND b.start_at >= ${startWindow}::timestamp
+            AND b.start_at <= ${endWindow}::timestamp
+          ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
+          LIMIT 1
+        `
+      } else if (locationUuid) {
+        fallbackBookings = await prisma.$queryRaw`
+          SELECT b.id, b.start_at
+          FROM bookings b
+          WHERE b.customer_id = ${customerId}
+            AND b.location_id::text = ${locationUuid}::text
+            AND b.start_at >= ${startWindow}::timestamp
+            AND b.start_at <= ${endWindow}::timestamp
+          ORDER BY ABS(EXTRACT(EPOCH FROM (b.start_at - ${orderCreatedAt}::timestamp)))
+          LIMIT 1
+        `
+      }
+      
+      if (fallbackBookings && fallbackBookings.length > 0) {
+        bookingId = fallbackBookings[0].id
+        bookingLinkSource = 'database_fallback'
+        bookingLinkConfidence = 'medium'
+        console.log(`✅ [RECONCILE] Matched booking by customer+location+time: ${bookingId}`)
+      } else {
+        console.log(`ℹ️ [RECONCILE] Database fallback also found no booking`)
+        bookingLinkSource = 'no_match'
+        bookingLinkConfidence = 'none'
+      }
+    }
+    
+    // Update orders table if booking found
+    if (bookingId) {
+      // Extract technician_id and administrator_id from booking
+      const bookingDetails = await prisma.$queryRaw`
+        SELECT technician_id, administrator_id
+        FROM bookings
+        WHERE id = ${bookingId}::uuid
+        LIMIT 1
+      `
+      
+      const technicianId = bookingDetails?.[0]?.technician_id || null
+      const administratorId = bookingDetails?.[0]?.administrator_id || null
+      
+      // Update order with booking_id, technician_id, and administrator_id
+      await prisma.$executeRaw`
+        UPDATE orders
+        SET booking_id = ${bookingId}::uuid,
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
+            updated_at = NOW()
+        WHERE id = ${orderUuid}::uuid
+          AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
+      `
+      console.log(`✅ Updated order ${orderId} with booking_id: ${bookingId}`)
+      if (technicianId) {
+        console.log(`   - technician_id: ${technicianId}`)
+      }
+      if (administratorId) {
+        console.log(`   - administrator_id: ${administratorId}`)
+      }
+      
+      // Update order_line_items with booking_id, technician_id, and administrator_id
+      await prisma.$executeRaw`
+        UPDATE order_line_items
+        SET booking_id = ${bookingId}::uuid,
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
+            updated_at = NOW()
+        WHERE order_id = ${orderUuid}::uuid
+          AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
+      `
+      console.log(`✅ Updated order_line_items for order ${orderId} with booking_id: ${bookingId}`)
+      if (technicianId) {
+        console.log(`   - Applied technician_id to line items`)
+      }
+      if (administratorId) {
+        console.log(`   - Applied administrator_id to line items`)
+      }
+      
+      // Update payments if paymentId provided
+      // paymentId is Square payment ID (TEXT), need to use payment_id column
+      if (paymentId && organizationId) {
+        await prisma.$executeRaw`
+          UPDATE payments
+          SET booking_id = ${bookingId}::uuid,
+              updated_at = NOW()
+          WHERE payment_id = ${paymentId}
+            AND organization_id = ${organizationId}::uuid
+            AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
+        `
+        console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}`)
+      }
+      
+      // Also update any other payments for this order
+      await prisma.$executeRaw`
+        UPDATE payments
+        SET booking_id = ${bookingId}::uuid,
+            updated_at = NOW()
+        WHERE order_id = ${orderUuid}::uuid
+          AND booking_id IS NULL
+      `
+      
+      console.log(`📊 [RECONCILE] Booking link complete:`)
+      console.log(`   Order: ${orderId}`)
+      console.log(`   Booking: ${bookingId}`)
+      console.log(`   Source: ${bookingLinkSource}`)
+      console.log(`   Confidence: ${bookingLinkConfidence}`)
+    }
+    return { bookingId, source: bookingLinkSource, confidence: bookingLinkConfidence }
+  } catch (error) {
+    console.error(`❌ Error in reconcileBookingLinks: ${error.message}`)
+    if (error.stack) {
+      console.error('Stack:', error.stack.split('\n').slice(0, 5).join('\n'))
+    }
+    return { bookingId: null, source: 'error', confidence: 'none' }
   }
 }
 
 /**
  * Update order_line_items with technician_id and administrator_id
  * Gets technician ID from bookings table and administrator ID from payments table
+ * Also populates booking_id if found
  */
-async function updateOrderLineItemsWithTechnician(orderId) {
+async function updateOrderLineItemsWithTechnician(orderId, correlationId = null) {
+  logInfo('update_line_items.start', { logId: correlationId, orderId })
   try {
     // Find payment linked to this order (orderId is square order_id, need to find order UUID first)
     const orderRecord = await prisma.$queryRaw`
@@ -650,7 +1884,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
     `
     
     if (!orderRecord || orderRecord.length === 0) {
-      console.log(`ℹ️ Order ${orderId} not found in database yet`)
+      logInfo('update_line_items.order_not_found', { logId: correlationId, orderId })
       return null
     }
 
@@ -667,24 +1901,73 @@ async function updateOrderLineItemsWithTechnician(orderId) {
     `
 
     if (!paymentWithBooking || paymentWithBooking.length === 0) {
-      console.log(`ℹ️ No payment with booking_id found for order ${orderId} yet (might arrive later)`)
+      logInfo('update_line_items.no_payment_with_booking', { logId: correlationId, orderId })
       return null
     }
 
     const bookingId = paymentWithBooking[0].booking_id
     const administratorId = paymentWithBooking[0].administrator_id || null
-    console.log(`🔍 Found booking ${bookingId} for order ${orderId}`)
+    logDebug('update_line_items.found_booking', { logId: correlationId, orderId, bookingId })
 
-    // Get technician_id from bookings table (match by booking ID or booking-service ID)
-    // For multi-service bookings, we match by booking ID prefix
-    const bookings = await prisma.$queryRaw`
-      SELECT service_variation_id, technician_id
-      FROM bookings
-      WHERE booking_id LIKE ${`${bookingId}%`}
+    // Update order with booking_id, technician_id, and administrator_id if not already set
+    if (bookingId) {
+      // First get the primary technician from booking
+      const bookingTech = await prisma.$queryRaw`
+        SELECT technician_id FROM bookings 
+        WHERE id = ${bookingId}::uuid AND technician_id IS NOT NULL
+        LIMIT 1
+      `
+      const technicianId = bookingTech?.[0]?.technician_id || null
+      
+      await prisma.$executeRaw`
+        UPDATE orders
+        SET booking_id = COALESCE(booking_id, ${bookingId}::uuid),
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
+            updated_at = NOW()
+        WHERE id = ${orderUuid}::uuid
+      `
+      console.log(`✅ Updated order with booking_id: ${bookingId}, technician_id: ${technicianId}, administrator_id: ${administratorId}`)
+      
+      // Update order_line_items with booking_id
+      await prisma.$executeRaw`
+        UPDATE order_line_items
+        SET booking_id = ${bookingId}::uuid,
+            updated_at = NOW()
+        WHERE order_id = ${orderUuid}::uuid
+          AND booking_id IS NULL
+      `
+      console.log(`✅ Updated order_line_items with booking_id: ${bookingId}`)
+    }
+
+    // Prefer segment-level mapping (deterministic)
+    const segmentMappings = await prisma.$queryRaw`
+      SELECT DISTINCT ON (service_variation_id)
+        service_variation_id,
+        technician_id
+      FROM booking_segments
+      WHERE booking_id = ${bookingId}::uuid
+        AND is_active = true
+        AND service_variation_id IS NOT NULL
         AND technician_id IS NOT NULL
-        AND any_team_member = false
-      ORDER BY duration_minutes DESC
+      ORDER BY
+        service_variation_id,
+        duration_minutes DESC NULLS LAST,
+        segment_index ASC,
+        id ASC
     `
+
+    // Fallback to legacy bookings table if no segments found
+    const bookings = segmentMappings && segmentMappings.length > 0
+      ? segmentMappings
+      : await prisma.$queryRaw`
+          SELECT service_variation_id, technician_id
+          FROM bookings
+          WHERE booking_id LIKE ${`${bookingId}%`}
+            AND technician_id IS NOT NULL
+            AND any_team_member = false
+          ORDER BY duration_minutes DESC
+        `
 
     if (!bookings || bookings.length === 0) {
       console.log(`⚠️ No booking found with technician_id for booking ${bookingId}`)
@@ -745,7 +2028,7 @@ async function updateOrderLineItemsWithTechnician(orderId) {
   }
 }
 
-async function processOrderWebhook(webhookData, eventType) {
+async function processOrderWebhook(webhookData, eventType, webhookMerchantId = null, correlationId = null) {
   try {
     // Extract order_id from webhook payload structure
     // order.created: data.object.order_created.order_id
@@ -753,15 +2036,24 @@ async function processOrderWebhook(webhookData, eventType) {
     const orderMetadata = webhookData.object?.order_created || webhookData.object?.order_updated
     
     if (!orderMetadata || !orderMetadata.order_id) {
-      console.error('❌ Invalid order webhook data:', webhookData)
+      logError('order.invalid_data', { logId: correlationId, webhookData })
       return
     }
 
     const orderId = orderMetadata.order_id
     const locationId = orderMetadata.location_id
     const orderState = orderMetadata.state
+    
+    logInfo('order.processing_start', { logId: correlationId, orderId, eventType })
+    if (webhookMerchantId) {
+      logDebug('order.webhook_merchant', { logId: correlationId, webhookMerchantId })
+    }
 
-    console.log(`📦 Fetching full order details for order ${orderId} (state: ${orderState})`)
+    logDebug('order.fetching_details', { logId: correlationId, orderId, orderState })
+    
+    const token = process.env.SQUARE_ACCESS_TOKEN?.trim() || ""
+    const cleanToken = token.startsWith("Bearer ") ? token.slice(7) : token
+    logDebug("order.token_check", { logId: correlationId, tokenLength: cleanToken.length })
 
     // Fetch full order details from Square API to get line items
     let order
@@ -771,27 +2063,48 @@ async function processOrderWebhook(webhookData, eventType) {
       order = orderResponse.result?.order
 
       if (!order) {
-        console.error(`❌ Order ${orderId} not found in Square API`)
+        logError("order.api_not_found", { logId: correlationId, orderId })
         return
       }
     } catch (apiError) {
-      console.error(`❌ Error fetching order ${orderId} from Square API:`, apiError.message)
+      logError("order.api_error", { logId: correlationId, orderId, error: apiError.message })
       if (apiError.errors) {
-        console.error('Square API errors:', JSON.stringify(apiError.errors, null, 2))
+        logDebug("order.api_errors_detail", { logId: correlationId, errors: apiError.errors })
       }
-      throw apiError
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanApiError = new Error(apiError?.message || "Failed to fetch order from Square API")
+      cleanApiError.name = apiError?.name || "SquareAPIError"
+      cleanApiError.code = apiError?.code
+      throw cleanApiError
     }
 
     // Use location_id from full order (more reliable than webhook metadata)
-    const finalLocationId = order.location_id || locationId || null
-    const customerId = order.customer_id || null
-    const lineItems = order.line_items || []
-    const merchantId = order.merchant_id || null
+    // Note: Square API may return camelCase (locationId) or snake_case (location_id)
+    const orderLocationId = order.location_id || order.locationId || null
+    const finalLocationId = orderLocationId || locationId || null
+    const customerId = order.customer_id || order.customerId || null
+    const lineItems = order.line_items || order.lineItems || []
+    // Use merchant_id from order API response, fallback to webhook merchant_id
+    // Ensure merchantId is a string before calling substring
+    const rawMerchantId = order.merchant_id || order.merchantId || webhookMerchantId || null
+    const merchantId = typeof rawMerchantId === "string" ? rawMerchantId : null
 
-    // Resolve organization_id from merchant_id
+    logInfo("order.extracted_ids", { 
+      logId: correlationId, 
+      orderId, 
+      merchantId, 
+      finalLocationId, 
+      customerId,
+      lineItemsCount: lineItems.length 
+    })
+
+    // Resolve organization_id - For order.created/updated, merchant_id is ALWAYS present
+    // STEP 1: Resolve organization_id from merchant_id FIRST (source of truth from Square)
     let organizationId = null
+    
     if (merchantId) {
       try {
+        logDebug("order.resolving_org_from_merchant", { logId: correlationId, merchantId })
         const org = await prisma.$queryRaw`
           SELECT id FROM organizations 
           WHERE square_merchant_id = ${merchantId}
@@ -799,33 +2112,75 @@ async function processOrderWebhook(webhookData, eventType) {
         `
         if (org && org.length > 0) {
           organizationId = org[0].id
+          logInfo("order.org_resolved_merchant", { logId: correlationId, organizationId })
+        } else {
+          logWarn("order.org_not_found_merchant", { logId: correlationId, merchantId })
         }
       } catch (err) {
-        console.warn(`⚠️ Could not resolve organization_id from merchant_id: ${err.message}`)
+        logError("order.org_resolve_error_merchant", { logId: correlationId, merchantId, error: err.message })
+      }
+    }
+    
+    // STEP 2: Fallback to location_id (if merchant_id lookup failed)
+    if (!organizationId && finalLocationId) {
+      logDebug("order.resolving_org_fallback_location", { logId: correlationId, finalLocationId })
+      organizationId = await resolveOrganizationIdFromLocationId(finalLocationId)
+      if (organizationId) {
+        logInfo("order.org_resolved_location", { logId: correlationId, organizationId })
       }
     }
 
-    // If still no organization_id, try to get it from location
-    if (!organizationId && finalLocationId) {
+    if (!merchantId && !organizationId) {
+      logWarn("order.missing_ids_critical", { logId: correlationId, orderId })
+    }
+
+    // If still no organization_id, try to get it from existing orders (fallback)
+    if (!organizationId && orderId) {
       try {
-        const loc = await prisma.$queryRaw`
-          SELECT organization_id FROM locations 
-          WHERE square_location_id = ${finalLocationId}
+        const existingOrder = await prisma.$queryRaw`
+          SELECT organization_id FROM orders 
+          WHERE order_id = ${orderId}
           LIMIT 1
         `
-        if (loc && loc.length > 0) {
-          organizationId = loc[0].organization_id
+        if (existingOrder && existingOrder.length > 0) {
+          organizationId = existingOrder[0].organization_id
+          logInfo("order.org_resolved_existing", { logId: correlationId, organizationId })
         }
       } catch (err) {
-        console.warn(`⚠️ Could not resolve organization_id from location: ${err.message}`)
+        logWarn("order.org_resolve_error_existing", { logId: correlationId, error: err.message })
+      }
+    }
+
+    // If still no organization_id, try to get the first active organization (last resort fallback)
+    if (!organizationId) {
+      try {
+        const defaultOrg = await prisma.$queryRaw`
+          SELECT id FROM organizations 
+          WHERE is_active = true
+          ORDER BY created_at ASC
+          LIMIT 1
+        `
+        if (defaultOrg && defaultOrg.length > 0) {
+          organizationId = defaultOrg[0].id
+          logWarn("order.org_using_fallback_default", { logId: correlationId, organizationId, orderId })
+        }
+      } catch (err) {
+        logError("order.org_resolve_error_default", { logId: correlationId, error: err.message })
       }
     }
 
     if (!organizationId) {
-      console.error(`❌ Cannot process order: organization_id is required but could not be resolved`)
-      return
+      logError("order.org_resolution_failed_critical", { 
+        logId: correlationId, 
+        orderId, 
+        merchantId, 
+        finalLocationId 
+      })
+      // Don't return - throw error so webhook returns 500 and Square will retry
+      throw new Error(`Cannot process order: organization_id is required but could not be resolved. merchant_id: ${merchantId || "missing"}, location_id: ${finalLocationId || "missing"}`)
     }
 
+    logInfo("order.processing_with_org", { logId: correlationId, orderId, organizationId, lineItemsCount: lineItems.length })
     console.log(`📦 Processing order ${orderId} with ${lineItems.length} line items (organization_id: ${organizationId})`)
 
     // Get booking_id and administrator_id from payments (if payment exists)
@@ -842,18 +2197,36 @@ async function processOrderWebhook(webhookData, eventType) {
     const bookingId = paymentInfo?.[0]?.booking_id || null
     const administratorId = paymentInfo?.[0]?.administrator_id || null
     
-    // Get technician_id from bookings (match by service_variation_id)
+    // Get technician_id from booking segments (match by service_variation_id)
     const serviceTechnicianMap = new Map()
     
     if (bookingId) {
-      const bookings = await prisma.$queryRaw`
-        SELECT service_variation_id, technician_id
-        FROM bookings
-        WHERE booking_id LIKE ${`${bookingId}%`}
+      const segmentMappings = await prisma.$queryRaw`
+        SELECT DISTINCT ON (service_variation_id)
+          service_variation_id,
+          technician_id
+        FROM booking_segments
+        WHERE booking_id = ${bookingId}::uuid
+          AND is_active = true
+          AND service_variation_id IS NOT NULL
           AND technician_id IS NOT NULL
+        ORDER BY
+          service_variation_id,
+          duration_minutes DESC NULLS LAST,
+          segment_index ASC,
+          id ASC
       `
+
+      const mappings = segmentMappings && segmentMappings.length > 0
+        ? segmentMappings
+        : await prisma.$queryRaw`
+            SELECT service_variation_id, technician_id
+            FROM bookings
+            WHERE booking_id LIKE ${`${bookingId}%`}
+              AND technician_id IS NOT NULL
+          `
       
-      bookings.forEach(booking => {
+      mappings.forEach(booking => {
         if (booking.service_variation_id && booking.technician_id) {
           serviceTechnicianMap.set(booking.service_variation_id, booking.technician_id)
         }
@@ -865,38 +2238,127 @@ async function processOrderWebhook(webhookData, eventType) {
     }
 
     // Get location UUID from square_location_id
+    // Square API always provides location_id in order response, so we must always resolve it
     let locationUuid = null
-    if (finalLocationId) {
-      try {
-        const locationRecord = await prisma.$queryRaw`
-          SELECT id FROM locations 
-          WHERE square_location_id = ${finalLocationId}
-            AND organization_id = ${organizationId}::uuid
-          LIMIT 1
-        `
-        locationUuid = locationRecord && locationRecord.length > 0 ? locationRecord[0].id : null
-        
-        // If location doesn't exist, create it
-        if (!locationUuid) {
-          const newLocation = await prisma.location.create({
-            data: {
-              organization_id: organizationId,
-              square_location_id: finalLocationId,
-              name: `Location ${finalLocationId.substring(0, 8)}...`
-            }
-          })
-          locationUuid = newLocation.id
-        }
-      } catch (err) {
-        console.warn(`⚠️ Could not get/create location: ${err.message}`)
+    if (!finalLocationId) {
+      throw new Error(`Cannot process order ${orderId}: location_id is required but missing from Square API response`)
+    }
+    
+    if (!organizationId) {
+      throw new Error(`Cannot process order ${orderId}: organization_id is required to resolve location`)
+    }
+    
+    try {
+      locationUuid = await resolveLocationUuidForSquareLocationId(prisma, finalLocationId, organizationId)
+      if (!locationUuid) {
+        throw new Error(`Failed to resolve location UUID for square_location_id: ${finalLocationId}`)
       }
+    } catch (err) {
+      console.error(`❌ Error getting/creating location: ${err.message}`)
+      console.error(`   Stack: ${err.stack}`)
+      throw new Error(`Cannot process order ${orderId}: failed to resolve location. ${err.message}`)
     }
 
     // 1. Save/update the order in the orders table
+    // locationUuid is guaranteed to be set at this point (thrown error if not)
+    if (!locationUuid) {
+      throw new Error(`Cannot process order ${orderId}: locationUuid is required but was not resolved`)
+    }
+    
+    // Validate locationUuid format
+    if (typeof locationUuid !== 'string' || locationUuid.trim() === '') {
+      throw new Error(`Invalid locationUuid format: ${locationUuid} (type: ${typeof locationUuid})`)
+    }
+    
+    // Clean UUID (remove any whitespace)
+    const cleanLocationUuid = String(locationUuid).trim()
+    
+    console.log(`📦 Preparing to save order ${orderId}`)
+    console.log(`   locationUuid: ${cleanLocationUuid}`)
+    console.log(`   organizationId: ${organizationId}`)
+    
+    // Log exact UUID value, type, and format before create
+    const uuidInfo = {
+      value: cleanLocationUuid,
+      type: typeof cleanLocationUuid,
+      length: cleanLocationUuid.length,
+      isUUIDFormat: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanLocationUuid),
+      bytes: Buffer.from(cleanLocationUuid).toString('hex'),
+      organizationId: organizationId
+    }
+
+    
+    // Query location directly with the exact UUID we'll use
+    const directLocationCheck = await prisma.$queryRaw`
+      SELECT id::text as id, organization_id::text as org_id, square_location_id 
+      FROM locations 
+      WHERE id = ${cleanLocationUuid}::uuid
+    `
+
+    
+    // Check FK constraint definition to see what it's actually checking
+    const fkConstraintDef = await prisma.$queryRaw`
+      SELECT
+        tc.constraint_name,
+        kcu.column_name,
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name,
+        rc.match_option,
+        rc.update_rule,
+        rc.delete_rule
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      LEFT JOIN information_schema.referential_constraints AS rc
+        ON rc.constraint_name = tc.constraint_name
+        AND rc.constraint_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_name = 'orders'
+        AND kcu.column_name = 'location_id'
+    `
+
+    
+    // Test if we can insert with raw SQL using the exact UUID
+    const testFKInsert = await prisma.$queryRaw`
+      SELECT EXISTS(
+        SELECT 1 FROM locations WHERE id = ${cleanLocationUuid}::uuid
+      ) as location_exists
+    `
+
+    
+    // Check if location's organization_id matches order's organization_id
+    const orgMatchCheck = await prisma.$queryRaw`
+      SELECT 
+        l.id::text as location_id,
+        l.organization_id::text as location_org_id,
+        ${organizationId}::uuid as order_org_id,
+        (l.organization_id = ${organizationId}::uuid) as org_match
+      FROM locations l
+      WHERE l.id = ${cleanLocationUuid}::uuid
+    `
+
+    
+    // Use raw SQL upsert to handle both create and update atomically (prevents race conditions)
+    // This avoids Prisma's composite unique constraint limitations
+    let orderUuid = null
     try {
-      await prisma.$executeRaw`
+      const createdAt = order.created_at ? new Date(order.created_at) : new Date()
+      const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
+      const closedAt = order.closed_at ? new Date(order.closed_at) : null
+      const orderStateValue = orderState || order.state || null
+      const versionValue = order.version ? Number(order.version) : null
+      const rawJsonValue = safeStringify(order) // Use safeStringify to handle BigInt values
+      const sourceName = order.source?.name || null
+
+      // Extract totals and net amounts
+      const totalMoney = order.total_money || order.totalMoney || {}
+
+      const upsertedOrder = await prisma.$queryRaw`
         INSERT INTO orders (
-          id,
           organization_id,
           order_id,
           location_id,
@@ -905,45 +2367,176 @@ async function processOrderWebhook(webhookData, eventType) {
           version,
           reference_id,
           created_at,
-          updated_at
+          updated_at,
+          raw_json
         ) VALUES (
-          gen_random_uuid(),
           ${organizationId}::uuid,
           ${orderId},
-          ${locationUuid}::uuid,
-          ${customerId},
-          ${orderState || order.state || null},
-          ${order.version ? Number(order.version) : null},
+          ${cleanLocationUuid}::uuid,
+          ${customerId || null},
+          ${orderStateValue},
+          ${versionValue},
           ${order.reference_id || null},
-          ${order.created_at ? new Date(order.created_at) : new Date()},
-          ${order.updated_at ? new Date(order.updated_at) : new Date()}
+          ${createdAt}::timestamptz,
+          ${updatedAt}::timestamptz,
+          ${rawJsonValue}::jsonb
         )
-        ON CONFLICT (organization_id, order_id) DO UPDATE SET
-          location_id = COALESCE(EXCLUDED.location_id, orders.location_id),
-          customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
-          state = COALESCE(EXCLUDED.state, orders.state),
-          version = COALESCE(EXCLUDED.version, orders.version),
-          reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
-          updated_at = EXCLUDED.updated_at
+        ON CONFLICT (organization_id, order_id)
+        DO UPDATE SET
+          location_id = EXCLUDED.location_id,
+          customer_id = EXCLUDED.customer_id,
+          state = EXCLUDED.state,
+          version = EXCLUDED.version,
+          reference_id = EXCLUDED.reference_id,
+          updated_at = EXCLUDED.updated_at,
+          raw_json = EXCLUDED.raw_json
+        RETURNING id, order_id, organization_id, state
       `
-      console.log(`✅ Saved order ${orderId} to orders table (state: ${orderState || order.state || 'N/A'})`)
+      
+      if (upsertedOrder && upsertedOrder.length > 0) {
+        // Extract values safely to avoid BigInt serialization issues
+        const result = upsertedOrder[0]
+        orderUuid = result.id
+        const returnedState = result.state
+        console.log(`✅ Upserted order ${orderId} to orders table (UUID: ${orderUuid}, state: ${returnedState || orderStateValue || 'N/A'})`)
+      } else {
+        throw new Error(`Failed to upsert order ${orderId} - no result returned`)
+      }
     } catch (orderError) {
-      console.error(`❌ Error saving order ${orderId} to orders table:`, orderError.message)
-      // Continue processing line items even if order save fails
+      safeLogError(`❌ Error saving order ${orderId} to orders table:`, orderError)
+      
+      // Create a clean error without BigInt values to prevent serialization issues
+      const cleanOrderError = new Error(orderError?.message || 'Failed to save order')
+      cleanOrderError.name = orderError?.name || 'OrderSaveError'
+      cleanOrderError.code = orderError?.code
+      
+      // If foreign key constraint error, the location resolution failed
+      if (orderError.code === 'P2003' || (orderError.code === '23503' && orderError.message?.includes('location_id_fkey'))) {
+        console.error(`❌ Foreign key constraint violation: location ${cleanLocationUuid} does not exist`)
+        // Final check: Does location exist? Check multiple ways
+        try {
+          const locationCheck1 = await prisma.$queryRaw`
+            SELECT id::text as id FROM locations WHERE id = ${cleanLocationUuid}::uuid LIMIT 1
+          `
+          const locationCheck2 = await prisma.$queryRaw`
+            SELECT id::text as id, organization_id::text as org_id FROM locations 
+            WHERE id::text = ${cleanLocationUuid} LIMIT 1
+          `
+          const locationCheck3 = await prisma.location.findUnique({
+            where: { id: cleanLocationUuid }
+          })
+
+          if (!locationCheck1 || locationCheck1.length === 0) {
+            console.error(`❌ Location ${cleanLocationUuid} does NOT exist - location resolution failed`)
+            throw new Error(`Foreign key constraint violation: location ${cleanLocationUuid} does not exist. This indicates a bug in location resolution logic.`)
+          } else {
+            console.error(`⚠️ Location ${cleanLocationUuid} EXISTS but FK still failed - this is very strange!`)
+            throw cleanOrderError // Throw clean error instead of original
+          }
+        } catch (checkErr) {
+          console.error(`❌ Error checking location after FK error:`, checkErr.message)
+          throw cleanOrderError // Throw clean error instead of original
+        }
+      }
+      throw cleanOrderError // Always throw clean error to prevent BigInt serialization issues
     }
 
-    // Get order UUID for line items
-    const orderRecord = await prisma.$queryRaw`
-      SELECT id FROM orders 
-      WHERE order_id = ${orderId}
-        AND organization_id = ${organizationId}::uuid
-      LIMIT 1
-    `
-    const orderUuid = orderRecord && orderRecord.length > 0 ? orderRecord[0].id : null
+    // Get order UUID for line items (try to get it even if save failed, in case order already exists)
+    try {
+      const orderRecord = await prisma.$queryRaw`
+        SELECT id FROM orders 
+        WHERE order_id = ${orderId}
+          AND organization_id = ${organizationId}::uuid
+        LIMIT 1
+      `
+      orderUuid = orderRecord && orderRecord.length > 0 ? orderRecord[0].id : null
+    } catch (queryError) {
+      console.error(`❌ Error querying for order UUID:`, queryError.message)
+    }
 
     if (!orderUuid) {
       console.error(`❌ Cannot save line items: order UUID not found for order_id ${orderId}`)
-      return
+      console.error(`   This means the order was not saved and does not exist in the database`)
+      console.error(`   Will attempt to create order again with a new UUID...`)
+      
+      // Last resort: try to create order with explicit UUID
+      // locationUuid is guaranteed to be set at this point
+      if (!locationUuid) {
+        throw new Error(`Cannot process order: locationUuid is required but was not resolved`)
+      }
+      
+      try {
+        const newOrderUuid = crypto.randomUUID()
+        const createdAt = order.created_at ? new Date(order.created_at) : new Date()
+        const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
+
+        await prisma.$executeRaw`
+            INSERT INTO orders (
+              id,
+              organization_id,
+              order_id,
+              location_id,
+              customer_id,
+              state,
+              version,
+              reference_id,
+              created_at,
+              updated_at,
+              raw_json
+            ) VALUES (
+              ${newOrderUuid}::uuid,
+              ${organizationId}::uuid,
+              ${orderId},
+              ${locationUuid}::uuid,
+              ${customerId},
+              ${orderState || order.state || null},
+              ${order.version ? Number(order.version) : null},
+              ${order.reference_id || null},
+              ${createdAt}::timestamptz,
+              ${updatedAt}::timestamptz,
+              ${safeStringify(order)}::jsonb
+            )
+            ON CONFLICT (organization_id, order_id) DO UPDATE SET
+              location_id = EXCLUDED.location_id,
+              customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
+              state = COALESCE(EXCLUDED.state, orders.state),
+              version = COALESCE(EXCLUDED.version, orders.version),
+              reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              updated_at = EXCLUDED.updated_at,
+              raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
+          `
+        orderUuid = newOrderUuid
+        console.log(`✅ Successfully created order with UUID: ${orderUuid}`)
+      } catch (retryError) {
+        console.error(`❌ Failed to create order on retry:`, retryError.message)
+        // Create a clean error without BigInt values
+        const cleanRetryError = new Error(retryError?.message || 'Failed to create order on retry')
+        cleanRetryError.name = retryError?.name || 'OrderRetryError'
+        cleanRetryError.code = retryError?.code
+        
+        // If foreign key constraint error, the location resolution failed - this should not happen
+        if (retryError.code === '23503' && retryError.message?.includes('location_id_fkey')) {
+          throw new Error(`Foreign key constraint violation: location ${locationUuid} does not exist. This indicates a bug in location resolution logic. Original error: ${cleanRetryError.message}`)
+        }
+        // Still throw error so webhook fails and Square retries
+        throw new Error(`Cannot process order: failed to save order and could not create order UUID. Original error: ${cleanRetryError.message}`)
+      }
+    }
+
+    // Build discount name map from order-level discounts array
+    const discountNameMap = new Map()
+    const orderDiscounts = order.discounts || order.discount || []
+    if (Array.isArray(orderDiscounts)) {
+      orderDiscounts.forEach(discount => {
+        const discountUid = discount.uid || discount.discount_uid
+        const discountName = discount.name || discount.discount_name
+        if (discountUid && discountName) {
+          discountNameMap.set(discountUid, discountName)
+        }
+      })
+    }
+    if (discountNameMap.size > 0) {
+      console.log(`📋 Found ${discountNameMap.size} discount(s) in order: ${Array.from(discountNameMap.values()).join(', ')}`)
     }
 
     // 2. Process each line item
@@ -961,6 +2554,21 @@ async function processOrderWebhook(webhookData, eventType) {
           console.warn(`⚠️ No technician found for service ${serviceVariationId} in bookings`)
         }
         
+        // Extract discount names for this line item
+        const appliedDiscounts = lineItem.appliedDiscounts || lineItem.applied_discounts || []
+        const discountNames = []
+        if (Array.isArray(appliedDiscounts)) {
+          appliedDiscounts.forEach(appliedDiscount => {
+            const discountUid = appliedDiscount.discount_uid || appliedDiscount.discountUid
+            if (discountUid && discountNameMap.has(discountUid)) {
+              discountNames.push(discountNameMap.get(discountUid))
+            }
+          })
+        }
+        const discountName = discountNames.length > 0 ? discountNames.join(', ') : null
+        
+        // Build lineItemData - explicitly exclude removed fields (recipient_name, shipping fields, fulfillment_type/state)
+        // These fields were removed from schema but may still be in old Prisma Client cache
         const lineItemData = {
           organization_id: organizationId, // ✅ ADDED: Required field
           order_id: orderUuid, // Use UUID, not square order_id
@@ -973,11 +2581,22 @@ async function processOrderWebhook(webhookData, eventType) {
           
           uid: lineItem.uid || null,
           service_variation_id: serviceVariationId || null,
-          catalog_version: lineItem.catalog_version ? BigInt(lineItem.catalog_version) : null,
+          catalog_version: lineItem.catalog_version ? Number(lineItem.catalog_version) : null,
           quantity: lineItem.quantity || null,
           name: lineItem.name || null,
           variation_name: lineItem.variation_name || null,
           item_type: lineItem.item_type || null,
+          discount_name: discountName,
+          
+          // Optional fields from Square API - serialize to handle BigInt values
+          metadata: lineItem.metadata ? JSON.parse(safeStringify(lineItem.metadata)) : null,
+          custom_attributes: (lineItem.customAttributes || lineItem.custom_attributes) ? JSON.parse(safeStringify(lineItem.customAttributes || lineItem.custom_attributes)) : null,
+          fulfillments: (lineItem.fulfillments || lineItem.fulfillment) ? JSON.parse(safeStringify(lineItem.fulfillments || lineItem.fulfillment)) : null,
+          applied_taxes: (lineItem.appliedTaxes || lineItem.applied_taxes) ? JSON.parse(safeStringify(lineItem.appliedTaxes || lineItem.applied_taxes)) : null,
+          applied_discounts: (lineItem.appliedDiscounts || lineItem.applied_discounts) ? JSON.parse(safeStringify(lineItem.appliedDiscounts || lineItem.applied_discounts)) : null,
+          applied_service_charges: (lineItem.appliedServiceCharges || lineItem.applied_service_charges) ? JSON.parse(safeStringify(lineItem.appliedServiceCharges || lineItem.applied_service_charges)) : null,
+          note: lineItem.note || null,
+          modifiers: lineItem.modifiers ? JSON.parse(safeStringify(lineItem.modifiers)) : null,
           
           // Money fields (use ?? instead of || to preserve 0 values)
           base_price_money_amount: lineItem.base_price_money?.amount ?? null,
@@ -1006,7 +2625,7 @@ async function processOrderWebhook(webhookData, eventType) {
           
           // Order-level fields
           order_state: order.state || null,
-          order_version: order.version || null,
+          order_version: order.version ? Number(order.version) : null, // Cast to Number (safe, Square version is small integer)
           order_created_at: order.created_at ? new Date(order.created_at) : null,
           order_updated_at: order.updated_at ? new Date(order.updated_at) : null,
           order_closed_at: order.closed_at ? new Date(order.closed_at) : null,
@@ -1029,7 +2648,24 @@ async function processOrderWebhook(webhookData, eventType) {
           
           order_total_card_surcharge_money_amount: order.total_card_surcharge_money?.amount ?? null,
           order_total_card_surcharge_money_currency: order.total_card_surcharge_money?.currency || 'USD',
+          
+          // Raw JSON - serialize to handle BigInt values from Square API
+          raw_json: JSON.parse(safeStringify(lineItem)),
         }
+        
+        // Explicitly exclude removed fields to prevent Prisma errors if old client is cached
+        // These fields were removed from schema but may exist in old Prisma Client
+        delete lineItemData.recipient_name
+        delete lineItemData.recipient_email
+        delete lineItemData.recipient_phone
+        delete lineItemData.shipping_address_line_1
+        delete lineItemData.shipping_address_line_2
+        delete lineItemData.shipping_locality
+        delete lineItemData.shipping_administrative_district_level_1
+        delete lineItemData.shipping_postal_code
+        delete lineItemData.shipping_country
+        delete lineItemData.fulfillment_type
+        delete lineItemData.fulfillment_state
 
         // Use uid if available, otherwise create new record
         if (lineItem.uid) {
@@ -1047,6 +2683,15 @@ async function processOrderWebhook(webhookData, eventType) {
               name = ${lineItemData.name},
               variation_name = ${lineItemData.variation_name},
               item_type = ${lineItemData.item_type},
+              discount_name = ${lineItemData.discount_name},
+              metadata = ${lineItemData.metadata ? safeStringify(lineItemData.metadata) : null}::jsonb,
+              custom_attributes = ${lineItemData.custom_attributes ? safeStringify(lineItemData.custom_attributes) : null}::jsonb,
+              fulfillments = ${lineItemData.fulfillments ? safeStringify(lineItemData.fulfillments) : null}::jsonb,
+              applied_taxes = ${lineItemData.applied_taxes ? safeStringify(lineItemData.applied_taxes) : null}::jsonb,
+              applied_discounts = ${lineItemData.applied_discounts ? safeStringify(lineItemData.applied_discounts) : null}::jsonb,
+              applied_service_charges = ${lineItemData.applied_service_charges ? safeStringify(lineItemData.applied_service_charges) : null}::jsonb,
+              note = ${lineItemData.note},
+              modifiers = ${lineItemData.modifiers ? safeStringify(lineItemData.modifiers) : null}::jsonb,
               base_price_money_amount = ${lineItemData.base_price_money_amount},
               base_price_money_currency = ${lineItemData.base_price_money_currency},
               gross_sales_money_amount = ${lineItemData.gross_sales_money_amount},
@@ -1080,6 +2725,7 @@ async function processOrderWebhook(webhookData, eventType) {
               order_total_service_charge_money_currency = ${lineItemData.order_total_service_charge_money_currency},
               order_total_card_surcharge_money_amount = ${lineItemData.order_total_card_surcharge_money_amount},
               order_total_card_surcharge_money_currency = ${lineItemData.order_total_card_surcharge_money_currency},
+              raw_json = COALESCE(${safeStringify(lineItem)}::jsonb, order_line_items.raw_json),
               updated_at = NOW()
             WHERE organization_id = ${organizationId}::uuid
               AND uid = ${lineItem.uid}
@@ -1087,12 +2733,22 @@ async function processOrderWebhook(webhookData, eventType) {
           
           // If no rows updated, insert new record
           if (updateResult === 0) {
-            await prisma.orderLineItem.create({
-              data: {
-                ...lineItemData,
-                id: crypto.randomUUID(),
+            try {
+              await prisma.orderLineItem.create({
+                data: {
+                  ...lineItemData,
+                  id: crypto.randomUUID(),
+                }
+              })
+            } catch (createError) {
+              // If it's a unique constraint error, it means another process 
+              // already created it, which is fine.
+              if (createError.code === 'P2002') {
+                console.log(`ℹ️ Line item ${lineItem.uid} already created by another process`)
+              } else {
+                throw createError
               }
-            })
+            }
           }
         } else {
           // If no uid, create new record (uid is nullable and unique)
@@ -1106,19 +2762,70 @@ async function processOrderWebhook(webhookData, eventType) {
 
         console.log(`✅ Saved line item: ${lineItem.uid || 'no-uid'} - ${lineItem.name || 'unnamed'}`)
       } catch (lineItemError) {
-        console.error(`❌ Error saving line item ${lineItem.uid}:`, lineItemError)
-        // Continue processing other line items
+        // Ensure error is serialized safely before logging
+        safeLogError(`❌ Error saving line item ${lineItem.uid || 'no-uid'}:`, lineItemError)
+        // Continue processing other line items - don't let one failure stop the rest
       }
     }
 
     console.log(`✅ Processed ${lineItems.length} line items for order ${orderId}`)
 
-    // 3. Update order_line_items with technician_id and administrator_id from booking
+    // 3. Link any unlinked payments for this order (if payment webhook arrived before order webhook)
+    // This handles the case where payment was saved with order_id = NULL
+    if (orderUuid && customerId && locationUuid) {
+      try {
+        // Find payments with NULL order_id that match this order's customer and location
+        const orderCreatedAt = order.created_at ? new Date(order.created_at) : new Date()
+        const startWindow = new Date(orderCreatedAt.getTime() - 4 * 60 * 60 * 1000) // 4 hours before
+        const endWindow = new Date(orderCreatedAt.getTime() + 4 * 60 * 60 * 1000) // 4 hours after
+        
+        const unlinkedPayments = await prisma.$queryRaw`
+          SELECT id
+          FROM payments
+          WHERE order_id IS NULL
+            AND customer_id = ${customerId}
+            AND location_id = ${locationUuid}::uuid
+            AND created_at >= ${startWindow}::timestamp
+            AND created_at <= ${endWindow}::timestamp
+          LIMIT 5
+        `
+        
+        if (unlinkedPayments && unlinkedPayments.length > 0) {
+          // Link these payments to this order
+          const updateResult = await prisma.$executeRaw`
+            UPDATE payments
+            SET order_id = ${orderUuid}::uuid,
+                updated_at = NOW()
+            WHERE order_id IS NULL
+              AND customer_id = ${customerId}
+              AND location_id = ${locationUuid}::uuid
+              AND created_at >= ${startWindow}::timestamp
+              AND created_at <= ${endWindow}::timestamp
+          `
+          console.log(`✅ Linked ${updateResult} unlinked payment(s) to order ${orderId}`)
+        }
+      } catch (linkError) {
+        console.warn(`⚠️ Error linking unlinked payments: ${linkError.message}`)
+        // Don't fail the whole webhook if this fails
+      }
+    }
+
+    // 4. Reconcile booking links (try to find and populate booking_id)
+    await reconcileBookingLinks(orderId)
+
+    // 5. Update order_line_items with technician_id and administrator_id from booking
     // (Payment might not exist yet, so this will try again later via payment webhook)
     await updateOrderLineItemsWithTechnician(orderId)
     
   } catch (error) {
-    console.error(`❌ Error processing order webhook (${eventType}):`, error)
-    throw error
+    safeLogError(`❌ Error processing order webhook (${eventType}):`, error)
+    // Re-throw a clean error without BigInt values so Next.js can serialize it
+    const cleanError = new Error(error?.message || 'Order webhook processing failed')
+    cleanError.name = error?.name || 'OrderWebhookError'
+    cleanError.code = error?.code
+    throw cleanError
   }
 }
+
+// Export processOrderWebhook for use in referrals route
+export { processOrderWebhook }

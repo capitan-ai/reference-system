@@ -1,12 +1,14 @@
-const prisma = require('../../../../../lib/prisma-client')
+import prisma from '@/lib/prisma-client'
+import { getUserFromRequest } from '@/lib/auth/check-access'
+
+export const dynamic = 'force-dynamic'
 
 export async function GET(request) {
   try {
-    // Optional: Add admin auth here if needed
-    // const adminKey = request.headers.get('x-admin-key')
-    // if (process.env.ADMIN_KEY && adminKey !== process.env.ADMIN_KEY) {
-    //   return Response.json({ error: 'Unauthorized' }, { status: 401 })
-    // }
+    const user = await getUserFromRequest(request)
+    if (!user || user.error) {
+      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+    }
 
     // Check if table exists
     let tableExists = true
@@ -165,7 +167,7 @@ export async function GET(request) {
     console.error('Error getting job status:', error)
     return Response.json({
       success: false,
-      error: error.message
+      error: 'Internal server error'
     }, { status: 500 })
   }
 }

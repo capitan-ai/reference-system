@@ -1,30 +1,46 @@
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  previewFeatures = ["driverAdapters", "multiSchema"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  schemas   = ["auth", "public"]
 }
 
-model RefClick {
-  id          String                @id @default(uuid())
-  refCode     String
-  refSid      String?               @db.VarChar(255)
-  customerId  String? // square_customer_id from square_existing_clients
-  firstSeenAt DateTime              @default(now())
-  ipHash      String?               @db.VarChar(64)
-  userAgent   String?               @db.VarChar(500)
-  landingUrl  String?               @db.VarChar(500)
-  utmSource   String?               @db.VarChar(100)
-  utmMedium   String?               @db.VarChar(100)
-  utmCampaign String?               @db.VarChar(100)
-  matched     Boolean               @default(false)
-  createdAt   DateTime              @default(now())
-  customer    SquareExistingClient? @relation(fields: [customerId], references: [square_customer_id])
+model custom_oauth_providers {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider_type         String
+  identifier            String    @unique
+  name                  String
+  client_id             String
+  client_secret         String
+  acceptable_client_ids String[]  @default([])
+  scopes                String[]  @default([])
+  pkce_enabled          Boolean   @default(true)
+  attribute_mapping     Json      @default("{}")
+  authorization_params  Json      @default("{}")
+  enabled               Boolean   @default(true)
+  email_optional        Boolean   @default(false)
+  issuer                String?
+  discovery_url         String?
+  skip_nonce_check      Boolean   @default(false)
+  cached_discovery      Json?
+  discovery_cached_at   DateTime? @db.Timestamptz(6)
+  authorization_url     String?
+  token_url             String?
+  userinfo_url          String?
+  jwks_uri              String?
+  created_at            DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime  @default(now()) @db.Timestamptz(6)
 
-  @@map("ref_clicks")
+  @@index([created_at])
+  @@index([enabled])
+  @@index([identifier])
+  @@index([provider_type])
+  @@schema("auth")
 }
 
 model GiftCardRun {
@@ -47,6 +63,7 @@ model GiftCardRun {
   @@index([square_event_id])
   @@index([status])
   @@map("giftcard_runs")
+  @@schema("public")
 }
 
 model GiftCardJob {
@@ -69,6 +86,59 @@ model GiftCardJob {
   @@unique([correlation_id, stage], map: "giftcard_jobs_correlation_stage_key")
   @@index([status, scheduled_at], map: "giftcard_jobs_status_scheduled_idx")
   @@map("giftcard_jobs")
+  @@schema("public")
+}
+
+model WebhookJob {
+  id               String           @id @default(uuid())
+  event_type       String
+  event_id         String
+  event_created_at DateTime?        @db.Timestamptz(6)
+  status           WebhookJobStatus @default(queued)
+  payload          Json
+  attempts         Int              @default(0)
+  max_attempts     Int              @default(5)
+  scheduled_at     DateTime         @default(now()) @db.Timestamptz(6)
+  locked_at        DateTime?        @db.Timestamptz(6)
+  lock_owner       String?
+  last_error       String?
+  created_at       DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime         @default(now()) @db.Timestamptz(6)
+  organization_id  String           @db.Uuid
+  organization     Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@unique([organization_id, event_id, event_type], map: "webhook_jobs_org_event_unique")
+  @@index([organization_id])
+  @@index([status, scheduled_at], map: "webhook_jobs_status_scheduled_idx")
+  @@map("webhook_jobs")
+  @@schema("public")
+}
+
+model ApplicationLog {
+  id              String               @id @default(uuid())
+  organization_id String?              @db.Uuid
+  log_type        String
+  log_id          String
+  log_created_at  DateTime?            @db.Timestamptz(6)
+  status          ApplicationLogStatus @default(received)
+  payload         Json
+  attempts        Int                  @default(0)
+  max_attempts    Int                  @default(0)
+  scheduled_at    DateTime             @default(now()) @db.Timestamptz(6)
+  locked_at       DateTime?            @db.Timestamptz(6)
+  lock_owner      String?
+  last_error      String?
+  created_at      DateTime             @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime             @default(now()) @db.Timestamptz(6)
+  organization    Organization?        @relation(fields: [organization_id], references: [id])
+
+  @@unique([organization_id, log_id, log_type], map: "application_logs_org_log_unique")
+  @@index([organization_id])
+  @@index([log_type])
+  @@index([status, scheduled_at], map: "application_logs_status_scheduled_idx")
+  @@index([created_at])
+  @@map("application_logs")
+  @@schema("public")
 }
 
 model NotificationEvent {
@@ -87,9 +157,11 @@ model NotificationEvent {
   errorMessage       String?
   metadata           Json?
   createdAt          DateTime                 @default(now())
+  organization_id    String                   @db.Uuid
 
   @@index([channel, status, createdAt], map: "notification_channel_status_idx")
   @@map("notification_events")
+  @@schema("public")
 }
 
 model DevicePassRegistration {
@@ -97,68 +169,60 @@ model DevicePassRegistration {
   passTypeIdentifier      String
   serialNumber            String
   pushToken               String?
-
-  // Gift card information
-  giftCardGan      String? // Gift Account Number (same as serialNumber typically)
-  customerName     String? // Customer name (owner of gift card)
-  customerEmail    String? // Customer email
-  squareCustomerId String? // Square customer ID
-  giftCardId       String? // Square gift card ID
-  balanceCents     Int? // Current balance in cents
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  giftCardGan             String?
+  customerName            String?
+  customerEmail           String?
+  squareCustomerId        String?
+  giftCardId              String?
+  balanceCents            Int?
 
   @@id([deviceLibraryIdentifier, passTypeIdentifier, serialNumber])
   @@map("device_pass_registrations")
+  @@schema("public")
 }
 
 model SquareExistingClient {
-  id                         Int       @id @default(autoincrement())
-  organization_id            String // Multi-tenant isolation
-  square_customer_id         String    @unique // Square customer ID (unique for single org, composite unique below for multi-org)
+  square_customer_id         String
   given_name                 String?
   family_name                String?
   email_address              String?
   phone_number               String?
-  got_signup_bonus           Boolean?  @default(false)
-  activated_as_referrer      Boolean?  @default(false)
-  personal_code              String?   @unique
-  created_at                 DateTime? @default(now()) @db.Timestamp(6)
-  updated_at                 DateTime? @default(now()) @db.Timestamp(6)
+  got_signup_bonus           Boolean?     @default(false)
+  activated_as_referrer      Boolean?     @default(false)
+  personal_code              String?
+  created_at                 DateTime?    @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime?    @default(now()) @db.Timestamptz(6)
   gift_card_id               String?
-  referral_code              String?   @unique(map: "unique_referral_code")
+  referral_code              String?
   referral_url               String?
-  total_referrals            Int?      @default(0)
-  total_rewards              Int?      @default(0)
-  email_sent_at              DateTime? @db.Timestamptz(6)
-  first_payment_completed    Boolean?  @default(false)
-  ip_addresses               String[]  @default([])
+  total_referrals            Int?         @default(0)
+  total_rewards              Int?         @default(0)
+  email_sent_at              DateTime?    @db.Timestamptz(6)
+  first_payment_completed    Boolean?     @default(false)
+  ip_addresses               String[]     @default([])
   first_ip_address           String?
   last_ip_address            String?
   used_referral_code         String?
-  referral_email_sent        Boolean?  @default(false)
+  referral_email_sent        Boolean?     @default(false)
   gift_card_order_id         String?
   gift_card_line_item_uid    String?
   gift_card_delivery_channel String?
   gift_card_activation_url   String?
   gift_card_pass_kit_url     String?
   gift_card_digital_email    String?
-  referral_sms_sent          Boolean?  @default(false)
-  referral_sms_sent_at       DateTime? @db.Timestamptz(6)
+  referral_sms_sent          Boolean?     @default(false)
+  referral_sms_sent_at       DateTime?    @db.Timestamptz(6)
   referral_sms_sid           String?
   gift_card_gan              String?
+  organization_id            String       @db.Uuid
+  id                         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  raw_json                   Json?
+  first_visit_at             DateTime?    @db.Timestamptz(6)
+  organization               Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  // Relations
-  organization    Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  refClicks       RefClick[]
-  bookings        Booking[]
-  payments        Payment[]
-  giftCards       GiftCard[]
-  referralProfile ReferralProfile?
-
-  @@unique([organization_id, square_customer_id])
-  @@index([organization_id])
+  @@unique([organization_id, square_customer_id], map: "square_existing_clients_org_customer_idx")
   @@index([activated_as_referrer], map: "idx_activated_referrer")
   @@index([gift_card_id], map: "idx_gift_card_id")
   @@index([personal_code], map: "idx_personal_code")
@@ -166,7 +230,63 @@ model SquareExistingClient {
   @@index([gift_card_delivery_channel], map: "idx_square_clients_gift_card_delivery")
   @@index([gift_card_order_id], map: "idx_square_clients_gift_card_order")
   @@index([square_customer_id], map: "idx_square_customer_id")
+  @@index([organization_id], map: "idx_square_existing_clients_organization_id")
   @@map("square_existing_clients")
+  @@schema("public")
+}
+
+model CustomerAnalytics {
+  organization_id                String       @db.Uuid
+  square_customer_id             String
+  given_name                     String?
+  family_name                    String?
+  email_address                  String?
+  phone_number                   String?
+  first_booking_at               DateTime?    @db.Timestamptz(3)
+  last_booking_at                DateTime?    @db.Timestamptz(3)
+  last_payment_at                DateTime?    @db.Timestamptz(3)
+  total_accepted_bookings        Int          @default(0)
+  total_cancelled_by_customer    Int          @default(0)
+  total_cancelled_by_seller      Int          @default(0)
+  total_no_shows                 Int          @default(0)
+  total_revenue_cents            BigInt       @default(0)
+  total_tips_cents               BigInt       @default(0)
+  total_payments                 Int          @default(0)
+  avg_ticket_cents               BigInt       @default(0)
+  booking_notes                  Json?
+  preferred_technician_id        String?
+  preferred_service_variation_id String?
+  distinct_locations             Int          @default(0)
+  is_referrer                    Boolean      @default(false)
+  activated_as_referrer_at       DateTime?    @db.Timestamptz(3)
+  referral_source                String?
+  total_referrals                Int          @default(0)
+  total_rewards_cents            BigInt       @default(0)
+  customer_segment               String       @default("NEW")
+  created_at                     DateTime     @default(now()) @db.Timestamptz(3)
+  updated_at                     DateTime     @default(now()) @updatedAt @db.Timestamptz(3)
+  total_visits                   Int?         @default(0)
+  booking_visits                 Int?         @default(0)
+  service_order_visits           Int?         @default(0)
+  training_visits                Int?         @default(0)
+  retail_visits                  Int?         @default(0)
+  first_visit_at                 DateTime?    @db.Timestamptz(6)
+  last_visit_at                  DateTime?    @db.Timestamptz(6)
+  customer_type                  String?      @default("POTENTIAL")
+  gross_revenue_cents            BigInt?      @default(0)
+  organization                   Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([organization_id, square_customer_id])
+  @@index([organization_id, customer_segment])
+  @@index([organization_id, first_booking_at])
+  @@index([organization_id, last_booking_at])
+  @@index([is_referrer])
+  @@index([booking_notes], map: "customer_analytics_booking_notes_gin_idx", type: Gin)
+  @@index([organization_id, last_visit_at(sort: Desc)], map: "idx_ca_org_last_visit")
+  @@index([organization_id, total_visits(sort: Desc)], map: "idx_ca_org_total_visits")
+  @@index([organization_id, customer_type], map: "idx_ca_org_type")
+  @@map("customer_analytics")
+  @@schema("public")
 }
 
 model square_gift_card_gan_audit {
@@ -175,175 +295,121 @@ model square_gift_card_gan_audit {
   resolved_gan       String?
   verified_at        DateTime? @default(now()) @db.Timestamptz(6)
   raw_payload        Json?
+
+  @@schema("public")
 }
 
-// ============================================================================
-// GIFT CARDS TABLE
-// Supports multiple gift cards per customer (friend bonus + referrer rewards)
-// ============================================================================
 model GiftCard {
-  id                    String             @id @default(uuid())
-  organization_id       String // Multi-tenant isolation
-  square_customer_id    String
-  square_gift_card_id   String             @unique // Square gift card ID
-  gift_card_gan         String? // Gift Account Number
-  reward_type           GiftCardRewardType // FRIEND_SIGNUP_BONUS, REFERRER_REWARD
-  initial_amount_cents  Int? // Initial amount when created
-  current_balance_cents Int? // Current balance (cached from Square)
-
-  // eGift activation metadata (if activated via Square order)
+  id                      String                @id @default(uuid())
+  square_customer_id      String
+  square_gift_card_id     String
+  gift_card_gan           String?
+  reward_type             GiftCardRewardType
+  initial_amount_cents    Int?
+  current_balance_cents   Int?
   gift_card_order_id      String?
   gift_card_line_item_uid String?
+  delivery_channel        String?
+  activation_url          String?
+  pass_kit_url            String?
+  digital_email           String?
+  is_active               Boolean               @default(true)
+  state                   String?
+  created_at              DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime              @updatedAt @db.Timestamptz(6)
+  last_balance_check_at   DateTime?             @db.Timestamptz(6)
+  organization_id         String                @db.Uuid
+  transactions            GiftCardTransaction[]
+  organization            Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  ReferralReward          ReferralReward[]
 
-  // Delivery/activation details
-  delivery_channel String? // square_egift_order, owner_funded_activate, owner_funded_adjust
-  activation_url   String? // Square digital card activation URL
-  pass_kit_url     String? // Apple/Google Wallet URL
-  digital_email    String? // Recipient email from Square
-
-  // Status tracking
-  is_active Boolean @default(true)
-  state     String? // PENDING, ACTIVE (from Square)
-
-  // Timestamps
-  created_at            DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at            DateTime  @updatedAt @db.Timestamptz(6)
-  last_balance_check_at DateTime? @db.Timestamptz(6) // When balance was last synced from Square
-
-  // Relations
-  organization   Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  customer       SquareExistingClient  @relation(fields: [square_customer_id], references: [square_customer_id])
-  transactions   GiftCardTransaction[]
-  ReferralReward ReferralReward[]
-
-  @@index([organization_id])
+  @@unique([organization_id, square_gift_card_id])
   @@index([square_customer_id])
   @@index([square_gift_card_id])
   @@index([gift_card_gan])
   @@index([reward_type])
   @@index([is_active])
+  @@index([organization_id], map: "idx_gift_cards_organization_id")
   @@map("gift_cards")
+  @@schema("public")
 }
 
-// ============================================================================
-// GIFT CARD TRANSACTIONS TABLE
-// Track all gift card activities (create, load, use, refund)
-// ============================================================================
 model GiftCardTransaction {
   id                   String                  @id @default(uuid())
   gift_card_id         String
   transaction_type     GiftCardTransactionType
-  amount_cents         Int // Amount added/used in this transaction
-  balance_before_cents Int? // Balance before transaction
-  balance_after_cents  Int? // Balance after transaction
-
-  // Reference IDs
-  square_activity_id String? // Square gift card activity ID
-  square_order_id    String? // Related Square order (if applicable)
-  square_payment_id  String? // Related Square payment (if used for payment)
-
-  // Context
-  reason        String? // COMPLIMENTARY, REFERRER_REWARD, FRIEND_BONUS, etc.
-  context_label String? // Human-readable context
-
-  // Metadata
-  metadata Json? // Store raw Square API response for debugging
-
-  created_at DateTime @default(now()) @db.Timestamptz(6)
-
-  // Relations
-  giftCard GiftCard @relation(fields: [gift_card_id], references: [id])
+  amount_cents         Int
+  balance_before_cents Int?
+  balance_after_cents  Int?
+  square_activity_id   String?
+  square_order_id      String?
+  square_payment_id    String?
+  reason               String?
+  context_label        String?
+  metadata             Json?
+  created_at           DateTime                @default(now()) @db.Timestamptz(6)
+  organization_id      String?                 @db.Uuid
+  giftCard             GiftCard                @relation(fields: [gift_card_id], references: [id])
 
   @@index([gift_card_id])
   @@index([transaction_type])
   @@index([created_at])
   @@index([square_activity_id])
   @@map("gift_card_transactions")
+  @@schema("public")
 }
 
-// ============================================================================
-// REFERRAL PROFILES TABLE
-// One-to-one with customer, stores referral program participation
-// ============================================================================
 model ReferralProfile {
-  id                 String  @id @default(uuid())
-  organization_id    String // Multi-tenant isolation
-  square_customer_id String  @unique
-  personal_code      String? @unique
-  referral_code      String? @unique // Alternative code format (if different from personal_code)
-  referral_url       String?
+  id                    String           @id @default(uuid())
+  square_customer_id    String           @unique
+  personal_code         String?
+  referral_code         String?
+  referral_url          String?
+  activated_as_referrer Boolean          @default(false)
+  used_referral_code    String?
+  referral_email_sent   Boolean          @default(false)
+  referral_sms_sent     Boolean          @default(false)
+  referral_sms_sent_at  DateTime?        @db.Timestamptz(6)
+  referral_sms_sid      String?
+  total_referrals_count Int              @default(0)
+  total_rewards_cents   Int              @default(0)
+  created_at            DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime         @updatedAt @db.Timestamptz(6)
+  activated_at          DateTime?        @db.Timestamptz(6)
+  organization_id       String           @db.Uuid
+  referral_checked_at   DateTime?        @db.Timestamptz(6)
+  organization          Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rewards               ReferralReward[]
 
-  // Status flags
-  activated_as_referrer Boolean @default(false)
-
-  // Friend signup tracking
-  used_referral_code String? // Referral code they used when signing up (makes them a "friend")
-
-  // Notification tracking
-  referral_email_sent  Boolean   @default(false)
-  referral_sms_sent    Boolean   @default(false)
-  referral_sms_sent_at DateTime? @db.Timestamptz(6)
-  referral_sms_sid     String? // Twilio SMS SID
-
-  // Computed fields (can be calculated from ReferralReward table, but cached for performance)
-  total_referrals_count Int @default(0) // Aggregated count (for quick queries)
-  total_rewards_cents   Int @default(0) // Aggregated total (for quick queries)
-
-  // Timestamps
-  created_at   DateTime  @default(now()) @db.Timestamptz(6)
-  updated_at   DateTime  @updatedAt @db.Timestamptz(6)
-  activated_at DateTime? @db.Timestamptz(6) // When activated_as_referrer became true
-
-  // Relations
-  organization Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  customer     SquareExistingClient @relation(fields: [square_customer_id], references: [square_customer_id])
-  rewards      ReferralReward[] // All rewards earned as referrer
-
-  @@index([organization_id])
+  @@unique([organization_id, square_customer_id])
+  @@unique([organization_id, personal_code])
+  @@unique([organization_id, referral_code])
   @@index([square_customer_id])
-  @@index([personal_code])
-  @@index([referral_code])
   @@index([used_referral_code])
   @@index([activated_as_referrer])
+  @@index([organization_id], map: "idx_referral_profiles_organization_id")
   @@map("referral_profiles")
+  @@schema("public")
 }
 
-// ============================================================================
-// REFERRAL REWARDS TABLE
-// Individual reward records (instead of aggregated totals)
-// ============================================================================
 model ReferralReward {
-  id                   String @id @default(uuid())
-  organization_id      String // Multi-tenant isolation
-  referrer_customer_id String // Who earned the reward (referrer)
-  referred_customer_id String // Who used the referral code (friend)
+  id                   String               @id @default(uuid())
+  referrer_customer_id String
+  referred_customer_id String
+  reward_amount_cents  Int
+  status               ReferralRewardStatus @default(PAID)
+  gift_card_id         String?
+  payment_id           String?
+  booking_id           String?
+  reward_type          String?
+  metadata             Json?
+  created_at           DateTime             @default(now()) @db.Timestamptz(6)
+  paid_at              DateTime?            @db.Timestamptz(6)
+  organization_id      String               @db.Uuid
+  giftCard             GiftCard?            @relation(fields: [gift_card_id], references: [id])
+  organization         Organization         @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  referrer             ReferralProfile      @relation(fields: [referrer_customer_id], references: [square_customer_id])
 
-  // Reward details
-  reward_amount_cents Int // Amount earned (typically 1000 = $10)
-  status              ReferralRewardStatus @default(PAID)
-
-  // Gift card that received the reward
-  gift_card_id String? // GiftCard.id that received the reward
-
-  // Triggering events
-  payment_id String? // Payment that triggered the reward (Square payment ID)
-  booking_id String? // Booking that triggered the reward (Square booking ID)
-
-  // Context
-  reward_type String? // "referrer_reward", "friend_bonus", etc.
-
-  // Metadata
-  metadata Json? // Store any additional context
-
-  created_at DateTime  @default(now()) @db.Timestamptz(6)
-  paid_at    DateTime? @db.Timestamptz(6) // When reward was actually paid out
-
-  // Relations
-  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  referrer     ReferralProfile @relation(fields: [referrer_customer_id], references: [square_customer_id])
-  giftCard     GiftCard?       @relation(fields: [gift_card_id], references: [id])
-
-  @@index([organization_id])
   @@index([referrer_customer_id])
   @@index([referred_customer_id])
   @@index([gift_card_id])
@@ -351,489 +417,769 @@ model ReferralReward {
   @@index([booking_id])
   @@index([status])
   @@index([created_at])
+  @@index([organization_id], map: "idx_referral_rewards_organization_id")
   @@map("referral_rewards")
+  @@schema("public")
 }
 
-// ============================================================================
-// DASHBOARD TABLES - Main Tables for Dashboard Analytics
-// ============================================================================
+model ReferralAnalyticsDaily {
+  organization_id                 String   @db.Uuid
+  date_pacific                    DateTime @db.Date
+  new_customers_via_referral      Int      @default(0)
+  unique_codes_rewarded           Int      @default(0)
+  rewards_issued_cents            Int      @default(0)
+  referrer_rewards_count          Int      @default(0)
+  friend_signup_bonuses_count     Int      @default(0)
+  friend_signup_bonuses_cents     Int      @default(0)
+  emails_referral_invite_sent     Int      @default(0)
+  emails_friend_activation_sent   Int      @default(0)
+  emails_referrer_activation_sent Int      @default(0)
+  wallet_activations_count        Int      @default(0)
+  redemptions_count               Int      @default(0)
+  redemptions_cents               Int      @default(0)
+  details_json                    Json?
+  updated_at                      DateTime @updatedAt @db.Timestamptz(6)
+  organization                   Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-// ============================================================================
-// ORGANIZATIONS TABLE
-// Multi-tenant isolation: One Square merchant = one organization
-// ============================================================================
+  @@id([organization_id, date_pacific])
+  @@index([organization_id, date_pacific])
+  @@map("referral_analytics_daily")
+  @@schema("public")
+}
 
 model Organization {
-  id                 String   @id @default(uuid())
-  square_merchant_id String   @unique // Square merchant ID
-  name               String? // Organization name
-  slug               String?  @unique // URL-friendly slug
-  settings           Json?    @default("{}") // Organization settings
-  is_active          Boolean  @default(true) // Active status
-  created_at         DateTime @default(now()) @db.Timestamptz(6)
-  updated_at         DateTime @updatedAt @db.Timestamptz(6)
-
-  // Relations
-  locations               Location[]
-  square_existing_clients SquareExistingClient[]
-  team_members            TeamMember[]
-  service_variations      ServiceVariation[]
+  id                      String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  square_merchant_id      String                 @unique
+  created_at              DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  name                    String?
+  slug                    String?
+  settings                Json?                  @default("{}")
+  is_active               Boolean?               @default(true)
+  admin_analytics_daily   AdminAnalyticsDaily[]
+  application_logs        ApplicationLog[]
   bookings                Booking[]
-  orders                  Order[]
-  order_line_items        OrderLineItem[]
-  payments                Payment[]
-  payment_tenders         PaymentTender[]
+  customer_analytics      CustomerAnalytics[]
   gift_cards              GiftCard[]
+  locations               Location[]
+  order_line_items        OrderLineItem[]
+  orders                  Order[]
+  organization_users      OrganizationUser[]
+  payment_tenders         PaymentTender[]
+  payments                Payment[]
+  referral_analytics_daily ReferralAnalyticsDaily[]
   referral_profiles       ReferralProfile[]
   referral_rewards        ReferralReward[]
-  organization_users      OrganizationUser[]
-  user_roles              UserRole[] // User roles relation
+  service_variations      ServiceVariation[]
+  square_existing_clients SquareExistingClient[]
+  team_members            TeamMember[]
+  training_records        TrainingRecord[]
+  user_roles              UserRole[]
+  webhook_jobs            WebhookJob[]
 
-  @@index([square_merchant_id])
-  @@index([slug])
+  @@index([square_merchant_id], map: "idx_organizations_square_merchant_id")
   @@map("organizations")
+  @@schema("public")
 }
 
-// ============================================================================
-// LOCATIONS TABLE
-// Store location mapping (Square ID to friendly name)
-// ============================================================================
+model AdminAnalyticsDaily {
+  organization_id            String       @db.Uuid
+  team_member_id             String       @db.Uuid
+  location_id                String       @db.Uuid
+  date_pacific               DateTime     @db.Date
+  timezone                   String       @default("America/Los_Angeles")
+  given_name                 String?
+  family_name                String?
+  role                       String?
+  bookings_created_count     Int          @default(0)
+  new_customers_booked_count Int          @default(0)
+  rebookings_count           Int          @default(0)
+  bookings_current_month_count        Int @default(0)
+  bookings_future_months_count        Int @default(0)
+  appointments_total         Int          @default(0)
+  appointments_accepted      Int          @default(0)
+  appointments_no_show       Int          @default(0)
+  appointments_cancelled     Int          @default(0)
+  late_cancellations         Int          @default(0)
+  early_cancellations        Int          @default(0)
+  created_at                 DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime     @updatedAt @db.Timestamptz(6)
+  cashier_avg_ticket_cents   BigInt       @default(0)
+  cashier_payments_count     Int          @default(0)
+  cashier_revenue_cents      BigInt       @default(0)
+  cashier_tips_cents         BigInt       @default(0)
+  creator_avg_ticket_cents   BigInt       @default(0)
+  creator_payments_count     Int          @default(0)
+  creator_revenue_cents      BigInt       @default(0)
+  location                   Location     @relation(fields: [location_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organization               Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  team_member                TeamMember   @relation(fields: [team_member_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([organization_id, team_member_id, location_id, date_pacific])
+  @@index([organization_id, date_pacific])
+  @@index([organization_id, team_member_id])
+  @@index([organization_id, location_id, date_pacific])
+  @@map("admin_analytics_daily")
+  @@schema("public")
+}
+
+/// Admin-created booking facts for New vs Rebook classification.
+/// Snapshot fields (administrator_*, creator_*, created_at_utc, start_at_utc, *_pacific) are IMMUTABLE - do not update on refresh.
+model AdminCreatedBookingFact {
+  booking_id                   String   @id @db.Uuid
+  organization_id              String   @db.Uuid
+  location_id                  String   @db.Uuid
+  customer_id                  String   @db.VarChar(255)
+  administrator_id_snapshot    String   @db.Uuid // IMMUTABLE - do not update on refresh
+  administrator_name_snapshot  String? // IMMUTABLE
+  creator_type_snapshot        String? // IMMUTABLE
+  creator_resolution_source    String? // IMMUTABLE
+
+  created_at_utc              DateTime @db.Timestamptz(6) // IMMUTABLE - freeze on first capture
+  start_at_utc                DateTime @db.Timestamptz(6) // IMMUTABLE
+  created_day_pacific         DateTime @db.Date // IMMUTABLE
+  visit_day_pacific           DateTime @db.Date // IMMUTABLE
+  created_month_pacific       DateTime @db.Date // IMMUTABLE
+  visit_month_pacific         DateTime @db.Date // IMMUTABLE
+
+  classification_snapshot     String // NEW_CLIENT | REBOOKING - Mutable in correction window
+  classification_reason_snapshot String? // NO_PRIOR_PAID | HAS_PRIOR_PAID - Mutable
+  prior_paid_exists           Boolean // Mutable
+
+  is_same_month               Boolean
+  is_future_month             Boolean
+  is_past_month               Boolean
+
+  snapshot_calculated_at      DateTime @db.Timestamptz(6) // Mutable
+  inserted_at                 DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([organization_id, administrator_id_snapshot, created_day_pacific], map: "idx_admin_facts_org_admin_day")
+  @@index([organization_id, location_id, created_day_pacific], map: "idx_admin_facts_org_loc_day")
+  @@index([organization_id, customer_id, start_at_utc], map: "idx_admin_facts_org_cust_start")
+  @@index([organization_id, created_at_utc], map: "idx_admin_facts_org_created")
+  @@index([organization_id, administrator_id_snapshot, created_month_pacific], map: "idx_admin_facts_org_admin_month")
+  @@map("admin_created_booking_facts")
+  @@schema("public")
+}
 
 model Location {
-  id                              String  @id @default(uuid())
-  organization_id                 String // Multi-tenant isolation
-  square_location_id              String // Square location ID
-  name                            String // Friendly name (Pacific Ave, Union St)
+  id                              String                @id @default(uuid()) @db.Uuid
+  square_location_id              String
+  name                            String
   address_line_1                  String?
-  locality                        String? // City
-  administrative_district_level_1 String? // State
+  locality                        String?
+  administrative_district_level_1 String?
   postal_code                     String?
+  created_at                      DateTime              @default(now())
+  updated_at                      DateTime              @updatedAt
+  organization_id                 String                @db.Uuid
+  square_merchant_id              String?               @db.VarChar(255)
+  admin_analytics_daily           AdminAnalyticsDaily[]
+  bookings                        Booking[]
+  organization                    Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  orders                          Order[]
+  payments                        Payment[]
+  user_roles                      UserRole[]
 
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings     Booking[]
-  payments     Payment[]
-  orders       Order[]
-  user_roles   UserRole[] // User roles relation
-
-  @@unique([organization_id, square_location_id])
-  @@index([organization_id])
+  @@unique([organization_id, square_location_id], map: "locations_organization_square_location_unique")
+  @@index([organization_id], map: "idx_locations_organization_id")
+  @@index([square_location_id], map: "idx_locations_square_location_id")
+  @@index([square_merchant_id], map: "idx_locations_square_merchant_id")
   @@map("locations")
+  @@schema("public")
 }
 
-// ============================================================================
-// TEAM MEMBERS (MASTERS) TABLE
-// Active nail technicians/staff members
-// ============================================================================
+model MasterSettings {
+  team_member_id                 String   @id @db.Uuid
+  commission_rate                Float    @default(40.0)
+  category                       TeamRole @default(MASTER)
+  location_code                  TeamLocation @default(UNKNOWN_LOC)
+  is_active                      Boolean  @default(true)
+  default_working_minutes_per_day Int?     // For utilization_rate; null = use 480
+  created_at                     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                     DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  team_member TeamMember @relation(fields: [team_member_id], references: [id], onDelete: Cascade)
+
+  @@map("master_settings")
+  @@schema("public")
+}
+
+model BookingSnapshot {
+  booking_id      String  @id @db.Uuid
+  organization_id String  @db.Uuid
+  location_id     String  @db.Uuid
+  technician_id   String? @db.Uuid
+
+  category_snapshot         TeamRole @default(MASTER)
+  price_snapshot_amount     Int // В центах
+  commission_rate_snapshot  Float // Например, 45.0
+  duration_minutes_snapshot Int      @default(60)
+
+  status              String // ACCEPTED, CANCELLED, NO_SHOW
+  is_fix              Boolean @default(false)
+  original_booking_id String? @db.Uuid
+
+  base_processed     Boolean @default(false)
+  discount_processed Boolean @default(false)
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  booking        Booking                @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  ledger_entries MasterEarningsLedger[]
+
+  @@index([technician_id, status])
+  @@map("booking_snapshots")
+  @@schema("public")
+}
+
+model MasterEarningsLedger {
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id String  @db.Uuid
+  team_member_id  String  @db.Uuid
+  booking_id      String? @db.Uuid
+
+  entry_type    MasterEntryType
+  amount_amount Int // В центах, может быть отрицательным
+
+  source_engine String // MASTER_ENGINE, DISCOUNT_ENGINE, etc.
+  meta_json     Json? // Для связи мастеров при Fix и других деталей
+
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  team_member TeamMember       @relation(fields: [team_member_id], references: [id], onDelete: Cascade)
+  snapshot    BookingSnapshot? @relation(fields: [booking_id], references: [booking_id], onDelete: SetNull)
+
+  @@index([team_member_id, created_at])
+  @@map("master_earnings_ledger")
+  @@schema("public")
+}
+
+model MasterPerformanceDaily {
+  date            DateTime @db.Date
+  master_id       String   @db.Uuid
+  organization_id String   @db.Uuid
+  location_id     String   @db.Uuid
+
+  // Финансовые показатели (в центах)
+  gross_generated     BigInt @default(0)
+  net_master_income   BigInt @default(0)
+  margin_contribution BigInt @default(0)
+  tips_total          BigInt @default(0)
+
+  // Операционные показатели
+  booked_minutes    Int   @default(0)
+  available_minutes Int   @default(0)
+  utilization_rate  Float @default(0)
+  booking_count     Int   @default(0)
+  fix_count         Int   @default(0)
+
+  // Score (0-100)
+  composite_score Float @default(0)
+
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@id([date, master_id, location_id])
+  @@index([organization_id, date])
+  @@index([organization_id, location_id, date])
+  @@map("master_performance_daily")
+  @@schema("public")
+}
+
+model CustomerPackage {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String   @db.Uuid
+  customer_id          String
+  package_name         String // Например: "Package 5 TOP MASTER"
+  category             TeamRole @default(MASTER)
+  units_total          Int
+  units_remaining      Int
+  allocated_unit_price Int // Цена за 1 визит для мастера
+
+  status     String   @default("ACTIVE") // ACTIVE, USED, EXPIRED
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  usages PackageUsage[]
+
+  @@index([customer_id])
+  @@map("customer_packages")
+  @@schema("public")
+}
+
+model PackageUsage {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  package_id String   @db.Uuid
+  booking_id String   @db.Uuid
+  used_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  package CustomerPackage @relation(fields: [package_id], references: [id], onDelete: Cascade)
+
+  @@map("package_usages")
+  @@schema("public")
+}
+
+model DiscountAllocationRule {
+  id                   String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id      String @db.Uuid
+  discount_name        String // Имя скидки из Square
+  master_share_percent Float  @default(0) // Сколько % скидки платит мастер
+  salon_share_percent  Float  @default(100) // Сколько % скидки платит салон
+
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([organization_id, discount_name])
+  @@map("discount_allocation_rules")
+  @@schema("public")
+}
+
+enum MasterEntryType {
+  SERVICE_COMMISSION
+  TIP
+  FIX_PENALTY
+  FIX_COMPENSATION
+  DISCOUNT_ADJUSTMENT
+  MANUAL_ADJUSTMENT
+  REVERSAL
+
+  @@schema("public")
+}
 
 model TeamMember {
-  id                    String       @id @default(uuid())
-  organization_id       String // Multi-tenant isolation
-  square_team_member_id String // Square team member ID
-  given_name            String?
-  family_name           String?
-  email_address         String?
-  phone_number          String?
-  status                String? // ACTIVE, INACTIVE
-  location_code         TeamLocation @default(UNKNOWN_LOC)
-  role                  TeamRole     @default(UNKNOWN)
+  id                                String                 @id @default(uuid()) @db.Uuid
+  square_team_member_id             String
+  given_name                        String?
+  family_name                       String?
+  email_address                     String?
+  phone_number                      String?
+  status                            String?
+  location_code                     TeamLocation           @default(UNKNOWN_LOC)
+  role                              TeamRole               @default(UNKNOWN)
+  created_at                        DateTime               @default(now())
+  updated_at                        DateTime               @updatedAt
+  organization_id                   String                 @db.Uuid
+  is_system                         Boolean                @default(false)
+  commission_rate                   Float?                 @default(40.0)
+  master_settings                   MasterSettings?
+  admin_analytics_daily             AdminAnalyticsDaily[]
+  booking_segments_as_technician    BookingSegment[]       @relation("BookingSegmentTechnician")
+  bookings_as_administrator         Booking[]              @relation("BookingAdministrator")
+  bookings_as_technician            Booking[]              @relation("BookingTechnician")
+  order_line_items_as_administrator OrderLineItem[]        @relation("OrderLineItemAdministrator")
+  order_line_items_as_technician    OrderLineItem[]        @relation("OrderLineItemTechnician")
+  payments_as_administrator         Payment[]              @relation("PaymentAdministrator")
+  organization                      Organization           @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  MasterEarningsLedger              MasterEarningsLedger[]
 
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  // Relations
-  organization                      Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings_as_technician            Booking[]       @relation("BookingTechnician")
-  bookings_as_administrator         Booking[]       @relation("BookingAdministrator")
-  order_line_items_as_technician    OrderLineItem[] @relation("OrderLineItemTechnician")
-  order_line_items_as_administrator OrderLineItem[] @relation("OrderLineItemAdministrator")
-  payments_as_administrator         Payment[]       @relation("PaymentAdministrator")
-
-  @@unique([organization_id, square_team_member_id])
-  @@index([organization_id])
+  @@unique([organization_id, square_team_member_id], map: "team_members_organization_square_team_member_unique")
   @@index([square_team_member_id])
   @@index([status])
+  @@index([is_system])
+  @@index([organization_id], map: "idx_team_members_organization_id")
   @@map("team_members")
+  @@schema("public")
 }
-
-// ============================================================================
-// SERVICE VARIATIONS TABLE
-// Store service information (fetched from Square API)
-// ============================================================================
 
 model ServiceVariation {
-  id               String  @id @default(uuid())
-  organization_id  String // Multi-tenant isolation
-  square_id        String // Square service variation ID
-  name             String? // Service name (e.g., "Manicure", "Pedicure")
-  service_id       String? // Parent service ID
-  duration_minutes Int?
+  uuid                  String           @id @db.Uuid
+  square_variation_id   String           @unique
+  name                  String?
+  duration_minutes      Int?
+  created_at            DateTime         @default(now())
+  updated_at            DateTime         @updatedAt
+  organization_id       String           @db.Uuid
+  item_id               String?
+  service_duration      Int?
+  team_member_ids       String[]         @default([])
+  service_name          String?
+  price_amount          Int?
+  price_currency        String?          @default("USD")
+  available_for_booking Boolean?         @default(true)
+  description           String?
+  label_color           String?
+  is_taxable            Boolean?         @default(false)
+  bookingSegments       BookingSegment[]
+  bookings              Booking[]
+  organization          Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  // Relations
-  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  bookings     Booking[]
-
-  @@unique([organization_id, square_id])
-  @@index([organization_id])
+  @@unique([organization_id, square_variation_id], map: "service_variation_organization_square_variation_id_unique")
+  @@index([organization_id], map: "idx_service_variation_organization_id")
+  @@index([item_id])
   @@map("service_variation")
+  @@schema("public")
 }
 
-// ============================================================================
-// BOOKINGS TABLE
-// Stores all bookings from booking.created/updated webhooks
-// ============================================================================
-
 model Booking {
-  id              String @id @default(uuid()) // Internal UUID PK
-  organization_id String // Multi-tenant isolation
-  booking_id      String // Square booking ID (external identifier)
-  location_id     String // Internal UUID FK to locations.id
-
-  // ===== BASIC FIELDS =====
-  customer_id   String? // Square customer ID
-  location_type String? // BUSINESS_LOCATION
-  start_at      DateTime
-  status        String // ACCEPTED, CANCELLED, etc.
-  all_day       Boolean  @default(false)
-  version       Int      @default(0)
-  source        String? // THIRD_PARTY_BUYER, FIRST_PARTY_MERCHANT
-
-  // ===== SERVICE FIELDS (from appointment_segments) =====
-  service_variation_id      String? // Internal UUID FK to service_variations.id
-  service_variation_version BigInt?
-  duration_minutes          Int? // Service duration
-  intermission_minutes      Int?    @default(0)
-  technician_id             String? // Internal UUID FK to team_members.id
-  any_team_member           Boolean @default(false)
-
-  // ===== ADDRESS =====
+  customer_id                     String?
+  location_type                   String?
+  start_at                        DateTime
+  status                          String
+  all_day                         Boolean           @default(false)
+  version                         Int               @default(0)
+  source                          String?
   address_line_1                  String?
-  locality                        String? // City
-  administrative_district_level_1 String? // State (CA)
+  locality                        String?
+  administrative_district_level_1 String?
   postal_code                     String?
+  creator_type                    String?
+  creator_customer_id             String?
+  transition_time_minutes         Int?              @default(0)
+  created_at                      DateTime
+  updated_at                      DateTime
+  raw_json                        Json?
+  merchant_id                     String?
+  service_variation_version       BigInt?
+  duration_minutes                Int?
+  intermission_minutes            Int?              @default(0)
+  any_team_member                 Boolean?          @default(false)
+  booking_id                      String
+  id                              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id                 String            @db.Uuid
+  location_id                     String            @db.Uuid
+  service_variation_id            String?           @db.Uuid
+  technician_id                   String?           @db.Uuid
+  administrator_id                String?           @db.Uuid
+  customer_note                   String?
+  seller_note                     String?
+  segments                        BookingSegment[]
+  administrator                   TeamMember?       @relation("BookingAdministrator", fields: [administrator_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  location                        Location          @relation(fields: [location_id], references: [id], onUpdate: NoAction)
+  organization                    Organization      @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  service_variation               ServiceVariation? @relation(fields: [service_variation_id], references: [uuid], onDelete: Restrict, onUpdate: NoAction)
+  technician                      TeamMember?       @relation("BookingTechnician", fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  order_line_items                OrderLineItem[]
+  orders                          Order[]
+  BookingSnapshot                 BookingSnapshot[]
 
-  // ===== CREATOR DETAILS =====
-  creator_type        String? // CUSTOMER, STAFF, TEAM_MEMBER
-  creator_customer_id String?
-  administrator_id    String? // Internal UUID FK to team_members.id
-
-  // ===== MERCHANT =====
-  merchant_id String? // Square merchant ID (deprecated, use organization_id)
-
-  // ===== TRANSITION =====
-  transition_time_minutes Int? @default(0)
-
-  // ===== TIMESTAMPS =====
-  created_at DateTime
-  updated_at DateTime
-
-  // ===== RAW DATA =====
-  raw_json Json? // Immutable source of truth - full booking object from Square API
-
-  // Relations
-  organization      Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  customer          SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
-  location          Location              @relation(fields: [location_id], references: [id])
-  technician        TeamMember?           @relation("BookingTechnician", fields: [technician_id], references: [id])
-  administrator     TeamMember?           @relation("BookingAdministrator", fields: [administrator_id], references: [id])
-  service_variation ServiceVariation?     @relation(fields: [service_variation_id], references: [id])
-  payments          Payment[]
-
-  @@unique([organization_id, booking_id])
-  @@index([organization_id])
-  @@index([location_id])
+  @@unique([organization_id, booking_id], map: "bookings_organization_booking_id_unique")
   @@index([customer_id])
   @@index([start_at])
   @@index([status])
   @@index([created_at])
-  @@index([booking_id])
+  @@index([creator_type])
+  @@index([booking_id], map: "idx_bookings_booking_id")
+  @@index([organization_id], map: "idx_bookings_organization_id")
   @@map("bookings")
+  @@schema("public")
 }
 
-// ============================================================================
-// ORDERS TABLE
-// Store order information (for discount tracking)
-// ============================================================================
+/// Staging mirror of Square List Bookings API — no relations to core tables (audit / compare / backfill).
+model SquareBookingSdkSnapshot {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  square_booking_id  String    @unique @map("square_booking_id")
+  square_location_id String?   @map("square_location_id")
+  square_customer_id String?   @map("square_customer_id")
+  start_at           DateTime? @db.Timestamptz(6)
+  status             String?
+  square_version     Int?      @map("square_version")
+  square_updated_at  DateTime? @map("square_updated_at") @db.Timestamptz(6)
+  raw_json           Json
+  sync_batch_id      String    @map("sync_batch_id")
+  window_start       DateTime? @map("window_start") @db.Timestamptz(6)
+  window_end         DateTime? @map("window_end") @db.Timestamptz(6)
+  fetched_at         DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  @@index([start_at])
+  @@index([square_location_id])
+  @@index([sync_batch_id])
+  @@index([status])
+  @@map("square_booking_sdk_snapshot")
+  @@schema("public")
+}
+
+model BookingSegment {
+  id                          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  booking_id                  String            @db.Uuid
+  segment_index               Int
+  square_segment_uid          String?
+  square_service_variation_id String?
+  service_variation_id        String?           @db.Uuid
+  service_variation_version   BigInt?
+  duration_minutes            Int?
+  intermission_minutes        Int?              @default(0)
+  square_team_member_id       String?
+  technician_id               String?           @db.Uuid
+  any_team_member             Boolean           @default(false)
+  booking_version             Int               @default(0)
+  is_active                   Boolean           @default(true)
+  deleted_at                  DateTime?         @db.Timestamptz(6)
+  created_at                  DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  booking_created_at          DateTime?
+  booking_start_at            DateTime?
+  booking                     Booking           @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  serviceVariation            ServiceVariation? @relation(fields: [service_variation_id], references: [uuid])
+  technician                  TeamMember?       @relation("BookingSegmentTechnician", fields: [technician_id], references: [id])
+
+  @@unique([booking_id, segment_index, booking_version], map: "booking_segments_booking_id_segment_index_version_unique")
+  @@index([booking_id])
+  @@index([service_variation_id])
+  @@index([square_service_variation_id])
+  @@index([square_team_member_id])
+  @@index([is_active])
+  @@map("booking_segments")
+  @@schema("public")
+}
 
 model Order {
-  id              String  @id @default(uuid()) // Internal UUID PK
-  organization_id String // Multi-tenant isolation
-  order_id        String // Square order ID (external identifier)
-  location_id     String? // Internal UUID FK to locations.id
-  customer_id     String? // Square customer ID
+  location_id      String?          @db.Uuid
+  customer_id      String?
+  state            String?
+  version          Int?
+  reference_id     String?
+  source_name      String?
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @updatedAt
+  closed_at        DateTime?
+  team_member_id   String?
+  order_id         String
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id  String           @db.Uuid
+  raw_json         Json?
+  booking_id       String?          @db.Uuid
+  technician_id    String?          @db.Uuid
+  administrator_id String?          @db.Uuid
 
-  // ===== ORDER FIELDS =====
-  state        String? // OPEN, COMPLETED, CANCELED
-  version      Int?
-  reference_id String?
-
-  // ===== TIMESTAMPS =====
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  // Relations
-  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  location     Location?       @relation(fields: [location_id], references: [id])
-  payments     Payment[]
-  line_items   OrderLineItem[]
-
-  @@unique([organization_id, order_id])
-  @@index([organization_id])
-  @@index([location_id])
-  @@index([customer_id])
-  @@index([order_id])
-  @@index([state])
-  @@map("orders")
-}
-
-// ============================================================================
-// ORDER LINE ITEMS TABLE
-// Store all line items from Square orders with all fields
-// ============================================================================
-
-model OrderLineItem {
-  id              String  @id @default(uuid())
-  organization_id String // Multi-tenant isolation
-  order_id        String // Internal UUID FK to orders.id
-  location_id     String? // Square location ID (for reference)
-  customer_id     String? // Square customer ID
-
-  // ===== TEAM MEMBERS =====
-  technician_id    String? // Internal UUID FK to team_members.id
-  administrator_id String? // Internal UUID FK to team_members.id
-
-  // ===== LINE ITEM FIELDS =====
-  uid                  String? @unique // Unique identifier for this line item
-  service_variation_id String? // Square service variation ID (formerly catalog_object_id)
-  catalog_version      BigInt? // Catalog version
-  quantity             String? // Quantity as string (Square format)
-  name                 String? // Item name
-  variation_name       String? // Variation name (e.g., "TOP master Anna")
-  item_type            String? // ITEM, CUSTOM_AMOUNT, etc.
-
-  // ===== MONEY AMOUNTS (all in cents) =====
-  base_price_money_amount   Int? // Base price
-  base_price_money_currency String? @default("USD")
-
-  gross_sales_money_amount   Int? // Gross sales
-  gross_sales_money_currency String? @default("USD")
-
-  total_tax_money_amount   Int?    @default(0) // Total tax
-  total_tax_money_currency String? @default("USD")
-
-  total_discount_money_amount   Int?    @default(0) // Total discount
+  // Totals
+  total_money_amount           Int?
+  total_money_currency         String? @default("USD")
+  total_tax_money_amount       Int?
+  total_tax_money_currency     String? @default("USD")
+  total_tip_money_amount       Int?
+  total_tip_money_currency     String? @default("USD")
+  total_discount_money_amount  Int?
   total_discount_money_currency String? @default("USD")
-
-  total_money_amount   Int? // Total for this line item
-  total_money_currency String? @default("USD")
-
-  variation_total_price_money_amount   Int? // Variation total price
-  variation_total_price_money_currency String? @default("USD")
-
-  total_service_charge_money_amount   Int?    @default(0)
+  total_service_charge_money_amount   Int?
   total_service_charge_money_currency String? @default("USD")
+  net_amount_due_money_amount         Int?
+  net_amount_due_money_currency       String? @default("USD")
 
-  total_card_surcharge_money_amount   Int?    @default(0)
-  total_card_surcharge_money_currency String? @default("USD")
+  // Return Amounts
+  return_total_money_amount           Int?
+  return_total_money_currency         String? @default("USD")
+  return_total_tax_money_amount       Int?
+  return_total_tax_money_currency     String? @default("USD")
+  return_total_tip_money_amount       Int?
+  return_total_tip_money_currency     String? @default("USD")
+  return_total_discount_money_amount  Int?
+  return_total_discount_money_currency String? @default("USD")
+  return_total_service_charge_money_amount   Int?
+  return_total_service_charge_money_currency String? @default("USD")
 
-  // ===== ORDER-LEVEL FIELDS (stored per line item for analytics) =====
-  order_state      String? // OPEN, COMPLETED, CANCELED
-  order_version    Int? // Order version
-  order_created_at DateTime? // When order was created
-  order_updated_at DateTime? // When order was last updated
-  order_closed_at  DateTime? // When order was closed (if completed)
+  // Net Amounts
+  net_total_money_amount              Int?
+  net_total_money_currency            String? @default("USD")
+  net_total_tax_money_amount          Int?
+  net_total_tax_money_currency        String? @default("USD")
+  net_total_tip_money_amount          Int?
+  net_total_tip_money_currency        String? @default("USD")
+  net_total_discount_money_amount     Int?
+  net_total_discount_money_currency   String? @default("USD")
+  net_total_service_charge_money_amount   Int?
+  net_total_service_charge_money_currency String? @default("USD")
 
-  // ===== ORDER TOTALS (for context) =====
-  order_total_tax_money_amount              Int?
-  order_total_tax_money_currency            String? @default("USD")
-  order_total_discount_money_amount         Int?
-  order_total_discount_money_currency       String? @default("USD")
-  order_total_tip_money_amount              Int?
-  order_total_tip_money_currency            String? @default("USD")
-  order_total_money_amount                  Int? // Total order amount
-  order_total_money_currency                String? @default("USD")
-  order_total_service_charge_money_amount   Int?
-  order_total_service_charge_money_currency String? @default("USD")
-  order_total_card_surcharge_money_amount   Int?
-  order_total_card_surcharge_money_currency String? @default("USD")
+  booking          Booking?         @relation(fields: [booking_id], references: [id])
+  location         Location?        @relation(fields: [location_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  organization     Organization     @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  training_records TrainingRecord[]
 
-  // ===== TIMESTAMPS =====
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  // Relations
-  organization  Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  order         Order?       @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  technician    TeamMember?  @relation("OrderLineItemTechnician", fields: [technician_id], references: [id])
-  administrator TeamMember?  @relation("OrderLineItemAdministrator", fields: [administrator_id], references: [id])
-
-  @@unique([organization_id, uid], map: "order_line_items_organization_uid_unique")
-  @@index([organization_id])
-  @@index([order_id])
+  @@unique([organization_id, order_id], map: "orders_organization_order_id_unique")
   @@index([location_id])
   @@index([customer_id])
+  @@index([booking_id])
+  @@index([state])
   @@index([technician_id])
   @@index([administrator_id])
+  @@index([order_id], map: "idx_orders_order_id")
+  @@index([organization_id], map: "idx_orders_organization_id")
+  @@index([organization_id, location_id], map: "idx_orders_organization_location")
+  @@index([team_member_id])
+  @@map("orders")
+  @@schema("public")
+}
+
+model OrderLineItem {
+  id                                        String       @id @default(uuid())
+  location_id                               String?
+  customer_id                               String?
+  uid                                       String?
+  service_variation_id                      String?
+  catalog_version                           BigInt?
+  quantity                                  String?
+  name                                      String?
+  variation_name                            String?
+  item_type                                 String?
+  base_price_money_amount                   Int?
+  base_price_money_currency                 String?      @default("USD")
+  gross_sales_money_amount                  Int?
+  gross_sales_money_currency                String?      @default("USD")
+  total_tax_money_amount                    Int?         @default(0)
+  total_tax_money_currency                  String?      @default("USD")
+  total_discount_money_amount               Int?         @default(0)
+  total_discount_money_currency             String?      @default("USD")
+  total_money_amount                        Int?
+  total_money_currency                      String?      @default("USD")
+  variation_total_price_money_amount        Int?
+  variation_total_price_money_currency      String?      @default("USD")
+  total_service_charge_money_amount         Int?         @default(0)
+  total_service_charge_money_currency       String?      @default("USD")
+  total_card_surcharge_money_amount         Int?         @default(0)
+  total_card_surcharge_money_currency       String?      @default("USD")
+  order_state                               String?
+  order_version                             Int?
+  order_created_at                          DateTime?
+  order_updated_at                          DateTime?
+  order_closed_at                           DateTime?
+  order_total_tax_money_amount              Int?
+  order_total_tax_money_currency            String?      @default("USD")
+  order_total_discount_money_amount         Int?
+  order_total_discount_money_currency       String?      @default("USD")
+  order_total_tip_money_amount              Int?
+  order_total_tip_money_currency            String?      @default("USD")
+  order_total_money_amount                  Int?
+  order_total_money_currency                String?      @default("USD")
+  order_total_service_charge_money_amount   Int?
+  order_total_service_charge_money_currency String?      @default("USD")
+  order_total_card_surcharge_money_amount   Int?
+  order_total_card_surcharge_money_currency String?      @default("USD")
+  created_at                                DateTime     @default(now())
+  updated_at                                DateTime     @updatedAt
+  order_id                                  String?      @db.Uuid
+  organization_id                           String       @db.Uuid
+  technician_id                             String?      @db.Uuid
+  administrator_id                          String?      @db.Uuid
+  raw_json                                  Json?
+  booking_id                                String?      @db.Uuid
+  metadata                                  Json?
+  custom_attributes                         Json?
+  fulfillments                              Json?
+  applied_taxes                             Json?
+  applied_discounts                         Json?
+  applied_service_charges                   Json?
+  note                                      String?
+  modifiers                                 Json?
+  discount_name                             String?
+  administrator                             TeamMember?  @relation("OrderLineItemAdministrator", fields: [administrator_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  booking                                   Booking?     @relation(fields: [booking_id], references: [id])
+  organization                              Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  technician                                TeamMember?  @relation("OrderLineItemTechnician", fields: [technician_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@index([location_id])
+  @@index([customer_id])
+  @@index([booking_id])
   @@index([uid])
   @@index([order_state])
   @@index([order_created_at])
+  @@index([organization_id], map: "idx_order_line_items_organization_id")
+  @@index([service_variation_id])
   @@map("order_line_items")
+  @@schema("public")
 }
-
-// ============================================================================
-// PAYMENTS TABLE
-// Stores all payments from payment.created/updated webhooks - ALL Square fields
-// ============================================================================
 
 model Payment {
-  id              String  @id @default(uuid()) // Internal UUID PK
-  organization_id String // Multi-tenant isolation
-  payment_id      String // Square payment ID (external identifier)
-  square_event_id String?
-  event_type      String // "payment.created" or "payment.updated"
-  merchant_id     String? // Square merchant ID (deprecated, use organization_id)
-
-  // ===== CUSTOMER & LOCATION =====
-  customer_id String? // Square customer ID
-  location_id String // Internal UUID FK to locations.id
-  order_id    String? // Internal UUID FK to orders.id
-  booking_id  String? // Internal UUID FK to bookings.id
-
-  // ===== MONEY AMOUNTS (all as cents) =====
-  amount_money_amount     Int // Base amount in cents
-  amount_money_currency   String  @default("USD")
-  tip_money_amount        Int?
-  tip_money_currency      String? @default("USD")
-  total_money_amount      Int // Total amount
-  total_money_currency    String  @default("USD")
-  approved_money_amount   Int?
-  approved_money_currency String? @default("USD")
-
-  // ===== STATUS =====
-  status         String // COMPLETED, APPROVED, etc.
-  source_type    String? // CARD, CASH, etc.
-  delay_action   String? // CANCEL, etc.
-  delay_duration String? // PT70M format
-  delayed_until  DateTime?
-
-  // ===== STAFF/TEAM MEMBER =====
-  administrator_id String? // Internal UUID FK to team_members.id
-
-  // ===== APPLICATION DETAILS =====
-  application_details_square_product String? // SQUARE_POS, etc.
-
-  // ===== CAPABILITIES =====
-  capabilities String[] @default([])
-
-  // ===== CARD DETAILS =====
-  card_application_cryptogram          String?
-  card_application_identifier          String?
-  card_application_name                String? // AMEX CREDIT, VISA CREDIT
-  card_auth_result_code                String?
-  card_avs_status                      String? // AVS_NOT_CHECKED
-  card_bin                             String?
-  card_brand                           String? // VISA, AMEX, etc.
-  card_type                            String? // CREDIT, DEBIT
-  card_exp_month                       Int?
-  card_exp_year                        Int?
-  card_fingerprint                     String?
-  card_last_4                          String?
-  card_payment_account_reference       String?
-  card_prepaid_type                    String? // NOT_PREPAID
-  card_entry_method                    String? // CONTACTLESS, etc.
-  card_statement_description           String?
-  card_status                          String? // CAPTURED, AUTHORIZED
-  card_verification_method             String? // NONE
-  card_verification_results            String? // SUCCESS
-  card_cvv_status                      String? // CVV_NOT_CHECKED
-  card_payment_timeline_authorized_at  DateTime?
-  card_payment_timeline_captured_at    DateTime?
-  card_emv_authorization_response_code String?
-
-  // ===== DEVICE DETAILS =====
-  device_id                   String?
-  device_installation_id      String?
-  device_name                 String? // iPad, etc.
-  card_device_id              String?
-  card_device_installation_id String?
-  card_device_name            String?
-
-  // ===== RECEIPT =====
-  receipt_number String?
-  receipt_url    String?
-
-  // ===== PROCESSING FEES =====
-  processing_fee_amount   Int?
-  processing_fee_currency String? @default("USD")
-  processing_fee_type     String? // INITIAL, ADJUSTMENT
-
-  // ===== REFUND INFO =====
-  refund_ids String[] @default([])
-
-  // ===== TIMESTAMPS =====
-  created_at        DateTime
-  updated_at        DateTime
-  square_created_at DateTime? // Square webhook timestamp
-
-  // ===== VERSION =====
-  version Int?
-
-  // Relations
-  organization  Organization          @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  customer      SquareExistingClient? @relation(fields: [customer_id], references: [square_customer_id])
-  booking       Booking?              @relation(fields: [booking_id], references: [id])
-  location      Location              @relation(fields: [location_id], references: [id])
-  order         Order?                @relation(fields: [order_id], references: [id])
-  administrator TeamMember?           @relation("PaymentAdministrator", fields: [administrator_id], references: [id])
-  tenders       PaymentTender[]
-
-  @@unique([organization_id, payment_id])
-  @@index([organization_id])
-  @@index([location_id])
-  @@index([order_id])
-  @@index([booking_id])
-  @@index([customer_id])
-  @@index([payment_id])
-  @@index([administrator_id])
-  @@index([status])
-  @@index([created_at])
-  @@index([source_type])
-  @@index([card_brand])
-  @@map("payments")
-}
-
-// ============================================================================
-// PAYMENT TENDERS TABLE
-// Payment methods used in each payment (CARD, CASH, GIFT_CARD, etc.)
-// ============================================================================
-
-model PaymentTender {
-  id              String  @id @default(uuid())
-  organization_id String // Multi-tenant isolation
-  payment_id      String // Internal UUID FK to payments.id
-  tender_id       String? // Square tender ID
-
-  // ===== TENDER FIELDS =====
-  type                  String // CARD, CASH, SQUARE_GIFT_CARD, BANK_ACCOUNT, etc.
-  amount_money_amount   Int // Tender amount in cents
-  amount_money_currency String  @default("USD")
-  note                  String?
-
-  // ===== CARD DETAILS (if type = CARD) =====
-  card_status                          String? // CAPTURED, AUTHORIZED
+  square_event_id                      String?
+  event_type                           String
+  merchant_id                          String?
+  customer_id                          String?
+  amount_money_amount                  Int
+  amount_money_currency                String       @default("USD")
+  tip_money_amount                     Int?
+  tip_money_currency                   String?      @default("USD")
+  total_money_amount                   Int
+  total_money_currency                 String       @default("USD")
+  approved_money_amount                Int?
+  approved_money_currency              String?      @default("USD")
+  status                               String
+  source_type                          String?
+  delay_action                         String?
+  delay_duration                       String?
+  delayed_until                        DateTime?
+  application_details_square_product   String?
+  capabilities                         String[]     @default([])
   card_application_cryptogram          String?
   card_application_identifier          String?
   card_application_name                String?
   card_auth_result_code                String?
   card_avs_status                      String?
   card_bin                             String?
-  card_brand                           String? // VISA, AMEX, etc.
-  card_type                            String? // CREDIT, DEBIT
+  card_brand                           String?
+  card_type                            String?
+  card_exp_month                       Int?
+  card_exp_year                        Int?
+  card_fingerprint                     String?
+  card_last_4                          String?
+  card_payment_account_reference       String?
+  card_prepaid_type                    String?
+  card_entry_method                    String?
+  card_statement_description           String?
+  card_status                          String?
+  card_verification_method             String?
+  card_verification_results            String?
+  card_cvv_status                      String?
+  card_payment_timeline_authorized_at  DateTime?
+  card_payment_timeline_captured_at    DateTime?
+  card_emv_authorization_response_code String?
+  device_id                            String?
+  device_installation_id               String?
+  device_name                          String?
+  card_device_id                       String?
+  card_device_installation_id          String?
+  card_device_name                     String?
+  receipt_number                       String?
+  receipt_url                          String?
+  processing_fee_amount                Int?
+  processing_fee_currency              String?      @default("USD")
+  processing_fee_type                  String?
+  refund_ids                           String[]     @default([])
+  created_at                           DateTime
+  updated_at                           DateTime
+  square_created_at                    DateTime?
+  version                              Int?
+  booking_id                           String?      @db.Uuid
+  order_id                             String?      @db.Uuid
+  payment_id                           String
+  id                                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id                      String       @db.Uuid
+  location_id                          String       @db.Uuid
+  administrator_id                     String?      @db.Uuid
+  technician_id                        String?      @db.Uuid
+  raw_json                             Json?
+  administrator                        TeamMember?  @relation("PaymentAdministrator", fields: [administrator_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  location                             Location     @relation(fields: [location_id], references: [id], onUpdate: NoAction)
+  organization                         Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([organization_id, payment_id], map: "payments_organization_payment_id_unique")
+  @@index([customer_id])
+  @@index([status])
+  @@index([created_at])
+  @@index([source_type])
+  @@index([card_brand])
+  @@index([organization_id], map: "idx_payments_organization_id")
+  @@index([organization_id, order_id], map: "idx_payments_organization_order")
+  @@index([payment_id], map: "idx_payments_payment_id")
+  @@map("payments")
+  @@schema("public")
+}
+
+model PaymentTender {
+  id                                   String       @id @default(uuid())
+  tender_id                            String?
+  type                                 String
+  amount_money_amount                  Int
+  amount_money_currency                String       @default("USD")
+  note                                 String?
+  card_status                          String?
+  card_application_cryptogram          String?
+  card_application_identifier          String?
+  card_application_name                String?
+  card_auth_result_code                String?
+  card_avs_status                      String?
+  card_bin                             String?
+  card_brand                           String?
+  card_type                            String?
   card_exp_month                       Int?
   card_exp_year                        Int?
   card_fingerprint                     String?
@@ -851,34 +1197,548 @@ model PaymentTender {
   card_device_id                       String?
   card_device_installation_id          String?
   card_device_name                     String?
+  cash_buyer_tendered_amount           Int?
+  cash_buyer_tendered_currency         String?      @default("USD")
+  cash_change_back_amount              Int?
+  cash_change_back_currency            String?      @default("USD")
+  gift_card_id                         String?
+  gift_card_gan                        String?
+  bank_account_details_account_last_4  String?
+  bank_account_details_account_type    String?
+  bank_account_details_routing_number  String?
+  created_at                           DateTime
+  payment_id                           String?      @db.Uuid
+  organization_id                      String       @db.Uuid
+  updated_at                           DateTime?    @default(now()) @updatedAt @db.Timestamptz(6)
+  organization                         Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  // ===== CASH DETAILS (if type = CASH) =====
-  cash_buyer_tendered_amount   Int?
-  cash_buyer_tendered_currency String? @default("USD")
-  cash_change_back_amount      Int?
-  cash_change_back_currency    String? @default("USD")
-
-  // ===== GIFT CARD DETAILS (if type = SQUARE_GIFT_CARD) =====
-  gift_card_id  String?
-  gift_card_gan String? // Gift Account Number
-
-  // ===== BANK ACCOUNT DETAILS (if type = BANK_ACCOUNT) =====
-  bank_account_details_account_last_4 String?
-  bank_account_details_account_type   String?
-  bank_account_details_routing_number String?
-
-  // ===== TIMESTAMPS =====
-  created_at DateTime
-
-  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  payment      Payment      @relation(fields: [payment_id], references: [id], onDelete: Cascade)
-
-  @@index([organization_id])
-  @@index([payment_id])
-  @@index([type])
-  @@index([gift_card_id])
+  @@index([organization_id], map: "idx_payment_tenders_organization_id")
   @@index([card_brand])
+  @@index([gift_card_id])
+  @@index([type])
   @@map("payment_tenders")
+  @@schema("public")
+}
+
+model OrganizationUser {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id         String        @db.Uuid
+  organization_id String?       @db.Uuid
+  role            String
+  is_primary      Boolean       @default(false)
+  created_at      DateTime      @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
+  organization    Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([organization_id], map: "idx_organization_users_organization_id")
+  @@index([role], map: "idx_organization_users_role")
+  @@index([user_id], map: "idx_organization_users_user_id")
+  @@map("organization_users")
+  @@schema("public")
+}
+
+model UserRole {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id         String         @db.Uuid
+  role            user_role_type
+  organization_id String?        @db.Uuid
+  location_id     String?        @db.Uuid
+  created_at      DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  location        Location?      @relation(fields: [location_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  organization    Organization?  @relation(fields: [organization_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  profile         users          @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([role], map: "idx_user_roles_role")
+  @@index([user_id], map: "idx_user_roles_user_id")
+  @@map("user_roles")
+  @@schema("public")
+}
+
+model Profile {
+  id         String   @id @db.Uuid
+  email      String?
+  full_name  String?
+  avatar_url String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+  users      users    @relation(fields: [id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("profiles")
+  @@schema("public")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model audit_log_entries {
+  instance_id String?   @db.Uuid
+  id          String    @id @db.Uuid
+  payload     Json?     @db.Json
+  created_at  DateTime? @db.Timestamptz(6)
+  ip_address  String    @default("") @db.VarChar(64)
+
+  @@index([instance_id], map: "audit_logs_instance_id_idx")
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model flow_state {
+  id                     String                 @id @db.Uuid
+  user_id                String?                @db.Uuid
+  auth_code              String?
+  code_challenge_method  code_challenge_method?
+  code_challenge         String?
+  provider_type          String
+  provider_access_token  String?
+  provider_refresh_token String?
+  created_at             DateTime?              @db.Timestamptz(6)
+  updated_at             DateTime?              @db.Timestamptz(6)
+  authentication_method  String
+  auth_code_issued_at    DateTime?              @db.Timestamptz(6)
+  invite_token           String?
+  referrer               String?
+  oauth_client_state_id  String?                @db.Uuid
+  linking_target_id      String?                @db.Uuid
+  email_optional         Boolean                @default(false)
+  saml_relay_states      saml_relay_states[]
+
+  @@index([created_at(sort: Desc)])
+  @@index([auth_code], map: "idx_auth_code")
+  @@index([user_id, authentication_method], map: "idx_user_id_auth_method")
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model identities {
+  provider_id     String
+  user_id         String    @db.Uuid
+  identity_data   Json
+  provider        String
+  last_sign_in_at DateTime? @db.Timestamptz(6)
+  created_at      DateTime? @db.Timestamptz(6)
+  updated_at      DateTime? @db.Timestamptz(6)
+  email           String?   @default(dbgenerated("lower((identity_data ->> 'email'::text))"))
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  users           users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([provider_id, provider], map: "identities_provider_id_provider_unique")
+  @@index([email])
+  @@index([user_id])
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model instances {
+  id              String    @id @db.Uuid
+  uuid            String?   @db.Uuid
+  raw_base_config String?
+  created_at      DateTime? @db.Timestamptz(6)
+  updated_at      DateTime? @db.Timestamptz(6)
+
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model mfa_amr_claims {
+  session_id            String   @db.Uuid
+  created_at            DateTime @db.Timestamptz(6)
+  updated_at            DateTime @db.Timestamptz(6)
+  authentication_method String
+  id                    String   @id(map: "amr_id_pk") @db.Uuid
+  sessions              sessions @relation(fields: [session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([session_id, authentication_method], map: "mfa_amr_claims_session_id_authentication_method_pkey")
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model mfa_challenges {
+  id                     String      @id @db.Uuid
+  factor_id              String      @db.Uuid
+  created_at             DateTime    @db.Timestamptz(6)
+  verified_at            DateTime?   @db.Timestamptz(6)
+  ip_address             String      @db.Inet
+  otp_code               String?
+  web_authn_session_data Json?
+  mfa_factors            mfa_factors @relation(fields: [factor_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "mfa_challenges_auth_factor_id_fkey")
+
+  @@index([created_at(sort: Desc)], map: "mfa_challenge_created_at_idx")
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model mfa_factors {
+  id                           String           @id @db.Uuid
+  user_id                      String           @db.Uuid
+  friendly_name                String?
+  factor_type                  factor_type
+  status                       factor_status
+  created_at                   DateTime         @db.Timestamptz(6)
+  updated_at                   DateTime         @db.Timestamptz(6)
+  secret                       String?
+  phone                        String?
+  last_challenged_at           DateTime?        @unique @db.Timestamptz(6)
+  web_authn_credential         Json?
+  web_authn_aaguid             String?          @db.Uuid
+  last_webauthn_challenge_data Json?
+  mfa_challenges               mfa_challenges[]
+  users                        users            @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, phone], map: "unique_phone_factor_per_user")
+  @@index([user_id, created_at], map: "factor_id_created_at_idx")
+  @@index([user_id])
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model oauth_authorizations {
+  id                    String                     @id @db.Uuid
+  authorization_id      String                     @unique
+  client_id             String                     @db.Uuid
+  user_id               String?                    @db.Uuid
+  redirect_uri          String
+  scope                 String
+  state                 String?
+  resource              String?
+  code_challenge        String?
+  code_challenge_method code_challenge_method?
+  response_type         oauth_response_type        @default(code)
+  status                oauth_authorization_status @default(pending)
+  authorization_code    String?                    @unique
+  created_at            DateTime                   @default(now()) @db.Timestamptz(6)
+  expires_at            DateTime                   @default(dbgenerated("(now() + '00:03:00'::interval)")) @db.Timestamptz(6)
+  approved_at           DateTime?                  @db.Timestamptz(6)
+  nonce                 String?
+  oauth_clients         oauth_clients              @relation(fields: [client_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                 users?                     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model oauth_client_states {
+  id            String   @id @db.Uuid
+  provider_type String
+  code_verifier String?
+  created_at    DateTime @db.Timestamptz(6)
+
+  @@index([created_at], map: "idx_oauth_client_states_created_at")
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model oauth_clients {
+  id                         String                  @id @db.Uuid
+  client_secret_hash         String?
+  registration_type          oauth_registration_type
+  redirect_uris              String
+  grant_types                String
+  client_name                String?
+  client_uri                 String?
+  logo_uri                   String?
+  created_at                 DateTime                @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime                @default(now()) @db.Timestamptz(6)
+  deleted_at                 DateTime?               @db.Timestamptz(6)
+  client_type                oauth_client_type       @default(confidential)
+  token_endpoint_auth_method String
+  oauth_authorizations       oauth_authorizations[]
+  oauth_consents             oauth_consents[]
+  sessions                   sessions[]
+
+  @@index([deleted_at])
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model oauth_consents {
+  id            String        @id @db.Uuid
+  user_id       String        @db.Uuid
+  client_id     String        @db.Uuid
+  scopes        String
+  granted_at    DateTime      @default(now()) @db.Timestamptz(6)
+  revoked_at    DateTime?     @db.Timestamptz(6)
+  oauth_clients oauth_clients @relation(fields: [client_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users         users         @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, client_id], map: "oauth_consents_user_client_unique")
+  @@index([user_id, granted_at(sort: Desc)], map: "oauth_consents_user_order_idx")
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model one_time_tokens {
+  id         String              @id @db.Uuid
+  user_id    String              @db.Uuid
+  token_type one_time_token_type
+  token_hash String
+  relates_to String
+  created_at DateTime            @default(now()) @db.Timestamp(6)
+  updated_at DateTime            @default(now()) @db.Timestamp(6)
+  users      users               @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, token_type])
+  @@index([relates_to], map: "one_time_tokens_relates_to_hash_idx", type: Hash)
+  @@index([token_hash], map: "one_time_tokens_token_hash_hash_idx", type: Hash)
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model refresh_tokens {
+  instance_id String?   @db.Uuid
+  id          BigInt    @id @default(autoincrement())
+  token       String?   @unique(map: "refresh_tokens_token_unique") @db.VarChar(255)
+  user_id     String?   @db.VarChar(255)
+  revoked     Boolean?
+  created_at  DateTime? @db.Timestamptz(6)
+  updated_at  DateTime? @db.Timestamptz(6)
+  parent      String?   @db.VarChar(255)
+  session_id  String?   @db.Uuid
+  sessions    sessions? @relation(fields: [session_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([instance_id])
+  @@index([instance_id, user_id])
+  @@index([parent])
+  @@index([session_id, revoked])
+  @@index([updated_at(sort: Desc)])
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model saml_providers {
+  id                String        @id @db.Uuid
+  sso_provider_id   String        @db.Uuid
+  entity_id         String        @unique
+  metadata_xml      String
+  metadata_url      String?
+  attribute_mapping Json?
+  created_at        DateTime?     @db.Timestamptz(6)
+  updated_at        DateTime?     @db.Timestamptz(6)
+  name_id_format    String?
+  sso_providers     sso_providers @relation(fields: [sso_provider_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sso_provider_id])
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model saml_relay_states {
+  id              String        @id @db.Uuid
+  sso_provider_id String        @db.Uuid
+  request_id      String
+  for_email       String?
+  redirect_to     String?
+  created_at      DateTime?     @db.Timestamptz(6)
+  updated_at      DateTime?     @db.Timestamptz(6)
+  flow_state_id   String?       @db.Uuid
+  flow_state      flow_state?   @relation(fields: [flow_state_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  sso_providers   sso_providers @relation(fields: [sso_provider_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([created_at(sort: Desc)])
+  @@index([for_email])
+  @@index([sso_provider_id])
+  @@schema("auth")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model schema_migrations {
+  version String @id @db.VarChar(255)
+
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sessions {
+  id                     String           @id @db.Uuid
+  user_id                String           @db.Uuid
+  created_at             DateTime?        @db.Timestamptz(6)
+  updated_at             DateTime?        @db.Timestamptz(6)
+  factor_id              String?          @db.Uuid
+  aal                    aal_level?
+  not_after              DateTime?        @db.Timestamptz(6)
+  refreshed_at           DateTime?        @db.Timestamp(6)
+  user_agent             String?
+  ip                     String?          @db.Inet
+  tag                    String?
+  oauth_client_id        String?          @db.Uuid
+  refresh_token_hmac_key String?
+  refresh_token_counter  BigInt?
+  scopes                 String?
+  mfa_amr_claims         mfa_amr_claims[]
+  refresh_tokens         refresh_tokens[]
+  oauth_clients          oauth_clients?   @relation(fields: [oauth_client_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users                  users            @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([not_after(sort: Desc)])
+  @@index([oauth_client_id])
+  @@index([user_id])
+  @@index([user_id, created_at], map: "user_id_created_at_idx")
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model sso_domains {
+  id              String        @id @db.Uuid
+  sso_provider_id String        @db.Uuid
+  domain          String
+  created_at      DateTime?     @db.Timestamptz(6)
+  updated_at      DateTime?     @db.Timestamptz(6)
+  sso_providers   sso_providers @relation(fields: [sso_provider_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sso_provider_id])
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model sso_providers {
+  id                String              @id @db.Uuid
+  resource_id       String?
+  created_at        DateTime?           @db.Timestamptz(6)
+  updated_at        DateTime?           @db.Timestamptz(6)
+  disabled          Boolean?
+  saml_providers    saml_providers[]
+  saml_relay_states saml_relay_states[]
+  sso_domains       sso_domains[]
+
+  @@index([resource_id], map: "sso_providers_resource_id_pattern_idx")
+  @@schema("auth")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model users {
+  instance_id                 String?                @db.Uuid
+  id                          String                 @id @db.Uuid
+  aud                         String?                @db.VarChar(255)
+  role                        String?                @db.VarChar(255)
+  email                       String?                @db.VarChar(255)
+  encrypted_password          String?                @db.VarChar(255)
+  email_confirmed_at          DateTime?              @db.Timestamptz(6)
+  invited_at                  DateTime?              @db.Timestamptz(6)
+  confirmation_token          String?                @db.VarChar(255)
+  confirmation_sent_at        DateTime?              @db.Timestamptz(6)
+  recovery_token              String?                @db.VarChar(255)
+  recovery_sent_at            DateTime?              @db.Timestamptz(6)
+  email_change_token_new      String?                @db.VarChar(255)
+  email_change                String?                @db.VarChar(255)
+  email_change_sent_at        DateTime?              @db.Timestamptz(6)
+  last_sign_in_at             DateTime?              @db.Timestamptz(6)
+  raw_app_meta_data           Json?
+  raw_user_meta_data          Json?
+  is_super_admin              Boolean?
+  created_at                  DateTime?              @db.Timestamptz(6)
+  updated_at                  DateTime?              @db.Timestamptz(6)
+  phone                       String?                @unique
+  phone_confirmed_at          DateTime?              @db.Timestamptz(6)
+  phone_change                String?                @default("")
+  phone_change_token          String?                @default("") @db.VarChar(255)
+  phone_change_sent_at        DateTime?              @db.Timestamptz(6)
+  confirmed_at                DateTime?              @default(dbgenerated("LEAST(email_confirmed_at, phone_confirmed_at)")) @db.Timestamptz(6)
+  email_change_token_current  String?                @default("") @db.VarChar(255)
+  email_change_confirm_status Int?                   @default(0) @db.SmallInt
+  banned_until                DateTime?              @db.Timestamptz(6)
+  reauthentication_token      String?                @default("") @db.VarChar(255)
+  reauthentication_sent_at    DateTime?              @db.Timestamptz(6)
+  is_sso_user                 Boolean                @default(false)
+  deleted_at                  DateTime?              @db.Timestamptz(6)
+  is_anonymous                Boolean                @default(false)
+  identities                  identities[]
+  mfa_factors                 mfa_factors[]
+  oauth_authorizations        oauth_authorizations[]
+  oauth_consents              oauth_consents[]
+  one_time_tokens             one_time_tokens[]
+  sessions                    sessions[]
+  profiles                    Profile?
+  user_roles                  UserRole[]
+
+  @@index([instance_id])
+  @@index([is_anonymous])
+  @@schema("auth")
+}
+
+model analytics_dead_letter {
+  id           String    @id
+  eventType    String
+  payload      Json
+  errorMessage String?
+  retryCount   Int       @default(0)
+  lastTriedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@schema("public")
+}
+
+model phone_verifications {
+  id           String    @id
+  phone_number String
+  code         String    @db.VarChar(6)
+  verified     Boolean   @default(false)
+  expires_at   DateTime
+  attempts     Int       @default(0)
+  verified_at  DateTime?
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  updated_at   DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([expires_at])
+  @@index([phone_number, verified])
+  @@schema("public")
+}
+
+model verified_phone_sessions {
+  id            String   @id
+  phone_number  String
+  session_token String   @unique
+  expires_at    DateTime
+  created_at    DateTime @default(now()) @db.Timestamp(6)
+  updated_at    DateTime @default(now()) @db.Timestamp(6)
+
+  @@index([expires_at])
+  @@index([phone_number])
+  @@index([session_token])
+  @@schema("public")
+}
+
+model TrainingRecord {
+  id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id    String       @db.Uuid
+  square_customer_id String?
+  order_id           String       @db.Uuid
+  square_order_id    String
+  item_name          String
+  amount_cents       Int
+  currency           String       @default("USD")
+  order_status       String
+  created_at         DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+  order              Order        @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  organization       Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@index([square_customer_id])
+  @@index([organization_id])
+  @@map("training_records")
+  @@schema("public")
 }
 
 enum GiftCardJobStatus {
@@ -886,11 +1746,63 @@ enum GiftCardJobStatus {
   running
   completed
   error
+
+  @@schema("public")
+}
+
+enum WebhookJobStatus {
+  queued
+  processing
+  completed
+  error
+
+  @@schema("public")
+}
+
+enum ApplicationLogStatus {
+  received
+  processing
+  completed
+  error
+
+  @@schema("public")
+}
+
+enum GiftCardRewardType {
+  FRIEND_SIGNUP_BONUS
+  REFERRER_REWARD
+
+  @@schema("public")
+}
+
+enum GiftCardTransactionType {
+  CREATE
+  ACTIVATE
+  ADJUST_INCREMENT
+  ADJUST_DECREMENT
+  REDEEM
+  REFUND
+  BLOCK
+  UNBLOCK
+  IMPORT
+
+  @@schema("public")
 }
 
 enum NotificationChannel {
   SMS
   EMAIL
+
+  @@schema("public")
+}
+
+enum NotificationTemplateType {
+  REFERRAL_INVITE
+  REFERRER_ACTIVATION
+  FRIEND_ACTIVATION
+  OTHER
+
+  @@schema("public")
 }
 
 enum NotificationStatus {
@@ -899,174 +1811,113 @@ enum NotificationStatus {
   delivered
   failed
   bounced
+
+  @@schema("public")
 }
 
-enum NotificationTemplateType {
-  REFERRAL_INVITE
-  REFERRER_ACTIVATION
-  FRIEND_ACTIVATION
-  OTHER
+enum ReferralRewardStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+
+  @@schema("public")
 }
 
-// ============================================================================ 
-// TEAM MEMBER ROLE ENUM
-// ============================================================================ 
-// Role enum for team members
+enum TeamLocation {
+  PACIFIC_AVE
+  UNION_ST
+  UNKNOWN_LOC
+
+  @@schema("public")
+}
+
 enum TeamRole {
   TOP_MASTER
   MASTER
   JUNIOR
   ADMIN
   UNKNOWN
+
+  @@schema("public")
 }
 
-// Location enum for team members (friendly selectable)
-enum TeamLocation {
-  PACIFIC_AVE
-  UNION_ST
-  UNKNOWN_LOC
+enum aal_level {
+  aal1
+  aal2
+  aal3
+
+  @@schema("auth")
 }
 
-// ============================================================================
-// GIFT CARD ENUMS
-// ============================================================================
-enum GiftCardRewardType {
-  FRIEND_SIGNUP_BONUS // Given to friend when they book with referral code
-  REFERRER_REWARD // Given to referrer when friend pays
+enum code_challenge_method {
+  s256
+  plain
+
+  @@schema("auth")
 }
 
-enum GiftCardTransactionType {
-  CREATE // Gift card created
-  ACTIVATE // Gift card activated (PENDING -> ACTIVE)
-  ADJUST_INCREMENT // Money loaded onto card
-  ADJUST_DECREMENT // Money deducted from card
-  REDEEM // Gift card used for payment
-  REFUND // Refund transaction
-  BLOCK // Card blocked
-  UNBLOCK // Card unblocked
-  IMPORT // Imported from external source
+enum factor_status {
+  unverified
+  verified
+
+  @@schema("auth")
 }
 
-// ============================================================================
-// REFERRAL ENUMS
-// ============================================================================
-enum ReferralRewardStatus {
-  PENDING // Reward earned but not yet paid
-  PAID // Reward successfully paid to gift card
-  FAILED // Reward payment failed
-  CANCELLED // Reward cancelled
+enum factor_type {
+  totp
+  webauthn
+  phone
+
+  @@schema("auth")
 }
 
-// ============================================================================
-// ORGANIZATION USERS TABLE
-// Links Supabase Auth users to organizations with roles
-// ============================================================================
+enum oauth_authorization_status {
+  pending
+  approved
+  denied
+  expired
 
-enum OrganizationUserRole {
-  super_admin // System-wide admin with access to all organizations
-  owner // Organization owner
-  admin // Organization admin
-  viewer // Organization viewer
+  @@schema("auth")
 }
 
-model OrganizationUser {
-  id              String               @id @default(uuid())
-  user_id         String // Supabase Auth user ID (auth.users.id)
-  organization_id String? // NULL for super_admin, required for others
-  role            OrganizationUserRole
-  is_primary      Boolean              @default(false) // Main organization for this user
-  created_at      DateTime             @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime             @updatedAt @db.Timestamptz(6)
+enum oauth_client_type {
+  public
+  confidential
 
-  // Relations
-  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-
-  @@unique([user_id, organization_id])
-  @@index([user_id])
-  @@index([organization_id])
-  @@index([role])
-  @@index([user_id, is_primary], map: "idx_organization_users_user_primary")
-  @@map("organization_users")
+  @@schema("auth")
 }
 
-// ============================================================================
-// PROFILES TABLE
-// User profiles linked to Supabase Auth
-// ============================================================================
-model Profile {
-  id         String   @id // References auth.users.id
-  email      String?
-  full_name  String?
-  avatar_url String?
-  created_at DateTime @default(now()) @db.Timestamptz(6)
-  updated_at DateTime @updatedAt @db.Timestamptz(6)
+enum oauth_registration_type {
+  dynamic
+  manual
 
-  @@map("profiles")
+  @@schema("auth")
 }
 
-// ============================================================================
-// USER ROLES TABLE
-// Detailed roles with location-level access
-// ============================================================================
-enum UserRoleType {
+enum oauth_response_type {
+  code
+
+  @@schema("auth")
+}
+
+enum one_time_token_type {
+  confirmation_token
+  reauthentication_token
+  recovery_token
+  email_change_token_new
+  email_change_token_current
+  phone_change_token
+
+  @@schema("auth")
+}
+
+
+enum user_role_type {
   super_admin
   owner
   manager
   staff
-}
 
-model UserRole {
-  id              String       @id @default(uuid())
-  user_id         String // References auth.users.id
-  role            UserRoleType
-  organization_id String? // NULL for super_admin
-  location_id     String? // For manager/staff
-  created_at      DateTime     @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime     @updatedAt @db.Timestamptz(6)
-
-  // Relations
-  organization Organization? @relation(fields: [organization_id], references: [id], onDelete: Cascade)
-  location     Location?     @relation(fields: [location_id], references: [id], onDelete: Cascade)
-
-  @@unique([user_id, organization_id], map: "user_roles_user_org_unique")
-  @@index([user_id])
-  @@index([organization_id])
-  @@index([location_id])
-  @@index([role])
-  @@map("user_roles")
-}
-
-// ============================================================================
-// PHONE VERIFICATION TABLES
-// For SMS-based phone verification in lookup page
-// ============================================================================
-
-model PhoneVerification {
-  id              String   @id @default(uuid())
-  phone_number    String   // Normalized phone number
-  code            String   @db.VarChar(6) // 6-digit verification code
-  verified        Boolean  @default(false)
-  expires_at      DateTime // Code expires after 10 minutes
-  attempts        Int      @default(0) // Track verification attempts
-  verified_at     DateTime?
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @updatedAt @db.Timestamptz(6)
-
-  @@index([phone_number, verified])
-  @@index([expires_at])
-  @@map("phone_verifications")
-}
-
-model VerifiedPhoneSession {
-  id              String   @id @default(uuid())
-  phone_number    String   // Normalized phone number
-  session_token   String   @unique // Unique session token
-  expires_at      DateTime // Session expires after 30 days
-  created_at      DateTime @default(now()) @db.Timestamptz(6)
-  updated_at      DateTime @updatedAt @db.Timestamptz(6)
-
-  @@index([phone_number])
-  @@index([session_token])
-  @@index([expires_at])
-  @@map("verified_phone_sessions")
+  @@schema("public")
 }

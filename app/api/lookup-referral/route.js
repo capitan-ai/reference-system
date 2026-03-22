@@ -329,6 +329,8 @@ async function findCustomerByPhone(phoneNumber) {
   }
 }
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const body = await request.json()
@@ -467,8 +469,7 @@ export async function POST(request) {
     return NextResponse.json(
       { 
         found: false,
-        error: error.message || 'Failed to lookup referral information',
-        details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        error: 'Failed to lookup referral information'
       },
       { status: 500 }
     )

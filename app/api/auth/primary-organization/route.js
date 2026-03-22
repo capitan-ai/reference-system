@@ -6,6 +6,8 @@
 import { checkOrganizationAccess } from '../../../../lib/auth/check-access'
 import { prisma } from '../../../../lib/prisma-client'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(request) {
   try {
     const body = await request.json()
@@ -56,9 +58,11 @@ export async function POST(request) {
   } catch (error) {
     console.error('Update primary org error:', error)
     return Response.json(
-      { error: error.message || 'Internal server error' },
+      { error: 'Internal server error' },
       { status: 500 }
     )
   }
 }
+
+
 

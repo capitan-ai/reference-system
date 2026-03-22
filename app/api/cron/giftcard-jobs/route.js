@@ -1,7 +1,11 @@
 import { createRequire } from 'module'
+import prisma from '@/lib/prisma-client'
+import { authorizeCron } from '@/lib/auth/cron-auth'
 
 const require = createRequire(import.meta.url)
 const { runGiftCardJobOnce } = require('../../../../lib/workers/giftcard-job-runner')
+const { saveApplicationLog } = require('../../../../lib/workflows/application-log-queue')
+const { randomUUID } = require('crypto')
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -12,78 +16,35 @@ function json(body, status = 200) {
   })
 }
 
-function authorize(request) {
-  // Vercel cron jobs can send the secret in different ways:
-  // 1. Authorization header as "Bearer <secret>" (most common)
-  // 2. Authorization header as just the secret
-  // 3. x-cron-secret header (some configurations)
-  const cronSecret = process.env.CRON_SECRET
-  if (!cronSecret) {
-    // If CRON_SECRET is not set, allow (for development only)
-    // In production, CRON_SECRET should always be set
-    console.warn('⚠️ CRON_SECRET not set - allowing unauthenticated access (development only)')
-    return { authorized: true, method: 'no-secret-set' }
-  }
-
-  // Log headers for debugging (sanitized)
-  const authHeader = request.headers.get('Authorization') || ''
-  const cronHeader = request.headers.get('x-cron-secret') || request.headers.get('x-cron-key') || ''
-  const userAgent = request.headers.get('user-agent') || ''
-  
-  console.log(`[CRON] Auth check - User-Agent: ${userAgent.substring(0, 50)}`)
-  console.log(`[CRON] Auth check - Has Auth header: ${!!authHeader}`)
-  console.log(`[CRON] Auth check - Has x-cron-secret: ${!!cronHeader}`)
-  console.log(`[CRON] Auth check - CRON_SECRET set: ${!!cronSecret}`)
-
-  // Check Authorization header (Bearer token or plain secret)
-  if (authHeader === `Bearer ${cronSecret}` || authHeader === cronSecret) {
-    console.log(`[CRON] ✅ Authorized via Authorization header`)
-    return { authorized: true, method: 'vercel-cron-auth-header' }
-  }
-
-  // Check x-cron-secret header (alternative method)
-  if (cronHeader === cronSecret) {
-    console.log(`[CRON] ✅ Authorized via x-cron-secret header`)
-    return { authorized: true, method: 'vercel-cron-header' }
-  }
-
-  // If no match, check if this is a Vercel cron request (Vercel sends a specific user-agent)
-  // Vercel cron jobs might not send the secret if not configured in vercel.json
-  // Also check for Vercel's internal cron infrastructure
-  const isVercelRequest = 
-    userAgent.includes('vercel-cron') || 
-    userAgent.includes('vercel') ||
-    userAgent.toLowerCase().includes('vercel') ||
-    // Vercel cron jobs often have no user-agent or specific patterns
-    (!userAgent || userAgent.length === 0)
-  
-  if (isVercelRequest) {
-    // Allow if it's clearly a Vercel request but warn
-    console.warn('⚠️ Vercel cron request detected but secret mismatch. Allowing for now.')
-    console.warn('⚠️ User-Agent:', userAgent || '(empty)')
-    console.warn('⚠️ To secure this endpoint, verify CRON_SECRET in Vercel matches environment variable')
-    return { authorized: true, method: 'vercel-cron-user-agent' }
-  }
-
-  console.error(`[CRON] ❌ Authorization failed - No matching secret found`)
-  console.error(`[CRON] User-Agent: ${userAgent || '(empty)'}`)
-  console.error(`[CRON] Auth header present: ${!!authHeader}`)
-  console.error(`[CRON] x-cron-secret header present: ${!!cronHeader}`)
-  console.error(`[CRON] Expected CRON_SECRET (first 10 chars): ${cronSecret.substring(0, 10)}...`)
-  return { authorized: false, reason: 'no-matching-secret', method: 'unknown' }
-}
-
 async function handle(request) {
   const startTime = Date.now()
   console.log(`[CRON] Gift card jobs cron triggered at ${new Date().toISOString()}`)
-  
-  const auth = authorize(request)
+
+  const auth = authorizeCron(request)
   if (!auth.authorized) {
-    console.error(`[CRON] Unauthorized access attempt. Method: ${auth.method || 'unknown'}, Reason: ${auth.reason || 'none'}`)
-    return json({ error: 'Unauthorized', method: auth.method, reason: auth.reason }, 401)
+    return json({ error: 'Unauthorized' }, 401)
   }
+
+  const cronId = `cron-giftcard-jobs-${Date.now()}`
   
-  console.log(`[CRON] Authorized using method: ${auth.method}`)
+  // Save cron start to application_logs (non-blocking)
+  try {
+    await saveApplicationLog(prisma, {
+      logType: 'cron',
+      logId: cronId,
+      logCreatedAt: new Date(),
+      payload: {
+        cron_name: 'giftcard-jobs',
+        worker_id: 'vercel-cron',
+        triggered_at: new Date().toISOString()
+      },
+      organizationId: null, // System log
+      status: 'processing',
+      maxAttempts: 0
+    }).catch(() => {}) // Silently fail
+  } catch (logError) {
+    console.warn('⚠️ Failed to save cron start to application_logs:', logError.message)
+  }
 
   try {
     // Process multiple jobs per cron run to speed up queue processing
@@ -128,6 +89,29 @@ async function handle(request) {
     const duration = Date.now() - startTime
     console.log(`[CRON] ✅ Completed: processed ${processed} job(s), ${errors} error(s) in ${duration}ms`)
     
+    // Update application_log with results (non-blocking)
+    try {
+      await prisma.$executeRaw`
+        UPDATE application_logs
+        SET status = 'completed',
+            payload = jsonb_set(
+              payload,
+              '{results}',
+              ${JSON.stringify({
+                processed,
+                errors,
+                duration,
+                jobs: results
+              })}::jsonb
+            ),
+            updated_at = NOW()
+        WHERE log_id = ${cronId}
+          AND log_type = 'cron'
+      `.catch(() => {}) // Silently fail
+    } catch (updateError) {
+      console.warn('⚠️ Failed to update cron log:', updateError.message)
+    }
+    
     return json({
       processed: processed,
       errors: errors,
@@ -143,13 +127,39 @@ async function handle(request) {
     const duration = Date.now() - startTime
     console.error(`[CRON] ❌ Gift card cron worker failed after ${duration}ms:`, error)
     console.error(`[CRON] Error stack:`, error.stack)
-    return json({ 
-      error: 'Gift card job failed', 
-      detail: error.message,
-      duration: duration 
+    
+    // Update application_log with error (non-blocking)
+    try {
+      await prisma.$executeRaw`
+        UPDATE application_logs
+        SET status = 'error',
+            payload = jsonb_set(
+              payload,
+              '{results}',
+              ${JSON.stringify({
+                processed: 0,
+                errors: 1,
+                duration,
+                error: error.message
+              })}::jsonb
+            ),
+            last_error = ${error.message},
+            updated_at = NOW()
+        WHERE log_id = ${cronId}
+          AND log_type = 'cron'
+      `.catch(() => {}) // Silently fail
+    } catch (updateError) {
+      console.warn('⚠️ Failed to update cron error log:', updateError.message)
+    }
+    
+    return json({
+      error: 'Gift card job failed',
+      duration: duration
     }, 500)
   }
 }
+
+export const dynamic = 'force-dynamic'
 
 export async function GET(request) {
   return handle(request)

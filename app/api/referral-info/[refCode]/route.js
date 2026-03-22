@@ -1,4 +1,7 @@
 import prisma from '../../../../lib/prisma-client'
+import { Prisma } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
 
 export async function GET(request, { params }) {
   try {
@@ -11,33 +14,49 @@ export async function GET(request, { params }) {
     // Normalize the code (trim and uppercase)
     const normalizedCode = refCode.trim().toUpperCase()
 
+    // Try to get organization_id from query parameter (if provided)
+    const url = new URL(request.url)
+    let organizationId = url.searchParams.get('organization_id') || url.searchParams.get('org')
+
     // First, try to find in referral_profiles table (newer normalized table)
+    // This will give us the organization_id if not provided
     let referralProfile = await prisma.referralProfile.findFirst({
       where: {
+        ...(organizationId ? { organization_id: organizationId } : {}),
         OR: [
           { personal_code: { equals: normalizedCode, mode: 'insensitive' } },
           { referral_code: { equals: normalizedCode, mode: 'insensitive' } }
         ]
-      },
-      include: {
-        customer: {
-          select: {
-            square_customer_id: true,
-            given_name: true,
-            family_name: true,
-            email_address: true
-          }
-        }
       }
     })
 
-    if (referralProfile && referralProfile.customer) {
-      const referrerName = `${referralProfile.customer.given_name || ''} ${referralProfile.customer.family_name || ''}`.trim() || null
-      return Response.json({
-        referrerName: referrerName,
-        found: true,
-        code: normalizedCode
+    // If we found a referral profile, use its organization_id for subsequent queries
+    if (referralProfile) {
+      if (!organizationId) {
+        organizationId = referralProfile.organization_id
+      }
+
+      // Fetch customer details from square_existing_clients using square_customer_id
+      const customer = await prisma.squareExistingClient.findFirst({
+        where: {
+          square_customer_id: referralProfile.square_customer_id,
+          organization_id: organizationId
+        },
+        select: {
+          given_name: true,
+          family_name: true,
+          email_address: true
+        }
       })
+
+      if (customer) {
+        const referrerName = `${customer.given_name || ''} ${customer.family_name || ''}`.trim() || null
+        return Response.json({
+          referrerName: referrerName,
+          found: true,
+          code: normalizedCode
+        })
+      }
     }
 
     // Fallback to square_existing_clients for backward compatibility
@@ -48,11 +67,18 @@ export async function GET(request, { params }) {
         family_name,
         email_address,
         personal_code,
-        square_customer_id
+        square_customer_id,
+        organization_id
       FROM square_existing_clients
       WHERE UPPER(TRIM(personal_code)) = ${normalizedCode}
+        ${organizationId ? Prisma.sql`AND organization_id = ${organizationId}::uuid` : Prisma.sql``}
       LIMIT 1
     `
+
+    // If we found a referrer, use its organization_id for consistency
+    if (referrer && referrer.length > 0 && !organizationId) {
+      organizationId = referrer[0].organization_id
+    }
 
     // If not found, try exact match (case-sensitive)
     if (!referrer || referrer.length === 0) {
@@ -62,11 +88,18 @@ export async function GET(request, { params }) {
           family_name,
           email_address,
           personal_code,
-          square_customer_id
+          square_customer_id,
+          organization_id
         FROM square_existing_clients
         WHERE personal_code = ${refCode}
+          ${organizationId ? Prisma.sql`AND organization_id = ${organizationId}::uuid` : Prisma.sql``}
         LIMIT 1
       `
+      
+      // If we found a referrer, use its organization_id for consistency
+      if (referrer && referrer.length > 0 && !organizationId) {
+        organizationId = referrer[0].organization_id
+      }
     }
 
     if (!referrer || referrer.length === 0) {
