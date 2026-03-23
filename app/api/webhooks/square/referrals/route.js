@@ -3681,8 +3681,8 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
 
       if (friendGiftCard?.giftCardId) {
         await prisma.$executeRaw`
-          UPDATE square_existing_clients 
-          SET 
+          UPDATE square_existing_clients
+          SET
             got_signup_bonus = TRUE,
             gift_card_id = ${friendGiftCard.giftCardId},
             gift_card_gan = ${friendGiftCard.giftCardGan ?? null},
@@ -3695,6 +3695,42 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
           WHERE square_customer_id = ${customerId}
             AND organization_id = ${organizationId}::uuid
         `
+
+        // Create friend_signup_bonus reward record (was missing — gift card issued but not tracked)
+        try {
+          const giftCardRecord = await prisma.giftCard.findFirst({
+            where: {
+              organization_id: organizationId,
+              square_gift_card_id: friendGiftCard.giftCardId
+            }
+          })
+
+          await prisma.referralReward.create({
+            data: {
+              organization_id: organizationId,
+              referrer_customer_id: referrerCustomerId || customerId,
+              referred_customer_id: customerId,
+              reward_amount_cents: rewardAmountCents,
+              status: 'PAID',
+              gift_card_id: giftCardRecord?.id || null,
+              payment_id: paymentId || null,
+              reward_type: 'friend_signup_bonus',
+              paid_at: new Date(),
+              metadata: {
+                referral_code: customer.used_referral_code,
+                source: 'payment.completed',
+                gift_card_square_id: friendGiftCard.giftCardId
+              }
+            }
+          })
+          console.log(`✅ Created friend_signup_bonus reward record for ${customerId}`)
+        } catch (rewardError) {
+          if (rewardError.code === 'P2002') {
+            console.log(`ℹ️ friend_signup_bonus reward already exists for ${customerId} (idempotent)`)
+          } else {
+            console.warn(`⚠️ Failed to create friend_signup_bonus reward: ${rewardError.message}`)
+          }
+        }
 
         // Enqueue notification job for friend reward
         if (customer.email_address || customer.phone_number) {
