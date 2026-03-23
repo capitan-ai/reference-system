@@ -417,6 +417,7 @@ model ReferralReward {
   @@index([booking_id])
   @@index([status])
   @@index([created_at])
+  @@unique([organization_id, referred_customer_id, reward_type], map: "uq_referral_reward_per_referred")
   @@index([organization_id], map: "idx_referral_rewards_organization_id")
   @@map("referral_rewards")
   @@schema("public")

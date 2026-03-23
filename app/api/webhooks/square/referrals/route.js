@@ -1708,6 +1708,69 @@ async function processGiftCardRedemptions(paymentData, organizationId = null) {
           console.log(`      Amount: $${(Math.abs(amountCents) / 100).toFixed(2)}`)
           console.log(`      Balance: $${(balanceBeforeCents / 100).toFixed(2)} → $${(balanceAfterCents / 100).toFixed(2)}`)
         }
+
+        // Process REFUND activities (reversal of redemptions)
+        const refundActivities = activities.filter(activity => {
+          if (activity.type !== 'REFUND') return false
+          const refundDetails = activity.refundActivityDetails
+          const refundPaymentId = refundDetails?.paymentId
+          if (refundPaymentId === paymentId) return true
+          const orderId = paymentData.order_id || paymentData.orderId
+          if (orderId && refundDetails?.orderId === orderId) return true
+          return false
+        })
+
+        for (const refundActivity of refundActivities) {
+          const existingRefund = await prisma.giftCardTransaction.findFirst({
+            where: { square_activity_id: refundActivity.id }
+          })
+          if (existingRefund) {
+            console.log(`   ℹ️ REFUND transaction already exists for activity ${refundActivity.id}`)
+            continue
+          }
+
+          const refundDetails = refundActivity.refundActivityDetails
+          const refundAmountMoney = refundDetails?.amountMoney
+          const refundAmountCents = refundAmountMoney
+            ? (typeof refundAmountMoney.amount === 'bigint' ? Number(refundAmountMoney.amount) : (refundAmountMoney.amount || 0))
+            : 0
+
+          const refundBalanceAfter = refundActivity.giftCardBalanceMoney
+          const refundBalanceAfterCents = refundBalanceAfter
+            ? (typeof refundBalanceAfter.amount === 'bigint' ? Number(refundBalanceAfter.amount) : (refundBalanceAfter.amount || 0))
+            : 0
+          const refundBalanceBeforeCents = refundBalanceAfterCents - refundAmountCents
+
+          await saveGiftCardTransaction({
+            gift_card_id: giftCard.id,
+            transaction_type: 'REFUND',
+            amount_cents: Math.abs(refundAmountCents), // Positive for refund (money returned to card)
+            balance_before_cents: refundBalanceBeforeCents,
+            balance_after_cents: refundBalanceAfterCents,
+            square_activity_id: refundActivity.id,
+            square_order_id: refundDetails?.orderId || null,
+            square_payment_id: refundDetails?.paymentId || paymentId,
+            context_label: 'Gift card refund (redemption reversed)',
+            metadata: {
+              square_activity: refundActivity,
+              payment_id: paymentId
+            }
+          })
+
+          // Update gift card balance
+          await prisma.giftCard.update({
+            where: { id: giftCard.id },
+            data: {
+              current_balance_cents: refundBalanceAfterCents,
+              last_balance_check_at: new Date(),
+              updated_at: new Date()
+            }
+          })
+
+          console.log(`   ✅ Saved REFUND transaction for gift card ${giftCard.square_gift_card_id}`)
+          console.log(`      Refund: $${(Math.abs(refundAmountCents) / 100).toFixed(2)}`)
+          console.log(`      Balance: $${(refundBalanceBeforeCents / 100).toFixed(2)} → $${(refundBalanceAfterCents / 100).toFixed(2)}`)
+        }
       } catch (error) {
         console.error(`   ❌ Error processing gift card ${gan}:`, error.message)
         // Continue with other gift cards
@@ -3246,34 +3309,77 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
             )
 
             if (referrerGiftCard?.giftCardId) {
-              // Update referrer's stats
-              await prisma.$executeRaw`
-                UPDATE square_existing_clients 
-                SET 
-                  total_referrals = COALESCE(total_referrals, 0) + 1,
-                  total_rewards = COALESCE(total_rewards, 0) + 1000,
-                  gift_card_id = ${referrerGiftCard.giftCardId},
-                  gift_card_gan = ${referrerGiftCard.giftCardGan ?? null},
-                  gift_card_order_id = ${referrerGiftCard.orderId ?? null},
-                  gift_card_line_item_uid = ${referrerGiftCard.lineItemUid ?? null},
-                  gift_card_delivery_channel = ${referrerGiftCard.activationChannel ?? null},
-                  gift_card_activation_url = ${referrerGiftCard.activationUrl ?? null},
-                  gift_card_pass_kit_url = ${referrerGiftCard.passKitUrl ?? null},
-                  gift_card_digital_email = ${referrerGiftCard.digitalEmail ?? null}
-                WHERE square_customer_id = ${referrer.square_customer_id}
-                  AND organization_id = ${referrerOrganizationId}::uuid
-              `
+              // Atomic transaction: stats + reward record (prevents race condition partial state)
+              try {
+                await prisma.$transaction(async (tx) => {
+                  // Update referrer's stats
+                  await tx.$executeRaw`
+                    UPDATE square_existing_clients
+                    SET
+                      total_referrals = COALESCE(total_referrals, 0) + 1,
+                      total_rewards = COALESCE(total_rewards, 0) + 1000,
+                      gift_card_id = ${referrerGiftCard.giftCardId},
+                      gift_card_gan = ${referrerGiftCard.giftCardGan ?? null},
+                      gift_card_order_id = ${referrerGiftCard.orderId ?? null},
+                      gift_card_line_item_uid = ${referrerGiftCard.lineItemUid ?? null},
+                      gift_card_delivery_channel = ${referrerGiftCard.activationChannel ?? null},
+                      gift_card_activation_url = ${referrerGiftCard.activationUrl ?? null},
+                      gift_card_pass_kit_url = ${referrerGiftCard.passKitUrl ?? null},
+                      gift_card_digital_email = ${referrerGiftCard.digitalEmail ?? null}
+                    WHERE square_customer_id = ${referrer.square_customer_id}
+                      AND organization_id = ${referrerOrganizationId}::uuid
+                  `
 
-              // Also update referral_profiles stats
-              await prisma.$executeRaw`
-                UPDATE referral_profiles
-                SET 
-                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
-                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
-                  updated_at = NOW()
-                WHERE square_customer_id = ${referrer.square_customer_id}
-                  AND organization_id = ${referrerOrganizationId}::uuid
-              `
+                  // Update referral_profiles stats
+                  await tx.$executeRaw`
+                    UPDATE referral_profiles
+                    SET
+                      total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                      total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                      updated_at = NOW()
+                    WHERE square_customer_id = ${referrer.square_customer_id}
+                      AND organization_id = ${referrerOrganizationId}::uuid
+                  `
+
+                  // Create ReferralReward record (unique constraint prevents duplicates)
+                  const giftCardRecord = await tx.giftCard.findFirst({
+                    where: {
+                      organization_id: organizationId,
+                      square_gift_card_id: referrerGiftCard.giftCardId
+                    }
+                  })
+
+                  await tx.referralReward.create({
+                    data: {
+                      organization_id: organizationId,
+                      referrer_customer_id: referrer.square_customer_id,
+                      referred_customer_id: customerId,
+                      reward_amount_cents: rewardAmountCents,
+                      status: 'PAID',
+                      gift_card_id: giftCardRecord?.id || null,
+                      payment_id: paymentId || null,
+                      booking_id: null,
+                      reward_type: 'referrer_reward',
+                      paid_at: new Date(),
+                      metadata: {
+                        referral_code: customer.used_referral_code,
+                        source: 'payment.completed',
+                        gift_card_square_id: referrerGiftCard.giftCardId
+                      }
+                    }
+                  })
+                }, { timeout: 15000 })
+
+                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
+              } catch (txError) {
+                if (txError.code === 'P2002') {
+                  // Unique constraint caught race condition — reward already given
+                  console.log(`⚠️ Duplicate reward prevented for referred customer ${customerId} (race condition caught)`)
+                } else {
+                  console.error(`❌ Transaction failed for referrer reward: ${txError.message}`)
+                  paymentHadError = true
+                }
+              }
 
               console.log(`✅ Referrer gets NEW gift card:`)
               console.log(`   - Gift Card ID: ${referrerGiftCard.giftCardId}`)
@@ -3332,41 +3438,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                 })
               }
 
-              // Create ReferralReward record for tracking
-              try {
-                // Find the gift card ID from the new gift_cards table
-                const giftCardRecord = await prisma.giftCard.findFirst({
-                  where: {
-                    organization_id: organizationId,
-                    square_gift_card_id: referrerGiftCard.giftCardId
-                  }
-                })
-                
-                await prisma.referralReward.create({
-                  data: {
-                    organization_id: organizationId,
-                    referrer_customer_id: referrer.square_customer_id,
-                    referred_customer_id: customerId,
-                    reward_amount_cents: rewardAmountCents, // 1000 cents = $10
-                    status: 'PAID',
-                    gift_card_id: giftCardRecord?.id || null,
-                    payment_id: paymentId || null,
-                    booking_id: null,
-                    reward_type: 'referrer_reward',
-                    paid_at: new Date(),
-                    metadata: {
-                      referral_code: customer.used_referral_code,
-                      source: 'payment.completed',
-                      gift_card_square_id: referrerGiftCard.giftCardId
-                    }
-                  }
-                })
-                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
-              } catch (rewardError) {
-                console.warn(`⚠️ Failed to create ReferralReward record: ${rewardError.message}`)
-                // Continue - non-critical error
-              }
-
               // Send notification to admin about referral code usage (referrer reward)
               try {
                 await sendReferralCodeUsageNotification({
@@ -3418,31 +3489,74 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
             )
 
             if (loadResult.success) {
-              // Update referrer's stats
-              await prisma.$executeRaw`
-                UPDATE square_existing_clients 
-                SET 
-                  total_referrals = COALESCE(total_referrals, 0) + 1,
-                  total_rewards = COALESCE(total_rewards, 0) + 1000,
-                  gift_card_gan = ${loadResult.giftCardGan ?? referrerInfo.gift_card_gan ?? null},
-                  gift_card_delivery_channel = ${loadResult.deliveryChannel ?? referrerInfo.gift_card_delivery_channel ?? null},
-                  gift_card_activation_url = ${loadResult.activationUrl ?? referrerInfo.gift_card_activation_url ?? null},
-                  gift_card_pass_kit_url = ${loadResult.passKitUrl ?? referrerInfo.gift_card_pass_kit_url ?? null},
-                  gift_card_digital_email = ${loadResult.digitalEmail ?? referrerInfo.gift_card_digital_email ?? null}
-                WHERE square_customer_id = ${referrer.square_customer_id}
-                  AND organization_id = ${referrerOrganizationId}::uuid
-              `
+              // Atomic transaction: stats + reward record (prevents race condition partial state)
+              try {
+                await prisma.$transaction(async (tx) => {
+                  // Update referrer's stats
+                  await tx.$executeRaw`
+                    UPDATE square_existing_clients
+                    SET
+                      total_referrals = COALESCE(total_referrals, 0) + 1,
+                      total_rewards = COALESCE(total_rewards, 0) + 1000,
+                      gift_card_gan = ${loadResult.giftCardGan ?? referrerInfo.gift_card_gan ?? null},
+                      gift_card_delivery_channel = ${loadResult.deliveryChannel ?? referrerInfo.gift_card_delivery_channel ?? null},
+                      gift_card_activation_url = ${loadResult.activationUrl ?? referrerInfo.gift_card_activation_url ?? null},
+                      gift_card_pass_kit_url = ${loadResult.passKitUrl ?? referrerInfo.gift_card_pass_kit_url ?? null},
+                      gift_card_digital_email = ${loadResult.digitalEmail ?? referrerInfo.gift_card_digital_email ?? null}
+                    WHERE square_customer_id = ${referrer.square_customer_id}
+                      AND organization_id = ${referrerOrganizationId}::uuid
+                  `
 
-              // Also update referral_profiles stats
-              await prisma.$executeRaw`
-                UPDATE referral_profiles
-                SET 
-                  total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
-                  total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
-                  updated_at = NOW()
-                WHERE square_customer_id = ${referrer.square_customer_id}
-                  AND organization_id = ${referrerOrganizationId}::uuid
-              `
+                  // Update referral_profiles stats
+                  await tx.$executeRaw`
+                    UPDATE referral_profiles
+                    SET
+                      total_referrals_count = COALESCE(total_referrals_count, 0) + 1,
+                      total_rewards_cents = COALESCE(total_rewards_cents, 0) + 1000,
+                      updated_at = NOW()
+                    WHERE square_customer_id = ${referrer.square_customer_id}
+                      AND organization_id = ${referrerOrganizationId}::uuid
+                  `
+
+                  // Create ReferralReward record (unique constraint prevents duplicates)
+                  const giftCardRecord = await tx.giftCard.findFirst({
+                    where: {
+                      organization_id: referrerOrganizationId,
+                      square_gift_card_id: referrerInfo.gift_card_id
+                    }
+                  })
+
+                  await tx.referralReward.create({
+                    data: {
+                      organization_id: organizationId,
+                      referrer_customer_id: referrer.square_customer_id,
+                      referred_customer_id: customerId,
+                      reward_amount_cents: rewardAmountCents,
+                      status: 'PAID',
+                      gift_card_id: giftCardRecord?.id || null,
+                      payment_id: paymentId || null,
+                      booking_id: null,
+                      reward_type: 'referrer_reward',
+                      paid_at: new Date(),
+                      metadata: {
+                        referral_code: customer.used_referral_code,
+                        source: 'payment.completed (load)',
+                        gift_card_square_id: referrerInfo.gift_card_id
+                      }
+                    }
+                  })
+                }, { timeout: 15000 })
+
+                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
+              } catch (txError) {
+                if (txError.code === 'P2002') {
+                  // Unique constraint caught race condition — reward already given
+                  console.log(`⚠️ Duplicate reward prevented for referred customer ${customerId} (race condition caught)`)
+                } else {
+                  console.error(`❌ Transaction failed for referrer reward (load): ${txError.message}`)
+                  paymentHadError = true
+                }
+              }
 
               if (runContext?.correlationId) {
                 await updateGiftCardRunStage(prisma, runContext.correlationId, {
@@ -3499,40 +3613,6 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
                   organizationId,
                   metadata: { reason: 'missing-contact-info', friendCustomerId: customerId }
                 })
-              }
-
-              // Create ReferralReward record for tracking
-              try {
-                const giftCardRecord = await prisma.giftCard.findFirst({
-                  where: {
-                    organization_id: referrerOrganizationId,
-                    square_gift_card_id: referrerInfo.gift_card_id
-                  }
-                })
-                
-                await prisma.referralReward.create({
-                  data: {
-                    organization_id: organizationId,
-                    referrer_customer_id: referrer.square_customer_id,
-                    referred_customer_id: customerId,
-                    reward_amount_cents: rewardAmountCents,
-                    status: 'PAID',
-                    gift_card_id: giftCardRecord?.id || null,
-                    payment_id: paymentId || null,
-                    booking_id: null,
-                    reward_type: 'referrer_reward',
-                    paid_at: new Date(),
-                    metadata: {
-                      referral_code: customer.used_referral_code,
-                      source: 'payment.completed (load)',
-                      gift_card_square_id: referrerInfo.gift_card_id
-                    }
-                  }
-                })
-                console.log(`✅ Created ReferralReward record for referrer ${referrer.square_customer_id}`)
-              } catch (rewardError) {
-                console.warn(`⚠️ Failed to create ReferralReward record: ${rewardError.message}`)
-                // Continue - non-critical error
               }
 
               // Send notification to admin about referral code usage (referrer reward - loaded)
