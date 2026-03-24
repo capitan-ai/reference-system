@@ -4,7 +4,7 @@ const crypto = require('crypto')
 const QRCode = require('qrcode')
 const { saveApplicationLog } = require('../../../../../lib/workflows/application-log-queue')
 const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification, trackNotification } = require('../../../../../lib/email-service-simple')
-const { sendReferralCodeSms, sendGiftCardSmsNotification, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
+const { sendReferralCodeSms, sendGiftCardSmsNotification, sendPostVisitReminderSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
 // Import payment saving function from main webhook handler
 // Note: route.js uses ES6 exports, so we need to use dynamic import
@@ -3151,9 +3151,10 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
 
     // 1. Check if this is a new customer's first payment
     const customerData = await prisma.$queryRaw`
-      SELECT square_customer_id, used_referral_code, got_signup_bonus, gift_card_id, 
-             given_name, family_name, email_address, first_payment_completed, activated_as_referrer
-      FROM square_existing_clients 
+      SELECT square_customer_id, used_referral_code, got_signup_bonus, gift_card_id,
+             given_name, family_name, email_address, first_payment_completed, activated_as_referrer,
+             personal_code, phone_number
+      FROM square_existing_clients
       WHERE square_customer_id = ${customerId}
         AND organization_id = ${organizationId}::uuid
     `
@@ -3185,7 +3186,31 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
         console.warn(`⚠️ Could not check order ID: ${error.message}`)
       }
     }
-    
+
+    // Send post-visit reminder SMS (every visit, every customer)
+    if (customer.phone_number && customer.personal_code) {
+      try {
+        const smsResult = await sendPostVisitReminderSms({
+          to: customer.phone_number,
+          customerName: customer.given_name || 'there',
+          referralCode: customer.personal_code
+        })
+        if (smsResult.success && !smsResult.skipped) {
+          await trackNotification({
+            channel: 'SMS',
+            templateType: 'POST_VISIT_REMINDER',
+            status: 'sent',
+            customerId,
+            externalId: smsResult.sid,
+            organizationId,
+            metadata: { referralCode: customer.personal_code, paymentId }
+          })
+        }
+      } catch (err) {
+        console.warn(`⚠️ Post-visit SMS failed for ${customerId}: ${err.message}`)
+      }
+    }
+
     // Check if this is their first payment
     if (customer.first_payment_completed) {
       console.log(`Customer ${customerId} already completed first payment`)

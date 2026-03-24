@@ -1803,6 +1803,7 @@ enum NotificationTemplateType {
   REFERRER_ACTIVATION
   FRIEND_ACTIVATION
   GIFT_CARD_DELIVERY
+  POST_VISIT_REMINDER
   OTHER
 
   @@schema("public")
