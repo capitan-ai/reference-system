@@ -160,6 +160,7 @@ model NotificationEvent {
   organization_id    String                   @db.Uuid
 
   @@index([channel, status, createdAt], map: "notification_channel_status_idx")
+  @@index([externalId], map: "notification_external_id_idx")
   @@map("notification_events")
   @@schema("public")
 }
@@ -1801,6 +1802,7 @@ enum NotificationTemplateType {
   REFERRAL_INVITE
   REFERRER_ACTIVATION
   FRIEND_ACTIVATION
+  GIFT_CARD_DELIVERY
   OTHER
 
   @@schema("public")
@@ -1812,6 +1814,8 @@ enum NotificationStatus {
   delivered
   failed
   bounced
+  opened
+  clicked
 
   @@schema("public")
 }
