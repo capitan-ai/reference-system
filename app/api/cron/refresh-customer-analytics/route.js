@@ -143,7 +143,8 @@ payments_agg AS (
 bookings_agg AS (
   SELECT
     b_inner.organization_id, COALESCE(m.canonical_id, b_inner.customer_id) as customer_id,
-    MIN(b_inner.start_at) AS first_b, MAX(b_inner.start_at) AS last_b,
+    MIN(b_inner.start_at) FILTER (WHERE b_inner.status IN ('ACCEPTED','COMPLETED')) AS first_b,
+    MAX(b_inner.start_at) FILTER (WHERE b_inner.status IN ('ACCEPTED','COMPLETED')) AS last_b,
     COUNT(*) FILTER (WHERE b_inner.status IN ('ACCEPTED','COMPLETED')) AS b_count,
     COUNT(*) FILTER (WHERE b_inner.status = 'NO_SHOW') AS b_no_shows,
     COUNT(*) FILTER (WHERE b_inner.status = 'CANCELLED_BY_CUSTOMER') AS b_cancelled_by_customer,
