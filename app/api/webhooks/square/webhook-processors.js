@@ -436,5 +436,119 @@ export async function processGiftCardActivityCreated() {}
 export async function processGiftCardActivityUpdated() {}
 export async function processGiftCardCustomerLinked() {}
 export async function processGiftCardUpdated() {}
-export async function processRefundCreated() {}
-export async function processRefundUpdated() {}
+/**
+ * Process refund.created webhook
+ * Creates REVERSAL entries in the MasterEarningsLedger to negate commission/tips.
+ */
+export async function processRefundCreated(payload, eventId, eventCreatedAt) {
+  console.log(`[WEBHOOK-PROCESSOR] processRefundCreated called for event ${eventId}`)
+
+  const refundData = payload?.object?.refund || payload?.refund || payload
+  if (!refundData?.id) {
+    console.warn(`[WEBHOOK-PROCESSOR] No refund ID found in payload`)
+    return
+  }
+
+  const refundId = refundData.id
+  const paymentId = refundData.payment_id || refundData.paymentId
+  const refundStatus = refundData.status
+  const refundAmountCents = refundData.amount_money?.amount
+    ? (typeof refundData.amount_money.amount === 'bigint'
+        ? Number(refundData.amount_money.amount)
+        : Number(refundData.amount_money.amount))
+    : 0
+
+  if (!paymentId) {
+    console.warn(`[WEBHOOK-PROCESSOR] Refund ${refundId} has no payment_id, skipping`)
+    return
+  }
+
+  // Only process completed/approved refunds
+  if (refundStatus && !['COMPLETED', 'APPROVED'].includes(refundStatus)) {
+    console.log(`[WEBHOOK-PROCESSOR] Refund ${refundId} status is ${refundStatus}, skipping`)
+    return
+  }
+
+  try {
+    // Idempotency: check if REVERSAL already exists for this refund
+    const existingReversal = await prisma.$queryRaw`
+      SELECT id FROM master_earnings_ledger
+      WHERE entry_type = 'REVERSAL'
+        AND meta_json->>'refund_id' = ${refundId}
+      LIMIT 1
+    `
+    if (existingReversal?.length > 0) {
+      console.log(`[WEBHOOK-PROCESSOR] REVERSAL for refund ${refundId} already exists, skipping`)
+      return
+    }
+
+    // Find the payment and its booking
+    const payment = await prisma.payment.findFirst({
+      where: { payment_id: paymentId }
+    })
+    if (!payment?.booking_id) {
+      console.warn(`[WEBHOOK-PROCESSOR] Payment ${paymentId} not found or has no booking, skipping refund reversal`)
+      return
+    }
+
+    // Find all ledger entries for this booking
+    const originalEntries = await prisma.masterEarningsLedger.findMany({
+      where: {
+        booking_id: payment.booking_id,
+        entry_type: { in: ['SERVICE_COMMISSION', 'TIP', 'DISCOUNT_ADJUSTMENT'] }
+      }
+    })
+
+    if (originalEntries.length === 0) {
+      console.log(`[WEBHOOK-PROCESSOR] No ledger entries found for booking ${payment.booking_id}, skipping refund`)
+      return
+    }
+
+    // Determine refund ratio (for partial refunds)
+    const totalPaymentAmount = payment.total_money_amount || 0
+    const isFullRefund = refundAmountCents >= totalPaymentAmount || refundAmountCents === 0
+    const refundRatio = isFullRefund ? 1.0 : (totalPaymentAmount > 0 ? refundAmountCents / totalPaymentAmount : 1.0)
+
+    const reversalEntries = []
+    for (const entry of originalEntries) {
+      const reversalAmount = isFullRefund
+        ? -entry.amount_amount
+        : -Math.round(entry.amount_amount * refundRatio)
+
+      if (reversalAmount === 0) continue
+
+      reversalEntries.push({
+        organization_id: entry.organization_id,
+        team_member_id: entry.team_member_id,
+        booking_id: entry.booking_id,
+        entry_type: 'REVERSAL',
+        amount_amount: reversalAmount,
+        source_engine: 'REFUND_ENGINE',
+        meta_json: {
+          refund_id: refundId,
+          refund_payment_id: paymentId,
+          refund_amount_cents: refundAmountCents,
+          refund_ratio: refundRatio,
+          reversed_entry_id: entry.id,
+          reversed_entry_type: entry.entry_type,
+          reversed_amount: entry.amount_amount
+        }
+      })
+    }
+
+    if (reversalEntries.length > 0) {
+      await prisma.masterEarningsLedger.createMany({ data: reversalEntries })
+      console.log(`[WEBHOOK-PROCESSOR] ✅ Created ${reversalEntries.length} REVERSAL entries for refund ${refundId} (ratio: ${refundRatio})`)
+    }
+  } catch (error) {
+    console.error(`[WEBHOOK-PROCESSOR] ❌ Error processing refund ${refundId}:`, error.message)
+    throw error
+  }
+}
+
+/**
+ * Process refund.updated webhook — delegates to processRefundCreated (idempotent).
+ */
+export async function processRefundUpdated(payload, eventId, eventCreatedAt) {
+  return processRefundCreated(payload, eventId, eventCreatedAt)
+}

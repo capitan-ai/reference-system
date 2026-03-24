@@ -750,6 +750,52 @@ enum MasterEntryType {
   @@schema("public")
 }
 
+// Admin's replacement for the xlsx spreadsheet — records fixes, complaints, fault attribution, bonuses
+model MasterAdjustment {
+  id                    String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organization_id       String           @db.Uuid
+  adjustment_type       AdjustmentType
+  booking_id            String?          @db.Uuid // the fix or discounted booking
+  original_booking_id   String?          @db.Uuid // the original booking that needed fixing
+  fault_master_id       String?          @db.Uuid // who pays
+  compensated_master_id String?          @db.Uuid // who receives
+  amount_cents          Int // always positive; sign determined by entry_type in ledger
+  reason                String?
+  created_by            String?          @db.Uuid // admin user
+  ledger_entry_ids      String[]         @default([])
+  status                AdjustmentStatus @default(PENDING)
+  created_at            DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime         @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@index([organization_id, created_at])
+  @@index([fault_master_id])
+  @@index([booking_id])
+  @@map("master_adjustments")
+  @@schema("public")
+}
+
+enum AdjustmentType {
+  FIX_CROSS_MASTER   // Cross-master fix: Marichka fixes Polina's work -> $15 transfer
+  FIX_SAME_MASTER    // Same master fixes own work -> flag only, no financial transfer
+  COMPLAINT_FAULT    // Discount given by one master but another is at fault
+  HELP_COMPENSATION  // Pay master for helping another (e.g. one nail extension)
+  REASSIGNMENT_BONUS // Pay master for taking sick colleague's client
+  MASTER_DELAY       // Late master pays the discount
+  REFUND_REVERSAL    // Payment refunded, reverse commission
+  MANUAL_BONUS       // Ad-hoc bonus from owner
+  MANUAL_DEDUCTION   // Ad-hoc deduction
+
+  @@schema("public")
+}
+
+enum AdjustmentStatus {
+  PENDING
+  APPLIED
+  VOIDED
+
+  @@schema("public")
+}
+
 model TeamMember {
   id                                String                 @id @default(uuid()) @db.Uuid
   square_team_member_id             String

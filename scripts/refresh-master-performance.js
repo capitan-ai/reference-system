@@ -37,7 +37,10 @@ ledger_agg AS (
     b.location_id,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS commission_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'TIP') AS tips_cents,
-    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_transfer_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents
   FROM master_earnings_ledger mel
   INNER JOIN bookings b ON b.id = mel.booking_id AND b.organization_id = mel.organization_id
   WHERE mel.organization_id = $1::uuid
@@ -53,7 +56,10 @@ ledger_no_loc AS (
     (SELECT id FROM locations WHERE organization_id = mel.organization_id LIMIT 1) AS location_id,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS commission_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'TIP') AS tips_cents,
-    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_transfer_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents
   FROM master_earnings_ledger mel
   WHERE mel.organization_id = $1::uuid
     AND mel.booking_id IS NULL
@@ -72,7 +78,8 @@ booking_agg AS (
     organization_id,
     location_id,
     COUNT(*) AS b_count,
-    COUNT(*) FILTER (WHERE service_variation_id IN (SELECT uuid FROM service_variation WHERE name ~* 'fix')) AS f_count,
+    COUNT(*) FILTER (WHERE service_variation_id IN (SELECT uuid FROM service_variation WHERE name ~* 'fix')
+      OR id IN (SELECT booking_id FROM booking_snapshots WHERE is_fix = true AND booking_id IS NOT NULL)) AS f_count,
     SUM(duration_minutes) AS total_minutes,
     SUM(COALESCE((SELECT price_snapshot_amount FROM booking_snapshots WHERE booking_id = bookings.id), 0)) AS total_gross
   FROM bookings
@@ -96,8 +103,8 @@ base AS (
     k.organization_id,
     k.location_id,
     COALESCE(ba.total_gross, 0)::bigint AS gross_generated,
-    (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0))::bigint AS net_master_income,
-    (COALESCE(ba.total_gross, 0) - (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0)))::bigint AS margin_contribution,
+    (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0))::bigint AS net_master_income,
+    (COALESCE(ba.total_gross, 0) - (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0)))::bigint AS margin_contribution,
     COALESCE(lu.tips_cents, 0)::bigint AS tips_total,
     COALESCE(ba.total_minutes, 0) AS booked_minutes,
     COALESCE(ms.default_working_minutes_per_day, 480) AS available_minutes,
