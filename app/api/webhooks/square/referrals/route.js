@@ -540,7 +540,8 @@ async function sendGiftCardEmailNotification({
   isReminder = false,
   waitForPassKit = true, // Enable waiting for PassKit URL by default
   locationId = null,
-  notificationMetadata = {}
+  notificationMetadata = {},
+  notificationType
 }) {
   const customerId = notificationMetadata.customerId
   const organizationId = notificationMetadata.organizationId
@@ -673,7 +674,8 @@ async function sendGiftCardEmailNotification({
         activationUrl: activationUrl ?? null,
         passKitUrl: finalPassKitUrl ?? null, // Use waited-for URL or original
         qrDataUri,
-        isReminder
+        isReminder,
+        role: notificationType === 'FRIEND_ACTIVATION' ? 'friend' : 'referrer'
       },
       {
         metadata: analyticsMetadata,
@@ -5300,6 +5302,7 @@ async function processBookingCreated(bookingData, runContext = {}) {
               giftCardId: friendGiftCard.giftCardId,
               waitForPassKit: true,
               locationId: bookingLocationId,
+              notificationType: 'FRIEND_ACTIVATION',
               notificationMetadata: {
                 customerId,
                 referralCode,
