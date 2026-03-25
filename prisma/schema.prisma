@@ -746,6 +746,8 @@ enum MasterEntryType {
   DISCOUNT_ADJUSTMENT
   MANUAL_ADJUSTMENT
   REVERSAL
+  DISPUTE_HOLD    // Freeze earnings when customer disputes payment
+  DISPUTE_RELEASE // Unfreeze if dispute is won
 
   @@schema("public")
 }

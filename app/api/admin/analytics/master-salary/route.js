@@ -61,6 +61,8 @@ export async function GET(request) {
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents,
+        SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISPUTE_HOLD') AS dispute_hold_cents,
+        SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISPUTE_RELEASE') AS dispute_release_cents,
         COUNT(DISTINCT mel.booking_id) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS booking_count,
         SUM(mel.amount_amount) AS total_net_cents
       FROM master_earnings_ledger mel
@@ -180,7 +182,9 @@ export async function GET(request) {
       const fixCents = Number(e.fix_cents || 0)
       const manualCents = Number(e.manual_cents || 0)
       const reversalCents = Number(e.reversal_cents || 0)
-      const netSalaryCents = commissionCents + discountCents + fixCents + manualCents + reversalCents
+      const disputeHoldCents = Number(e.dispute_hold_cents || 0)
+      const disputeReleaseCents = Number(e.dispute_release_cents || 0)
+      const netSalaryCents = commissionCents + discountCents + fixCents + manualCents + reversalCents + disputeHoldCents + disputeReleaseCents
       const grossCents = Number(b.gross_cents || 0)
       const paidMinutes = Number(s?.total_scheduled_minutes || 0)
       const paidHours = paidMinutes / 60
@@ -199,6 +203,8 @@ export async function GET(request) {
         fix_transfer_cents: fixCents,
         manual_adjustment_cents: manualCents,
         reversal_cents: reversalCents,
+        dispute_hold_cents: disputeHoldCents,
+        dispute_release_cents: disputeReleaseCents,
         net_salary_cents: netSalaryCents,
         total_with_tips_cents: netSalaryCents + tipsCents,
         paid_hours: Math.round(paidHours * 10) / 10,

@@ -698,7 +698,10 @@ export async function POST(request) {
         'gift_card.updated',
         'refund.created',
         'refund.updated',
-        'team_member.created'
+        'team_member.created',
+        'dispute.created',
+        'dispute.state.updated',
+        'dispute.state.changed'
       ]
       
       if (queueableEventTypes.includes(eventData.type)) {

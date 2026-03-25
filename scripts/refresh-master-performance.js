@@ -40,7 +40,8 @@ ledger_agg AS (
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_transfer_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
-    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('DISPUTE_HOLD', 'DISPUTE_RELEASE')) AS dispute_cents
   FROM master_earnings_ledger mel
   INNER JOIN bookings b ON b.id = mel.booking_id AND b.organization_id = mel.organization_id
   WHERE mel.organization_id = $1::uuid
@@ -59,7 +60,8 @@ ledger_no_loc AS (
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_transfer_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
-    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents,
+    SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('DISPUTE_HOLD', 'DISPUTE_RELEASE')) AS dispute_cents
   FROM master_earnings_ledger mel
   WHERE mel.organization_id = $1::uuid
     AND mel.booking_id IS NULL
@@ -103,8 +105,8 @@ base AS (
     k.organization_id,
     k.location_id,
     COALESCE(ba.total_gross, 0)::bigint AS gross_generated,
-    (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0))::bigint AS net_master_income,
-    (COALESCE(ba.total_gross, 0) - (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0)))::bigint AS margin_contribution,
+    (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0) + COALESCE(lu.dispute_cents, 0))::bigint AS net_master_income,
+    (COALESCE(ba.total_gross, 0) - (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0) + COALESCE(lu.dispute_cents, 0)))::bigint AS margin_contribution,
     COALESCE(lu.tips_cents, 0)::bigint AS tips_total,
     COALESCE(ba.total_minutes, 0) AS booked_minutes,
     COALESCE(

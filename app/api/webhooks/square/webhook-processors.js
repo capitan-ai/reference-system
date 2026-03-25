@@ -552,3 +552,193 @@ export async function processRefundCreated(payload, eventId, eventCreatedAt) {
 export async function processRefundUpdated(payload, eventId, eventCreatedAt) {
   return processRefundCreated(payload, eventId, eventCreatedAt)
 }
+
+/**
+ * Process dispute.created webhook
+ * When a customer disputes a payment, freeze the master's earnings for that booking
+ * by creating DISPUTE_HOLD entries (negative amounts matching original earnings).
+ *
+ * Square dispute states: INQUIRY_EVIDENCE_REQUIRED, INQUIRY_PROCESSING, INQUIRY_CLOSED,
+ *   EVIDENCE_REQUIRED, PROCESSING, WON, LOST, ACCEPTED
+ */
+export async function processDisputeCreated(payload, eventId, eventCreatedAt) {
+  console.log(`[WEBHOOK-PROCESSOR] processDisputeCreated called for event ${eventId}`)
+
+  const disputeData = payload?.object?.dispute || payload?.dispute || payload
+  if (!disputeData?.id && !disputeData?.dispute_id) {
+    console.warn(`[WEBHOOK-PROCESSOR] No dispute ID found in payload`)
+    return
+  }
+
+  const disputeId = disputeData.id || disputeData.dispute_id
+  const paymentId = disputeData.payment_id || disputeData.disputed_payment?.payment_id
+  const disputeState = disputeData.state || disputeData.status
+  const disputeAmountCents = disputeData.amount_money?.amount
+    ? Number(disputeData.amount_money.amount)
+    : (disputeData.disputed_payment?.amount ? Number(disputeData.disputed_payment.amount) : 0)
+
+  console.log(`[WEBHOOK-PROCESSOR] Dispute ${disputeId}: state=${disputeState}, payment=${paymentId}, amount=${disputeAmountCents}`)
+
+  if (!paymentId) {
+    console.warn(`[WEBHOOK-PROCESSOR] Dispute ${disputeId} has no payment_id, skipping`)
+    return
+  }
+
+  try {
+    // Idempotency: check if DISPUTE_HOLD already exists for this dispute
+    const existingHold = await prisma.$queryRaw`
+      SELECT id FROM master_earnings_ledger
+      WHERE entry_type = 'DISPUTE_HOLD'
+        AND meta_json->>'dispute_id' = ${disputeId}
+      LIMIT 1
+    `
+    if (existingHold?.length > 0) {
+      console.log(`[WEBHOOK-PROCESSOR] DISPUTE_HOLD for dispute ${disputeId} already exists, skipping`)
+      return
+    }
+
+    // Find the payment and its booking
+    const payment = await prisma.payment.findFirst({
+      where: { payment_id: paymentId }
+    })
+    if (!payment?.booking_id) {
+      console.warn(`[WEBHOOK-PROCESSOR] Payment ${paymentId} not found or has no booking, skipping dispute hold`)
+      return
+    }
+
+    // Find all earnings ledger entries for this booking (commission, tips, discount adj)
+    const originalEntries = await prisma.masterEarningsLedger.findMany({
+      where: {
+        booking_id: payment.booking_id,
+        entry_type: { in: ['SERVICE_COMMISSION', 'TIP', 'DISCOUNT_ADJUSTMENT'] }
+      }
+    })
+
+    if (originalEntries.length === 0) {
+      console.log(`[WEBHOOK-PROCESSOR] No ledger entries found for booking ${payment.booking_id}, skipping dispute hold`)
+      return
+    }
+
+    // Create DISPUTE_HOLD entries (freeze = negate original amounts)
+    const holdEntries = []
+    for (const entry of originalEntries) {
+      if (entry.amount_amount === 0) continue
+      holdEntries.push({
+        organization_id: entry.organization_id,
+        team_member_id: entry.team_member_id,
+        booking_id: entry.booking_id,
+        entry_type: 'DISPUTE_HOLD',
+        amount_amount: -entry.amount_amount,
+        source_engine: 'DISPUTE_ENGINE',
+        meta_json: {
+          dispute_id: disputeId,
+          dispute_state: disputeState,
+          dispute_payment_id: paymentId,
+          dispute_amount_cents: disputeAmountCents,
+          held_entry_id: entry.id,
+          held_entry_type: entry.entry_type,
+          held_amount: entry.amount_amount
+        }
+      })
+    }
+
+    if (holdEntries.length > 0) {
+      await prisma.masterEarningsLedger.createMany({ data: holdEntries })
+      console.log(`[WEBHOOK-PROCESSOR] ✅ Created ${holdEntries.length} DISPUTE_HOLD entries for dispute ${disputeId}`)
+    }
+  } catch (error) {
+    console.error(`[WEBHOOK-PROCESSOR] ❌ Error processing dispute ${disputeId}:`, error.message)
+    throw error
+  }
+}
+
+/**
+ * Process dispute.state.updated / dispute.state.changed webhook
+ *
+ * Outcomes:
+ * - WON → merchant wins, release the hold (create DISPUTE_RELEASE to restore earnings)
+ * - LOST / ACCEPTED → merchant loses, hold stays (money gone, same as refund)
+ * - Other states (PROCESSING, EVIDENCE_REQUIRED) → no action, hold remains
+ */
+export async function processDisputeStateUpdated(payload, eventId, eventCreatedAt) {
+  console.log(`[WEBHOOK-PROCESSOR] processDisputeStateUpdated called for event ${eventId}`)
+
+  const disputeData = payload?.object?.dispute || payload?.dispute || payload
+  if (!disputeData?.id && !disputeData?.dispute_id) {
+    console.warn(`[WEBHOOK-PROCESSOR] No dispute ID found in state update payload`)
+    return
+  }
+
+  const disputeId = disputeData.id || disputeData.dispute_id
+  const newState = disputeData.state || disputeData.status
+  console.log(`[WEBHOOK-PROCESSOR] Dispute ${disputeId} state updated to: ${newState}`)
+
+  if (!newState) return
+
+  const upperState = newState.toUpperCase()
+
+  if (upperState === 'WON') {
+    // Merchant won — release the hold (restore earnings)
+    try {
+      // Idempotency: check if DISPUTE_RELEASE already exists
+      const existingRelease = await prisma.$queryRaw`
+        SELECT id FROM master_earnings_ledger
+        WHERE entry_type = 'DISPUTE_RELEASE'
+          AND meta_json->>'dispute_id' = ${disputeId}
+        LIMIT 1
+      `
+      if (existingRelease?.length > 0) {
+        console.log(`[WEBHOOK-PROCESSOR] DISPUTE_RELEASE for dispute ${disputeId} already exists, skipping`)
+        return
+      }
+
+      // Find all DISPUTE_HOLD entries for this dispute
+      const holdEntries = await prisma.$queryRaw`
+        SELECT id, organization_id, team_member_id, booking_id, amount_amount, meta_json
+        FROM master_earnings_ledger
+        WHERE entry_type = 'DISPUTE_HOLD'
+          AND meta_json->>'dispute_id' = ${disputeId}
+      `
+
+      if (!holdEntries?.length) {
+        console.log(`[WEBHOOK-PROCESSOR] No DISPUTE_HOLD entries found for dispute ${disputeId}`)
+        return
+      }
+
+      // Create DISPUTE_RELEASE entries (negate the holds = restore original amounts)
+      const releaseEntries = holdEntries.map((hold) => ({
+        organization_id: hold.organization_id,
+        team_member_id: hold.team_member_id,
+        booking_id: hold.booking_id,
+        entry_type: 'DISPUTE_RELEASE',
+        amount_amount: -Number(hold.amount_amount),
+        source_engine: 'DISPUTE_ENGINE',
+        meta_json: {
+          dispute_id: disputeId,
+          dispute_state: 'WON',
+          released_hold_id: hold.id
+        }
+      }))
+
+      await prisma.masterEarningsLedger.createMany({ data: releaseEntries })
+      console.log(`[WEBHOOK-PROCESSOR] ✅ Dispute ${disputeId} WON — created ${releaseEntries.length} DISPUTE_RELEASE entries (earnings restored)`)
+    } catch (error) {
+      console.error(`[WEBHOOK-PROCESSOR] ❌ Error releasing dispute ${disputeId}:`, error.message)
+      throw error
+    }
+  } else if (upperState === 'LOST' || upperState === 'ACCEPTED') {
+    // Merchant lost — hold stays, earnings are permanently deducted
+    // No additional action needed; DISPUTE_HOLD already reduced the salary
+    console.log(`[WEBHOOK-PROCESSOR] Dispute ${disputeId} ${upperState} — DISPUTE_HOLD entries remain as permanent deduction`)
+  } else {
+    // PROCESSING, EVIDENCE_REQUIRED, INQUIRY_* — no action
+    console.log(`[WEBHOOK-PROCESSOR] Dispute ${disputeId} state ${newState} — no salary action needed`)
+  }
+}
+
+/**
+ * Alias: dispute.state.changed → same handler as dispute.state.updated
+ */
+export async function processDisputeStateChanged(payload, eventId, eventCreatedAt) {
+  return processDisputeStateUpdated(payload, eventId, eventCreatedAt)
+}
