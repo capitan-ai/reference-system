@@ -231,8 +231,16 @@ export async function GET(request) {
       tips_cents: masters.reduce((s, m) => s + m.tips_cents, 0),
       discount_adjustment_cents: masters.reduce((s, m) => s + m.discount_adjustment_cents, 0),
       fix_transfer_cents: masters.reduce((s, m) => s + m.fix_transfer_cents, 0),
+      manual_adjustment_cents: masters.reduce((s, m) => s + m.manual_adjustment_cents, 0),
+      reversal_cents: masters.reduce((s, m) => s + m.reversal_cents, 0),
+      dispute_hold_cents: masters.reduce((s, m) => s + m.dispute_hold_cents, 0),
+      dispute_release_cents: masters.reduce((s, m) => s + m.dispute_release_cents, 0),
+      deductions_cents: masters.reduce((s, m) =>
+        s + m.discount_adjustment_cents + m.fix_transfer_cents + m.reversal_cents + m.dispute_hold_cents + m.dispute_release_cents + Math.min(0, m.manual_adjustment_cents), 0),
       net_salary_cents: masters.reduce((s, m) => s + m.net_salary_cents, 0),
       total_with_tips_cents: masters.reduce((s, m) => s + m.total_with_tips_cents, 0),
+      total_services: masters.reduce((s, m) => s + m.booking_count, 0),
+      total_paid_hours: Math.round(masters.reduce((s, m) => s + m.paid_hours, 0) * 10) / 10,
       master_count: masters.length,
     }
 
