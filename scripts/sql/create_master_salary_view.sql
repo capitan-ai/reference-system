@@ -3,7 +3,10 @@
 --
 -- Gross Sales & Tips: from PAYMENTS table (matches Square exactly)
 -- Commission & Deductions: from master_earnings_ledger (our business logic)
--- Technician: payments → bookings.technician_id (with order fallback for orphans)
+-- Technician resolution chain:
+--   1. payments.technician_id (set by webhook + backfill)
+--   2. payments.booking_id → bookings.technician_id
+--   3. payments.order_id → orders.booking_id → bookings.technician_id (orphan fallback)
 
 DROP VIEW IF EXISTS v_master_salary_monthly;
 
@@ -13,7 +16,7 @@ WITH
 pay AS (
   SELECT
     p.organization_id,
-    COALESCE(b.technician_id, b2.technician_id) AS team_member_id,
+    COALESCE(p.technician_id, b.technician_id, b2.technician_id) AS team_member_id,
     to_char((p.created_at AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM') AS period,
     SUM(p.amount_money_amount)::bigint AS gross_cents,
     SUM(COALESCE(p.tip_money_amount, 0))::bigint AS tips_cents,
@@ -25,7 +28,8 @@ pay AS (
   LEFT JOIN orders o ON o.id = p.order_id AND p.booking_id IS NULL
   LEFT JOIN bookings b2 ON b2.id = o.booking_id AND b2.technician_id IS NOT NULL AND p.booking_id IS NULL
   WHERE p.status = 'COMPLETED'
-    AND COALESCE(b.technician_id, b2.technician_id) IS NOT NULL
+    AND cardinality(p.refund_ids) = 0
+    AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
   GROUP BY 1, 2, 3
 ),
 -- LEDGER for commission/deductions (our calculated values)

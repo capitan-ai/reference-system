@@ -61,20 +61,39 @@ export async function GET(request) {
       : [organizationId, startDate, endDate]
     const endDateParam = locationId ? '$4' : '$3'
 
-    // ── Ledger aggregation by master ──
+    // ── PAYMENTS aggregated by master — SOURCE OF TRUTH for gross/tips (matches Square) ──
+    const paymentsSQL = `
+      SELECT
+        COALESCE(p.technician_id, b.technician_id, b2.technician_id) AS team_member_id,
+        SUM(p.amount_money_amount)::bigint AS gross_cents,
+        SUM(COALESCE(p.tip_money_amount, 0))::bigint AS tips_cents,
+        COUNT(DISTINCT p.id)::int AS sale_count
+      FROM payments p
+      LEFT JOIN bookings b ON b.id = p.booking_id
+      LEFT JOIN orders o ON o.id = p.order_id AND p.booking_id IS NULL
+      LEFT JOIN bookings b2 ON b2.id = o.booking_id AND b2.technician_id IS NOT NULL AND p.booking_id IS NULL
+      WHERE p.organization_id = $1::uuid
+        AND p.status = 'COMPLETED'
+        AND cardinality(p.refund_ids) = 0
+        AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
+        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date
+        ${locationId ? `AND COALESCE(b.location_id, b2.location_id) = $3::uuid` : ''}
+      GROUP BY 1
+    `
+
+    // ── Ledger aggregation by master (commission & deductions) ──
     const earningsSQL = `
       SELECT
         mel.team_member_id,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS commission_cents,
-        SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'TIP') AS tips_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type IN ('FIX_PENALTY', 'FIX_COMPENSATION')) AS fix_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'MANUAL_ADJUSTMENT') AS manual_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'REVERSAL') AS reversal_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISPUTE_HOLD') AS dispute_hold_cents,
         SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISPUTE_RELEASE') AS dispute_release_cents,
-        COUNT(DISTINCT mel.booking_id) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS booking_count,
-        SUM(mel.amount_amount) AS total_net_cents
+        COUNT(DISTINCT mel.booking_id) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS booking_count
       FROM master_earnings_ledger mel
       LEFT JOIN bookings b ON b.id = mel.booking_id AND b.organization_id = mel.organization_id
       WHERE mel.organization_id = $1::uuid
@@ -89,11 +108,10 @@ export async function GET(request) {
       GROUP BY mel.team_member_id
     `
 
-    // ── Booking stats (gross, minutes, fix count) ──
+    // ── Booking stats (booked minutes, fix count) ──
     const bookingSQL = `
       SELECT
         b.technician_id AS team_member_id,
-        SUM(COALESCE(bs.price_snapshot_amount, 0))::bigint AS gross_cents,
         SUM(COALESCE(b.duration_minutes, 0))::int AS booked_minutes,
         COUNT(*) FILTER (WHERE bs.is_fix = true)::int AS fix_count
       FROM bookings b
@@ -142,8 +160,9 @@ export async function GET(request) {
     `
 
     // Execute all queries in parallel
-    const [earnings, bookings, schedules, adjustments, teamMembers, settings] =
+    const [paymentData, earnings, bookings, schedules, adjustments, teamMembers, settings] =
       await Promise.all([
+        prisma.$queryRawUnsafe(paymentsSQL, ...params),
         prisma.$queryRawUnsafe(earningsSQL, ...params),
         prisma.$queryRawUnsafe(bookingSQL, ...params),
         prisma.$queryRawUnsafe(scheduleSQL, ...params),
@@ -163,16 +182,17 @@ export async function GET(request) {
       ])
 
     // Build lookup maps
+    const paymentMap = new Map(paymentData.map((p) => [p.team_member_id, p]))
     const earningsMap = new Map(earnings.map((e) => [e.team_member_id, e]))
     const bookingsMap = new Map(bookings.map((b) => [b.team_member_id, b]))
     const scheduleMap = new Map(schedules.map((s) => [s.team_member_id, s]))
     const adjustmentMap = new Map(adjustments.map((a) => [a.team_member_id, a]))
     const settingsMap = new Map(settings.map((s) => [s.team_member_id, s]))
 
-    // Get all master IDs that have any data
+    // Get all master IDs that have any data (payments + ledger)
     const masterIds = new Set([
+      ...paymentData.map((p) => p.team_member_id),
       ...earnings.map((e) => e.team_member_id),
-      ...bookings.map((b) => b.team_member_id),
     ])
 
     const masters = []
@@ -180,14 +200,20 @@ export async function GET(request) {
       const tm = teamMembers.find((t) => t.id === masterId)
       if (!tm) continue
 
+      const p = paymentMap.get(masterId) || {}
       const e = earningsMap.get(masterId) || {}
       const b = bookingsMap.get(masterId) || {}
       const s = scheduleMap.get(masterId)
       const a = adjustmentMap.get(masterId)
       const ms = settingsMap.get(masterId)
 
+      // Revenue from PAYMENTS (matches Square)
+      const grossCents = Number(p.gross_cents || 0)
+      const tipsCents = Number(p.tips_cents || 0)
+      const saleCount = Number(p.sale_count || 0)
+
+      // Commission & deductions from LEDGER
       const commissionCents = Number(e.commission_cents || 0)
-      const tipsCents = Number(e.tips_cents || 0)
       const discountCents = Number(e.discount_cents || 0)
       const fixCents = Number(e.fix_cents || 0)
       const manualCents = Number(e.manual_cents || 0)
@@ -195,7 +221,7 @@ export async function GET(request) {
       const disputeHoldCents = Number(e.dispute_hold_cents || 0)
       const disputeReleaseCents = Number(e.dispute_release_cents || 0)
       const netSalaryCents = commissionCents + discountCents + fixCents + manualCents + reversalCents + disputeHoldCents + disputeReleaseCents
-      const grossCents = Number(b.gross_cents || 0)
+
       const paidMinutes = Number(s?.total_scheduled_minutes || 0)
       const paidHours = paidMinutes / 60
       const bookedMinutes = Number(b.booked_minutes || 0)
@@ -220,6 +246,7 @@ export async function GET(request) {
         paid_hours: Math.round(paidHours * 10) / 10,
         sales_per_hour_cents: paidHours > 0 ? Math.round(grossCents / paidHours) : 0,
         booked_minutes: bookedMinutes,
+        sale_count: saleCount,
         booking_count: Number(e.booking_count || 0),
         fix_count: Number(b.fix_count || 0),
         utilization_rate:
