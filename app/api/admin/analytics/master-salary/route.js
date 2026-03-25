@@ -14,6 +14,16 @@ export const dynamic = 'force-dynamic'
 import prisma from '@/lib/prisma-client'
 import { checkOrganizationAccess } from '@/lib/auth/check-access'
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+}
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: corsHeaders })
+}
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url)
@@ -24,19 +34,19 @@ export async function GET(request) {
     if (!organizationId || !period) {
       return Response.json(
         { error: 'organizationId and period (YYYY-MM) are required' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders }
       )
     }
 
     const access = await checkOrganizationAccess(request, organizationId)
     if (!access) {
-      return Response.json({ error: 'Unauthorized' }, { status: 403 })
+      return Response.json({ error: 'Unauthorized' }, { status: 403, headers: corsHeaders })
     }
 
     // Parse period into date range
     const [year, month] = period.split('-').map(Number)
     if (!year || !month || month < 1 || month > 12) {
-      return Response.json({ error: 'Invalid period format. Use YYYY-MM' }, { status: 400 })
+      return Response.json({ error: 'Invalid period format. Use YYYY-MM' }, { status: 400, headers: corsHeaders })
     }
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`
     const endDate =
@@ -244,9 +254,9 @@ export async function GET(request) {
       master_count: masters.length,
     }
 
-    return Response.json({ period, masters, totals })
+    return Response.json({ period, masters, totals }, { headers: corsHeaders })
   } catch (error) {
     console.error('[MASTER-SALARY] Error:', error)
-    return Response.json({ error: 'Internal server error' }, { status: 500 })
+    return Response.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders })
   }
 }

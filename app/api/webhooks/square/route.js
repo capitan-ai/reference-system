@@ -1838,18 +1838,20 @@ async function reconcileBookingLinks(orderId, paymentId = null, correlationId = 
         await prisma.$executeRaw`
           UPDATE payments
           SET booking_id = ${bookingId}::uuid,
+              technician_id = COALESCE(technician_id, ${technicianId}::uuid),
               updated_at = NOW()
           WHERE payment_id = ${paymentId}
             AND organization_id = ${organizationId}::uuid
             AND (booking_id IS NULL OR booking_id != ${bookingId}::uuid)
         `
-        console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}`)
+        console.log(`✅ Updated payment ${paymentId} with booking_id: ${bookingId}, technician_id: ${technicianId}`)
       }
-      
+
       // Also update any other payments for this order
       await prisma.$executeRaw`
         UPDATE payments
         SET booking_id = ${bookingId}::uuid,
+            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
             updated_at = NOW()
         WHERE order_id = ${orderUuid}::uuid
           AND booking_id IS NULL
