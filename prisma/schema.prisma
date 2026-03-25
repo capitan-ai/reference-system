@@ -796,6 +796,29 @@ enum AdjustmentStatus {
   @@schema("public")
 }
 
+// Weekly schedule template per master per location per day-of-week (0=Sun..6=Sat)
+model MasterWeeklySchedule {
+  id              String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  team_member_id  String @db.Uuid
+  organization_id String @db.Uuid
+  location_id     String @db.Uuid
+  day_of_week     Int    // 0=Sunday, 1=Monday ... 6=Saturday
+  start_hour      Int    // e.g. 10 for 10:00 AM
+  start_minute    Int    @default(0)
+  end_hour        Int    // e.g. 20 for 8:00 PM
+  end_minute      Int    @default(0)
+  scheduled_minutes Int  // precomputed: (end - start) in minutes
+  source          String @default("MANUAL") // MANUAL or SQUARE_SEED
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([team_member_id, location_id, day_of_week])
+  @@index([organization_id])
+  @@index([team_member_id])
+  @@map("master_weekly_schedule")
+  @@schema("public")
+}
+
 model TeamMember {
   id                                String                 @id @default(uuid()) @db.Uuid
   square_team_member_id             String

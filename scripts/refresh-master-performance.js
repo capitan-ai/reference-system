@@ -5,7 +5,7 @@ const prisma = new PrismaClient();
  * Aggregates data from master_earnings_ledger and bookings
  * into the master_performance_daily table.
  *
- * - available_minutes: from MasterSettings.default_working_minutes_per_day (default 480)
+ * - available_minutes: from master_weekly_schedule (real hours per day-of-week), fallback to MasterSettings
  * - utilization_rate: booked_minutes / available_minutes
  * - composite_score: revenue percentile (0.5) + utilization (0.5)
  * - location_id: one row per (date, master_id, location_id)
@@ -95,7 +95,7 @@ keys AS (
   UNION
   SELECT date, master_id, organization_id, location_id FROM ledger_unified
 ),
--- Base metrics with available_minutes and utilization
+-- Base metrics with available_minutes from real weekly schedule
 base AS (
   SELECT
     k.date,
@@ -107,7 +107,11 @@ base AS (
     (COALESCE(ba.total_gross, 0) - (COALESCE(lu.commission_cents, 0) + COALESCE(lu.discount_cents, 0) + COALESCE(lu.fix_transfer_cents, 0) + COALESCE(lu.manual_cents, 0) + COALESCE(lu.reversal_cents, 0)))::bigint AS margin_contribution,
     COALESCE(lu.tips_cents, 0)::bigint AS tips_total,
     COALESCE(ba.total_minutes, 0) AS booked_minutes,
-    COALESCE(ms.default_working_minutes_per_day, 480) AS available_minutes,
+    COALESCE(
+      ws.scheduled_minutes,
+      ms.default_working_minutes_per_day,
+      0
+    ) AS available_minutes,
     COALESCE(ba.b_count, 0) AS booking_count,
     COALESCE(ba.f_count, 0) AS fix_count
   FROM keys k
@@ -116,6 +120,10 @@ base AS (
   LEFT JOIN ledger_unified lu
     ON lu.date = k.date AND lu.master_id = k.master_id AND lu.location_id = k.location_id
   LEFT JOIN master_settings ms ON ms.team_member_id = k.master_id
+  LEFT JOIN master_weekly_schedule ws
+    ON ws.team_member_id = k.master_id
+    AND ws.location_id = k.location_id
+    AND ws.day_of_week = EXTRACT(DOW FROM k.date)
 ),
 -- Add utilization_rate and composite_score (percentile within org+date)
 with_scores AS (
