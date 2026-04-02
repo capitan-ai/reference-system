@@ -5646,12 +5646,12 @@ export async function POST(request) {
     if (configuredNotificationUrl) {
       console.log('🌐 Attempting verification with configured URL...')
       isValidSignature = tryVerification(configuredNotificationUrl, 'configured')
-      
+
       // If string format failed, try Buffer format
       if (!isValidSignature) {
         isValidSignature = tryVerification(configuredNotificationUrl, 'configured', true)
       }
-      
+
       // Try with trailing slash if no trailing slash version failed
       if (!isValidSignature && !configuredNotificationUrl.endsWith('/')) {
         isValidSignature = tryVerification(configuredNotificationUrl + '/', 'configured-with-slash')
@@ -5665,12 +5665,12 @@ export async function POST(request) {
     if (!isValidSignature) {
       console.log('🌐 Attempting verification with computed URL...')
       isValidSignature = tryVerification(normalizedComputedUrl, configuredNotificationUrl ? 'computed-fallback' : 'computed')
-      
+
       // If string format failed, try Buffer format
       if (!isValidSignature) {
         isValidSignature = tryVerification(normalizedComputedUrl, configuredNotificationUrl ? 'computed-fallback' : 'computed', true)
       }
-      
+
       // Try with trailing slash if no trailing slash version failed
       if (!isValidSignature && !normalizedComputedUrl.endsWith('/')) {
         isValidSignature = tryVerification(normalizedComputedUrl + '/', 'computed-with-slash')

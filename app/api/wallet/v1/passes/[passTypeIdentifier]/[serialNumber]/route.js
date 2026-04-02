@@ -2,7 +2,7 @@
 // GET /v1/passes/{passTypeIdentifier}/{serialNumber}
 // Returns the latest version of a pass
 
-import { SquareClient, SquareEnvironment } from 'square'
+import { Client, Environment } from 'square/legacy'
 import { createRequire } from 'module'
 import prisma from '../../../../../../../lib/prisma-client'
 
@@ -10,11 +10,11 @@ const require = createRequire(import.meta.url)
 const { generateGiftCardPass, generateAuthToken } = require('../../../../../../../lib/wallet/pass-generator.js')
 
 function getGiftCardsApi() {
-  const squareClient = new SquareClient({
-    token: process.env.SQUARE_ACCESS_TOKEN?.trim(),
-    environment: SquareEnvironment.Production,
+  const squareClient = new Client({
+    accessToken: process.env.SQUARE_ACCESS_TOKEN?.trim(),
+    environment: Environment.Production,
   })
-  return squareClient.giftCards
+  return squareClient.giftCardsApi
 }
 
 // Verify authentication token
