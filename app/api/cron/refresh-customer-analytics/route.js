@@ -107,8 +107,8 @@ li_classified AS (
 orders_agg AS (
   SELECT
     o_inner.organization_id, COALESCE(m.canonical_id, o_inner.customer_id, p_inner.customer_id) as customer_id,
-    MIN(o_inner.created_at) AS first_any_o,
-    MAX(o_inner.created_at) AS last_any_o,
+    MIN(COALESCE(o_inner.closed_at, o_inner.created_at)) FILTER (WHERE o_inner.state = 'COMPLETED') AS first_any_o,
+    MAX(COALESCE(o_inner.closed_at, o_inner.created_at)) FILTER (WHERE o_inner.state = 'COMPLETED') AS last_any_o,
     COUNT(DISTINCT o_inner.order_id) FILTER (WHERE o_inner.state = 'COMPLETED' AND COALESCE(lic.salon_items,0) > 0) AS service_order_count,
     COUNT(DISTINCT o_inner.order_id) FILTER (WHERE o_inner.state = 'COMPLETED' AND COALESCE(lic.training_items,0) > 0 AND COALESCE(lic.salon_items,0) = 0) AS training_order_count,
     COUNT(DISTINCT o_inner.order_id) FILTER (WHERE o_inner.state = 'COMPLETED' AND COALESCE(lic.retail_items,0) > 0 AND COALESCE(lic.salon_items,0) = 0 AND COALESCE(lic.training_items,0) = 0) AS retail_order_count,
