@@ -128,16 +128,17 @@ async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
     }
     
     // Step 2: Get bookings from Square API
-    // Time window: Start of order day to order time (booking happened before payment)
-    const startOfDay = new Date(orderCreatedAt)
-    startOfDay.setHours(0, 0, 0, 0)
-    
-    // End of day + 4 hours buffer (in case of late payment)
+    // Time window: Previous day start to end of order day
+    // (booking may be the day before the order/payment, e.g. late checkout)
+    const startOfWindow = new Date(orderCreatedAt)
+    startOfWindow.setDate(startOfWindow.getDate() - 1)
+    startOfWindow.setHours(0, 0, 0, 0)
+
     const endOfWindow = new Date(orderCreatedAt)
     endOfWindow.setHours(23, 59, 59, 999)
     
     console.log(`📅 [DERIVE-BOOKING] Searching bookings:`)
-    console.log(`   Start: ${startOfDay.toISOString()}`)
+    console.log(`   Start: ${startOfWindow.toISOString()}`)
     console.log(`   End: ${endOfWindow.toISOString()}`)
     
     const bookingsApi = getBookingsApi()
@@ -156,7 +157,7 @@ async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
           customerId, // filter by customer
           undefined, // teamMemberId
           locationId, // filter by location
-          startOfDay.toISOString(), // start_at_min
+          startOfWindow.toISOString(), // start_at_min
           endOfWindow.toISOString() // start_at_max
         )
         
@@ -175,7 +176,7 @@ async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
     console.log(`📚 [DERIVE-BOOKING] Total bookings found: ${allBookings.length}`)
     
     if (allBookings.length === 0) {
-      console.warn(`⚠️ [DERIVE-BOOKING] No bookings found for customer ${customerId} on ${startOfDay.toDateString()}`)
+      console.warn(`⚠️ [DERIVE-BOOKING] No bookings found for customer ${customerId} between ${startOfWindow.toDateString()} and ${endOfWindow.toDateString()}`)
       return { bookingId: null, confidence: 'none', source: 'no_bookings_found' }
     }
     
