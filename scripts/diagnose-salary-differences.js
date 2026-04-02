@@ -22,13 +22,13 @@ async function main() {
       p.tip_money_amount,
       p.status,
       p.refund_ids,
-      COALESCE(b.technician_id, b2.technician_id) AS technician_id,
+      COALESCE(p.technician_id, b.technician_id, b2.technician_id) AS technician_id,
       TRIM(COALESCE(tm.given_name, '') || ' ' || COALESCE(tm.family_name, '')) AS tech_name
     FROM payments p
     LEFT JOIN bookings b ON b.id = p.booking_id
     LEFT JOIN orders o ON o.id = p.order_id AND p.booking_id IS NULL
     LEFT JOIN bookings b2 ON b2.id = o.booking_id AND p.booking_id IS NULL
-    LEFT JOIN team_members tm ON tm.id = COALESCE(b.technician_id, b2.technician_id)
+    LEFT JOIN team_members tm ON tm.id = COALESCE(p.technician_id, b.technician_id, b2.technician_id)
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
@@ -82,7 +82,7 @@ async function main() {
       AND p.status = 'COMPLETED'
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
-      AND COALESCE(b.technician_id, b2.technician_id) IS NULL
+      AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NULL
     ORDER BY p.amount_money_amount DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)
 
@@ -97,7 +97,7 @@ async function main() {
   const perMaster = await prisma.$queryRawUnsafe(`
     SELECT
       TRIM(COALESCE(tm.given_name, '') || ' ' || COALESCE(tm.family_name, '')) AS name,
-      COALESCE(b.technician_id, b2.technician_id) AS tech_id,
+      COALESCE(p.technician_id, b.technician_id, b2.technician_id) AS tech_id,
       SUM(p.amount_money_amount)::bigint AS gross_cents,
       SUM(COALESCE(p.tip_money_amount, 0))::bigint AS tips_cents,
       COUNT(DISTINCT p.id)::int AS sale_count,
@@ -107,12 +107,12 @@ async function main() {
     LEFT JOIN bookings b ON b.id = p.booking_id
     LEFT JOIN orders o ON o.id = p.order_id AND p.booking_id IS NULL
     LEFT JOIN bookings b2 ON b2.id = o.booking_id AND b2.technician_id IS NOT NULL AND p.booking_id IS NULL
-    LEFT JOIN team_members tm ON tm.id = COALESCE(b.technician_id, b2.technician_id)
+    LEFT JOIN team_members tm ON tm.id = COALESCE(p.technician_id, b.technician_id, b2.technician_id)
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
-      AND COALESCE(b.technician_id, b2.technician_id) IS NOT NULL
+      AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
     GROUP BY 1, 2
     ORDER BY gross_cents DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)
@@ -141,13 +141,13 @@ async function main() {
     LEFT JOIN bookings b ON b.id = p.booking_id
     LEFT JOIN orders o ON o.id = p.order_id AND p.booking_id IS NULL
     LEFT JOIN bookings b2 ON b2.id = o.booking_id AND b2.technician_id IS NOT NULL AND p.booking_id IS NULL
-    LEFT JOIN team_members tm ON tm.id = COALESCE(b.technician_id, b2.technician_id)
+    LEFT JOIN team_members tm ON tm.id = COALESCE(p.technician_id, b.technician_id, b2.technician_id)
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND cardinality(p.refund_ids) = 0
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
       AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
-      AND COALESCE(b.technician_id, b2.technician_id) IS NOT NULL
+      AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
     GROUP BY 1
     ORDER BY gross_cents DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)

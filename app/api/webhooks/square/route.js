@@ -749,20 +749,58 @@ export async function POST(request) {
             }
           }
           
-          // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
-          if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
-            // Try nested location_id in order/booking/payment objects
-            const nestedLocationId = 
+          // Strategy 3: For any webhook with nested objects, try to extract location_id
+          if (!organizationId) {
+            const nestedLocationId =
               payload.object?.order?.location_id ||
               payload.object?.booking?.location_id ||
               payload.object?.payment?.location_id ||
+              payload.object?.refund?.location_id ||
+              payload.object?.dispute?.location_id ||
               null
-            
+
             if (nestedLocationId) {
               console.log(`📍 Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
               organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
               if (organizationId) {
                 console.log(`✅ Resolved organization_id from nested location_id: ${organizationId}`)
+              }
+            }
+          }
+
+          // Strategy 4: For refund events, try to resolve via payment_id lookup
+          if (!organizationId && eventData.type?.includes('refund')) {
+            const refundPaymentId = payload.object?.refund?.payment_id || payload.object?.refund?.paymentId
+            if (refundPaymentId) {
+              try {
+                const paymentOrg = await prisma.$queryRaw`
+                  SELECT organization_id FROM payments WHERE payment_id = ${refundPaymentId} LIMIT 1
+                `
+                if (paymentOrg?.length > 0) {
+                  organizationId = paymentOrg[0].organization_id
+                  console.log(`✅ Resolved organization_id from refund's payment_id: ${organizationId}`)
+                }
+              } catch (err) {
+                console.warn(`⚠️ Could not resolve org from refund payment_id: ${err.message}`)
+              }
+            }
+          }
+
+          // Strategy 5: For dispute events, try to resolve via disputed payment
+          if (!organizationId && eventData.type?.includes('dispute')) {
+            const disputePaymentId = payload.object?.dispute?.payment_id ||
+              payload.object?.dispute?.disputed_payment?.payment_id
+            if (disputePaymentId) {
+              try {
+                const paymentOrg = await prisma.$queryRaw`
+                  SELECT organization_id FROM payments WHERE payment_id = ${disputePaymentId} LIMIT 1
+                `
+                if (paymentOrg?.length > 0) {
+                  organizationId = paymentOrg[0].organization_id
+                  console.log(`✅ Resolved organization_id from dispute's payment_id: ${organizationId}`)
+                }
+              } catch (err) {
+                console.warn(`⚠️ Could not resolve org from dispute payment_id: ${err.message}`)
               }
             }
           }
@@ -884,15 +922,16 @@ export async function POST(request) {
           }
         }
 
-        // Strategy 3: For order/booking/payment webhooks, try to extract from nested objects
-        if (!organizationId && (eventData.type?.includes('order') || eventData.type?.includes('booking') || eventData.type?.includes('payment'))) {
-          // Try nested location_id in order/booking/payment objects
-          const nestedLocationId = 
+        // Strategy 3: Try nested location_id from any webhook object
+        if (!organizationId) {
+          const nestedLocationId =
             payload.object?.order?.location_id ||
             payload.object?.booking?.location_id ||
             payload.object?.payment?.location_id ||
+            payload.object?.refund?.location_id ||
+            payload.object?.dispute?.location_id ||
             null
-          
+
           if (nestedLocationId) {
             console.log(`📍 [ERROR HANDLER] Attempting to resolve organization_id from nested location_id: ${nestedLocationId}`)
             organizationId = await resolveOrganizationIdFromLocationId(nestedLocationId)
@@ -902,7 +941,26 @@ export async function POST(request) {
             }
           }
         }
-        
+
+        // Strategy 4: For refund/dispute, resolve via payment_id
+        if (!organizationId && (eventData.type?.includes('refund') || eventData.type?.includes('dispute'))) {
+          const lookupPaymentId = payload.object?.refund?.payment_id ||
+            payload.object?.refund?.paymentId ||
+            payload.object?.dispute?.payment_id ||
+            payload.object?.dispute?.disputed_payment?.payment_id
+          if (lookupPaymentId) {
+            try {
+              const paymentOrg = await prisma.$queryRaw`
+                SELECT organization_id FROM payments WHERE payment_id = ${lookupPaymentId} LIMIT 1
+              `
+              if (paymentOrg?.length > 0) {
+                organizationId = paymentOrg[0].organization_id
+                console.log(`✅ [ERROR HANDLER] Resolved organization_id from payment_id: ${organizationId}`)
+              }
+            } catch (err) { /* ignore */ }
+          }
+        }
+
         if (organizationId) {
           const { enqueueWebhookJob } = require('../../../../lib/workflows/webhook-job-queue')
           
@@ -1389,6 +1447,9 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       
       // Version
       version: paymentData.versionToken ? 1 : (paymentData.version || 0),
+
+      // Raw JSON - full payment object from Square for audit/backfill
+      raw_json: JSON.parse(safeStringify(paymentData)),
     }
     // Upsert payment
     // ✅ FIX: Use raw SQL for composite unique constraint upsert (more reliable than Prisma's findUnique + update/create)
@@ -1916,33 +1977,39 @@ async function updateOrderLineItemsWithTechnician(orderId, correlationId = null)
 
     // Update order with booking_id, technician_id, and administrator_id if not already set
     if (bookingId) {
-      // First get the primary technician from booking
-      const bookingTech = await prisma.$queryRaw`
-        SELECT technician_id FROM bookings 
-        WHERE id = ${bookingId}::uuid AND technician_id IS NOT NULL
+      // Verify booking actually exists in bookings table before setting FK
+      const bookingExists = await prisma.$queryRaw`
+        SELECT id, technician_id FROM bookings
+        WHERE id = ${bookingId}::uuid
         LIMIT 1
       `
-      const technicianId = bookingTech?.[0]?.technician_id || null
-      
-      await prisma.$executeRaw`
-        UPDATE orders
-        SET booking_id = COALESCE(booking_id, ${bookingId}::uuid),
-            technician_id = COALESCE(technician_id, ${technicianId}::uuid),
-            administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
-            updated_at = NOW()
-        WHERE id = ${orderUuid}::uuid
-      `
-      console.log(`✅ Updated order with booking_id: ${bookingId}, technician_id: ${technicianId}, administrator_id: ${administratorId}`)
-      
-      // Update order_line_items with booking_id
-      await prisma.$executeRaw`
-        UPDATE order_line_items
-        SET booking_id = ${bookingId}::uuid,
-            updated_at = NOW()
-        WHERE order_id = ${orderUuid}::uuid
-          AND booking_id IS NULL
-      `
-      console.log(`✅ Updated order_line_items with booking_id: ${bookingId}`)
+
+      if (!bookingExists || bookingExists.length === 0) {
+        console.log(`⚠️ Booking ${bookingId} found in payments but does not exist in bookings table — skipping order update`)
+        // Still try to update technician from other sources below
+      } else {
+        const technicianId = bookingExists[0]?.technician_id || null
+
+        await prisma.$executeRaw`
+          UPDATE orders
+          SET booking_id = COALESCE(booking_id, ${bookingId}::uuid),
+              technician_id = COALESCE(technician_id, ${technicianId}::uuid),
+              administrator_id = COALESCE(administrator_id, ${administratorId}::uuid),
+              updated_at = NOW()
+          WHERE id = ${orderUuid}::uuid
+        `
+        console.log(`✅ Updated order with booking_id: ${bookingId}, technician_id: ${technicianId}, administrator_id: ${administratorId}`)
+
+        // Update order_line_items with booking_id
+        await prisma.$executeRaw`
+          UPDATE order_line_items
+          SET booking_id = ${bookingId}::uuid,
+              updated_at = NOW()
+          WHERE order_id = ${orderUuid}::uuid
+            AND booking_id IS NULL
+        `
+        console.log(`✅ Updated order_line_items with booking_id: ${bookingId}`)
+      }
     }
 
     // Prefer segment-level mapping (deterministic)
@@ -2361,6 +2428,15 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
 
       // Extract totals and net amounts
       const totalMoney = order.total_money || order.totalMoney || {}
+      const totalTipMoney = order.total_tip_money || order.totalTipMoney || {}
+      const totalTaxMoney = order.total_tax_money || order.totalTaxMoney || {}
+      const totalDiscountMoney = order.total_discount_money || order.totalDiscountMoney || {}
+      const totalServiceChargeMoney = order.total_service_charge_money || order.totalServiceChargeMoney || {}
+      const netAmountDueMoney = order.net_amount_due_money || order.netAmountDueMoney || {}
+      const netAmounts = order.net_amounts || order.netAmounts || {}
+      const returnAmounts = order.return_amounts || order.returnAmounts || {}
+
+      const toInt = (v) => { const n = parseInt(v); return isNaN(n) ? null : n }
 
       const upsertedOrder = await prisma.$queryRaw`
         INSERT INTO orders (
@@ -2371,6 +2447,24 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           state,
           version,
           reference_id,
+          source_name,
+          closed_at,
+          total_money_amount, total_money_currency,
+          total_tip_money_amount, total_tip_money_currency,
+          total_tax_money_amount, total_tax_money_currency,
+          total_discount_money_amount, total_discount_money_currency,
+          total_service_charge_money_amount, total_service_charge_money_currency,
+          net_amount_due_money_amount, net_amount_due_money_currency,
+          net_total_money_amount, net_total_money_currency,
+          net_total_tax_money_amount, net_total_tax_money_currency,
+          net_total_tip_money_amount, net_total_tip_money_currency,
+          net_total_discount_money_amount, net_total_discount_money_currency,
+          net_total_service_charge_money_amount, net_total_service_charge_money_currency,
+          return_total_money_amount, return_total_money_currency,
+          return_total_tax_money_amount, return_total_tax_money_currency,
+          return_total_tip_money_amount, return_total_tip_money_currency,
+          return_total_discount_money_amount, return_total_discount_money_currency,
+          return_total_service_charge_money_amount, return_total_service_charge_money_currency,
           created_at,
           updated_at,
           raw_json
@@ -2382,6 +2476,24 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           ${orderStateValue},
           ${versionValue},
           ${order.reference_id || null},
+          ${sourceName},
+          ${closedAt}::timestamptz,
+          ${toInt(totalMoney.amount)}, ${totalMoney.currency || 'USD'},
+          ${toInt(totalTipMoney.amount)}, ${totalTipMoney.currency || 'USD'},
+          ${toInt(totalTaxMoney.amount)}, ${totalTaxMoney.currency || 'USD'},
+          ${toInt(totalDiscountMoney.amount)}, ${totalDiscountMoney.currency || 'USD'},
+          ${toInt(totalServiceChargeMoney.amount)}, ${totalServiceChargeMoney.currency || 'USD'},
+          ${toInt(netAmountDueMoney.amount)}, ${netAmountDueMoney.currency || 'USD'},
+          ${toInt((netAmounts.total_money || netAmounts.totalMoney || {}).amount)}, ${(netAmounts.total_money || netAmounts.totalMoney || {}).currency || 'USD'},
+          ${toInt((netAmounts.tax_money || netAmounts.taxMoney || {}).amount)}, ${(netAmounts.tax_money || netAmounts.taxMoney || {}).currency || 'USD'},
+          ${toInt((netAmounts.tip_money || netAmounts.tipMoney || {}).amount)}, ${(netAmounts.tip_money || netAmounts.tipMoney || {}).currency || 'USD'},
+          ${toInt((netAmounts.discount_money || netAmounts.discountMoney || {}).amount)}, ${(netAmounts.discount_money || netAmounts.discountMoney || {}).currency || 'USD'},
+          ${toInt((netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}).amount)}, ${(netAmounts.service_charge_money || netAmounts.serviceChargeMoney || {}).currency || 'USD'},
+          ${toInt((returnAmounts.total_money || returnAmounts.totalMoney || {}).amount)}, ${(returnAmounts.total_money || returnAmounts.totalMoney || {}).currency || 'USD'},
+          ${toInt((returnAmounts.tax_money || returnAmounts.taxMoney || {}).amount)}, ${(returnAmounts.tax_money || returnAmounts.taxMoney || {}).currency || 'USD'},
+          ${toInt((returnAmounts.tip_money || returnAmounts.tipMoney || {}).amount)}, ${(returnAmounts.tip_money || returnAmounts.tipMoney || {}).currency || 'USD'},
+          ${toInt((returnAmounts.discount_money || returnAmounts.discountMoney || {}).amount)}, ${(returnAmounts.discount_money || returnAmounts.discountMoney || {}).currency || 'USD'},
+          ${toInt((returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}).amount)}, ${(returnAmounts.service_charge_money || returnAmounts.serviceChargeMoney || {}).currency || 'USD'},
           ${createdAt}::timestamptz,
           ${updatedAt}::timestamptz,
           ${rawJsonValue}::jsonb
@@ -2389,10 +2501,28 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         ON CONFLICT (organization_id, order_id)
         DO UPDATE SET
           location_id = EXCLUDED.location_id,
-          customer_id = EXCLUDED.customer_id,
+          customer_id = COALESCE(EXCLUDED.customer_id, orders.customer_id),
           state = EXCLUDED.state,
           version = EXCLUDED.version,
-          reference_id = EXCLUDED.reference_id,
+          reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+          source_name = COALESCE(EXCLUDED.source_name, orders.source_name),
+          closed_at = COALESCE(EXCLUDED.closed_at, orders.closed_at),
+          total_money_amount = COALESCE(EXCLUDED.total_money_amount, orders.total_money_amount),
+          total_tip_money_amount = COALESCE(EXCLUDED.total_tip_money_amount, orders.total_tip_money_amount),
+          total_tax_money_amount = COALESCE(EXCLUDED.total_tax_money_amount, orders.total_tax_money_amount),
+          total_discount_money_amount = COALESCE(EXCLUDED.total_discount_money_amount, orders.total_discount_money_amount),
+          total_service_charge_money_amount = COALESCE(EXCLUDED.total_service_charge_money_amount, orders.total_service_charge_money_amount),
+          net_amount_due_money_amount = COALESCE(EXCLUDED.net_amount_due_money_amount, orders.net_amount_due_money_amount),
+          net_total_money_amount = COALESCE(EXCLUDED.net_total_money_amount, orders.net_total_money_amount),
+          net_total_tax_money_amount = COALESCE(EXCLUDED.net_total_tax_money_amount, orders.net_total_tax_money_amount),
+          net_total_tip_money_amount = COALESCE(EXCLUDED.net_total_tip_money_amount, orders.net_total_tip_money_amount),
+          net_total_discount_money_amount = COALESCE(EXCLUDED.net_total_discount_money_amount, orders.net_total_discount_money_amount),
+          net_total_service_charge_money_amount = COALESCE(EXCLUDED.net_total_service_charge_money_amount, orders.net_total_service_charge_money_amount),
+          return_total_money_amount = COALESCE(EXCLUDED.return_total_money_amount, orders.return_total_money_amount),
+          return_total_tax_money_amount = COALESCE(EXCLUDED.return_total_tax_money_amount, orders.return_total_tax_money_amount),
+          return_total_tip_money_amount = COALESCE(EXCLUDED.return_total_tip_money_amount, orders.return_total_tip_money_amount),
+          return_total_discount_money_amount = COALESCE(EXCLUDED.return_total_discount_money_amount, orders.return_total_discount_money_amount),
+          return_total_service_charge_money_amount = COALESCE(EXCLUDED.return_total_service_charge_money_amount, orders.return_total_service_charge_money_amount),
           updated_at = EXCLUDED.updated_at,
           raw_json = EXCLUDED.raw_json
         RETURNING id, order_id, organization_id, state
@@ -2475,6 +2605,14 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         const createdAt = order.created_at ? new Date(order.created_at) : new Date()
         const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
 
+        const fbTotalMoney = order.total_money || order.totalMoney || {}
+        const fbTotalTipMoney = order.total_tip_money || order.totalTipMoney || {}
+        const fbTotalTaxMoney = order.total_tax_money || order.totalTaxMoney || {}
+        const fbTotalDiscountMoney = order.total_discount_money || order.totalDiscountMoney || {}
+        const fbTotalServiceChargeMoney = order.total_service_charge_money || order.totalServiceChargeMoney || {}
+        const fbNetAmountDueMoney = order.net_amount_due_money || order.netAmountDueMoney || {}
+        const fbToInt = (v) => { const n = parseInt(v); return isNaN(n) ? null : n }
+
         await prisma.$executeRaw`
             INSERT INTO orders (
               id,
@@ -2485,6 +2623,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               state,
               version,
               reference_id,
+              total_money_amount,
+              total_tip_money_amount,
+              total_tax_money_amount,
+              total_discount_money_amount,
+              total_service_charge_money_amount,
+              net_amount_due_money_amount,
               created_at,
               updated_at,
               raw_json
@@ -2497,6 +2641,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               ${orderState || order.state || null},
               ${order.version ? Number(order.version) : null},
               ${order.reference_id || null},
+              ${fbToInt(fbTotalMoney.amount)},
+              ${fbToInt(fbTotalTipMoney.amount)},
+              ${fbToInt(fbTotalTaxMoney.amount)},
+              ${fbToInt(fbTotalDiscountMoney.amount)},
+              ${fbToInt(fbTotalServiceChargeMoney.amount)},
+              ${fbToInt(fbNetAmountDueMoney.amount)},
               ${createdAt}::timestamptz,
               ${updatedAt}::timestamptz,
               ${safeStringify(order)}::jsonb
@@ -2507,6 +2657,12 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               state = COALESCE(EXCLUDED.state, orders.state),
               version = COALESCE(EXCLUDED.version, orders.version),
               reference_id = COALESCE(EXCLUDED.reference_id, orders.reference_id),
+              total_money_amount = COALESCE(EXCLUDED.total_money_amount, orders.total_money_amount),
+              total_tip_money_amount = COALESCE(EXCLUDED.total_tip_money_amount, orders.total_tip_money_amount),
+              total_tax_money_amount = COALESCE(EXCLUDED.total_tax_money_amount, orders.total_tax_money_amount),
+              total_discount_money_amount = COALESCE(EXCLUDED.total_discount_money_amount, orders.total_discount_money_amount),
+              total_service_charge_money_amount = COALESCE(EXCLUDED.total_service_charge_money_amount, orders.total_service_charge_money_amount),
+              net_amount_due_money_amount = COALESCE(EXCLUDED.net_amount_due_money_amount, orders.net_amount_due_money_amount),
               updated_at = EXCLUDED.updated_at,
               raw_json = COALESCE(EXCLUDED.raw_json, orders.raw_json)
           `

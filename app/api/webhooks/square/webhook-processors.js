@@ -232,6 +232,15 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       ON CONFLICT (organization_id, booking_id) DO UPDATE SET
         version = EXCLUDED.version,
         status = EXCLUDED.status,
+        start_at = EXCLUDED.start_at,
+        all_day = EXCLUDED.all_day,
+        location_id = EXCLUDED.location_id,
+        location_type = EXCLUDED.location_type,
+        transition_time_minutes = EXCLUDED.transition_time_minutes,
+        duration_minutes = EXCLUDED.duration_minutes,
+        intermission_minutes = EXCLUDED.intermission_minutes,
+        any_team_member = EXCLUDED.any_team_member,
+        administrator_id = EXCLUDED.administrator_id,
         merchant_id = COALESCE(EXCLUDED.merchant_id, bookings.merchant_id),
         service_variation_id = EXCLUDED.service_variation_id,
         service_variation_version = EXCLUDED.service_variation_version,
@@ -242,7 +251,12 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
         raw_json = EXCLUDED.raw_json,
         source = COALESCE(bookings.source, EXCLUDED.source),
         customer_id = COALESCE(bookings.customer_id, EXCLUDED.customer_id),
-        creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type)
+        creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type),
+        address_line_1 = COALESCE(EXCLUDED.address_line_1, bookings.address_line_1),
+        locality = COALESCE(EXCLUDED.locality, bookings.locality),
+        administrative_district_level_1 = COALESCE(EXCLUDED.administrative_district_level_1, bookings.administrative_district_level_1),
+        postal_code = COALESCE(EXCLUDED.postal_code, bookings.postal_code),
+        creator_customer_id = COALESCE(EXCLUDED.creator_customer_id, bookings.creator_customer_id)
     `
 
     await upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData)
