@@ -14,12 +14,6 @@ async function refreshMasterPerformance(organizationId) {
   console.log(`[REFRESH-MASTER-PERFORMANCE] Starting for org: ${organizationId}`);
 
   try {
-    // Clear stale rows before refresh (prevents zombie data from old PK/logic)
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM master_performance_daily WHERE organization_id = $1::uuid`,
-      organizationId
-    )
-
     const refreshSQL = `
 INSERT INTO master_performance_daily (
   date, master_id, organization_id, location_id,
@@ -68,9 +62,20 @@ ledger_no_loc AS (
   GROUP BY 1, 2, 3
 ),
 ledger_unified AS (
-  SELECT * FROM ledger_agg
-  UNION ALL
-  SELECT * FROM ledger_no_loc WHERE location_id IS NOT NULL
+  SELECT date, master_id, organization_id, location_id,
+    SUM(commission_cents) AS commission_cents,
+    SUM(tips_cents) AS tips_cents,
+    SUM(discount_cents) AS discount_cents,
+    SUM(fix_transfer_cents) AS fix_transfer_cents,
+    SUM(manual_cents) AS manual_cents,
+    SUM(reversal_cents) AS reversal_cents,
+    SUM(dispute_cents) AS dispute_cents
+  FROM (
+    SELECT * FROM ledger_agg
+    UNION ALL
+    SELECT * FROM ledger_no_loc WHERE location_id IS NOT NULL
+  ) _combined
+  GROUP BY date, master_id, organization_id, location_id
 ),
 -- Bookings aggregated by (date, master_id, location_id)
 booking_agg AS (
@@ -158,11 +163,32 @@ SELECT
   fix_count,
   composite_score,
   NOW() AS updated_at
-FROM with_scores;
+FROM with_scores
+ON CONFLICT (date, master_id, location_id) DO UPDATE SET
+  organization_id = EXCLUDED.organization_id,
+  gross_generated = EXCLUDED.gross_generated,
+  net_master_income = EXCLUDED.net_master_income,
+  margin_contribution = EXCLUDED.margin_contribution,
+  tips_total = EXCLUDED.tips_total,
+  booked_minutes = EXCLUDED.booked_minutes,
+  available_minutes = EXCLUDED.available_minutes,
+  utilization_rate = EXCLUDED.utilization_rate,
+  booking_count = EXCLUDED.booking_count,
+  fix_count = EXCLUDED.fix_count,
+  composite_score = EXCLUDED.composite_score,
+  updated_at = EXCLUDED.updated_at;
     `;
-    // Plain INSERT after DELETE — no ON CONFLICT (42P10 if DB PK ≠ (date, master_id, location_id))
 
     await prisma.$executeRawUnsafe(refreshSQL, organizationId);
+
+    // Clean up stale rows that were not refreshed (e.g., deleted masters/bookings)
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM master_performance_daily
+       WHERE organization_id = $1::uuid
+         AND updated_at < NOW() - INTERVAL '5 minutes'`,
+      organizationId
+    );
+
     console.log(`[REFRESH-MASTER-PERFORMANCE] ✅ Success for org: ${organizationId}`);
 
   } catch (error) {
