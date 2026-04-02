@@ -48,7 +48,7 @@ ledger_no_loc AS (
     (mel.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date,
     mel.team_member_id AS master_id,
     mel.organization_id,
-    (SELECT id FROM locations WHERE organization_id = mel.organization_id LIMIT 1) AS location_id,
+    (SELECT id FROM locations WHERE organization_id = mel.organization_id ORDER BY created_at ASC LIMIT 1) AS location_id,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'SERVICE_COMMISSION') AS commission_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'TIP') AS tips_cents,
     SUM(mel.amount_amount) FILTER (WHERE mel.entry_type = 'DISCOUNT_ADJUSTMENT') AS discount_cents,
@@ -80,20 +80,21 @@ ledger_unified AS (
 -- Bookings aggregated by (date, master_id, location_id)
 booking_agg AS (
   SELECT
-    (start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date,
-    technician_id AS master_id,
-    organization_id,
-    location_id,
+    (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date,
+    b.technician_id AS master_id,
+    b.organization_id,
+    b.location_id,
     COUNT(*) AS b_count,
-    COUNT(*) FILTER (WHERE service_variation_id IN (SELECT uuid FROM service_variation WHERE name ~* 'fix')
-      OR id IN (SELECT booking_id FROM booking_snapshots WHERE is_fix = true AND booking_id IS NOT NULL)) AS f_count,
-    SUM(duration_minutes) AS total_minutes,
-    SUM(COALESCE((SELECT price_snapshot_amount FROM booking_snapshots WHERE booking_id = bookings.id), 0)) AS total_gross
-  FROM bookings
-  WHERE organization_id = $1::uuid
-    AND status = 'ACCEPTED'
-    AND location_id IS NOT NULL
-    AND technician_id IS NOT NULL
+    COUNT(*) FILTER (WHERE b.service_variation_id IN (SELECT uuid FROM service_variation WHERE name ~* 'fix')
+      OR b.id IN (SELECT booking_id FROM booking_snapshots WHERE is_fix = true AND booking_id IS NOT NULL)) AS f_count,
+    SUM(b.duration_minutes) AS total_minutes,
+    SUM(COALESCE(bs.price_snapshot_amount, 0)) AS total_gross
+  FROM bookings b
+  LEFT JOIN booking_snapshots bs ON bs.booking_id = b.id
+  WHERE b.organization_id = $1::uuid
+    AND b.status = 'ACCEPTED'
+    AND b.location_id IS NOT NULL
+    AND b.technician_id IS NOT NULL
   GROUP BY 1, 2, 3, 4
 ),
 -- Keys: union of all (date, master_id, location_id) from both sources
@@ -179,15 +180,17 @@ ON CONFLICT (date, master_id, location_id) DO UPDATE SET
   updated_at = EXCLUDED.updated_at;
     `;
 
-    await prisma.$executeRawUnsafe(refreshSQL, organizationId);
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(refreshSQL, organizationId);
 
-    // Clean up stale rows that were not refreshed (e.g., deleted masters/bookings)
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM master_performance_daily
-       WHERE organization_id = $1::uuid
-         AND updated_at < NOW() - INTERVAL '5 minutes'`,
-      organizationId
-    );
+      // Clean up stale rows that were not refreshed (e.g., deleted masters/bookings)
+      await tx.$executeRawUnsafe(
+        `DELETE FROM master_performance_daily
+         WHERE organization_id = $1::uuid
+           AND updated_at < NOW() - INTERVAL '5 minutes'`,
+        organizationId
+      );
+    });
 
     console.log(`[REFRESH-MASTER-PERFORMANCE] ✅ Success for org: ${organizationId}`);
 
