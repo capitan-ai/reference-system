@@ -17,7 +17,8 @@ pay AS (
   SELECT
     p.organization_id,
     COALESCE(p.technician_id, b.technician_id, b2.technician_id) AS team_member_id,
-    to_char((p.created_at AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM') AS period,
+    -- payments.created_at is timestamp without time zone (UTC) → double AT TIME ZONE
+    to_char((p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM') AS period,
     SUM(p.amount_money_amount)::bigint AS gross_cents,
     SUM(COALESCE(p.tip_money_amount, 0))::bigint AS tips_cents,
     COUNT(DISTINCT p.id)::int AS sale_count
@@ -39,7 +40,9 @@ earnings AS (
     mel.team_member_id,
     to_char(
       COALESCE(
-        (bk.start_at AT TIME ZONE 'America/Los_Angeles')::date,
+        -- bookings.start_at is timestamp without time zone (UTC) → double AT TIME ZONE
+        (bk.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date,
+        -- master_earnings_ledger.created_at is timestamptz → single AT TIME ZONE
         (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date
       ), 'YYYY-MM'
     ) AS period,
@@ -54,7 +57,7 @@ earnings AS (
   LEFT JOIN bookings bk ON bk.id = mel.booking_id AND bk.organization_id = mel.organization_id
   GROUP BY mel.organization_id, mel.team_member_id,
     to_char(COALESCE(
-      (bk.start_at AT TIME ZONE 'America/Los_Angeles')::date,
+      (bk.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date,
       (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date
     ), 'YYYY-MM')
 ),
@@ -63,7 +66,7 @@ bstats AS (
   SELECT
     b.organization_id,
     b.technician_id AS team_member_id,
-    to_char((b.start_at AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM') AS period,
+    to_char((b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM') AS period,
     SUM(COALESCE(b.duration_minutes, 0))::int AS booked_minutes,
     COUNT(*) FILTER (WHERE bs.is_fix = true)::int AS fix_count
   FROM bookings b
@@ -71,7 +74,7 @@ bstats AS (
   WHERE b.status = 'ACCEPTED'
     AND b.technician_id IS NOT NULL
   GROUP BY b.organization_id, b.technician_id,
-    to_char((b.start_at AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM')
+    to_char((b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM')
 ),
 -- All master/period keys (union of payments + ledger)
 all_keys AS (

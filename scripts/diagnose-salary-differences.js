@@ -31,8 +31,8 @@ async function main() {
     LEFT JOIN team_members tm ON tm.id = COALESCE(p.technician_id, b.technician_id, b2.technician_id)
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND cardinality(p.refund_ids) > 0
     ORDER BY p.amount_money_amount DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)
@@ -53,8 +53,8 @@ async function main() {
     FROM payments
     WHERE organization_id = $1::uuid
       AND status = 'COMPLETED'
-      AND (created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
     GROUP BY payment_id
     HAVING COUNT(*) > 1
   `, ORG_ID, PERIOD_START, PERIOD_END)
@@ -80,8 +80,8 @@ async function main() {
     LEFT JOIN bookings b2 ON b2.id = o.booking_id AND b2.technician_id IS NOT NULL AND p.booking_id IS NULL
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NULL
     ORDER BY p.amount_money_amount DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)
@@ -110,8 +110,8 @@ async function main() {
     LEFT JOIN team_members tm ON tm.id = COALESCE(p.technician_id, b.technician_id, b2.technician_id)
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
     GROUP BY 1, 2
     ORDER BY gross_cents DESC
@@ -145,8 +145,8 @@ async function main() {
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND cardinality(p.refund_ids) = 0
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
     GROUP BY 1
     ORDER BY gross_cents DESC
@@ -175,8 +175,8 @@ async function main() {
     SELECT status, COUNT(*)::int AS cnt, SUM(amount_money_amount)::bigint AS total
     FROM payments
     WHERE organization_id = $1::uuid
-      AND (created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
     GROUP BY status
     ORDER BY cnt DESC
   `, ORG_ID, PERIOD_START, PERIOD_END)

@@ -1,281 +1,162 @@
-# Analytics Queries - Timezone Handling Guide
+# Analytics Queries — Timezone Handling Guide
 
-## Overview
+## TL;DR
 
-All timestamps are stored in **UTC** in the database. Use `AT TIME ZONE 'America/Los_Angeles'` to convert to Pacific time for analytics and dashboards.
+Two buckets of columns in this database, **two different patterns** to convert to Pacific time. Using the wrong pattern shifts dates 7–8 hours in the wrong direction.
 
-## Key Principles
+| Column type | Correct pattern to get Pacific calendar date |
+|---|---|
+| `timestamp without time zone` (stores UTC values) | `(col AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date` |
+| `timestamp with time zone` (timestamptz) | `(col AT TIME ZONE 'America/Los_Angeles')::date` |
 
-1. **Storage**: UTC (timestamptz)
-2. **Grouping**: Convert to Pacific time
-3. **Filtering**: Can filter on UTC or converted time
-4. **Aggregation**: Apply at UTC level, then convert for display
-
----
-
-## Example Queries for Dashboard
-
-### 1. Daily Revenue (Pacific Time)
-
-```sql
--- Group bookings by date in Pacific timezone
-SELECT 
-  DATE(b.created_at AT TIME ZONE 'America/Los_Angeles') as booking_date_pst,
-  COUNT(DISTINCT b.id) as total_bookings,
-  COUNT(DISTINCT p.id) as total_payments,
-  SUM(p.total_money_amount)::DECIMAL / 100.0 as revenue_dollars,
-  SUM(p.tip_money_amount)::DECIMAL / 100.0 as tips_dollars
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id AND p.status = 'COMPLETED'
-WHERE b.status = 'ACCEPTED'
-  AND b.created_at >= (NOW() AT TIME ZONE 'America/Los_Angeles')::date - INTERVAL '30 days'
-GROUP BY booking_date_pst
-ORDER BY booking_date_pst DESC;
-```
-
-### 2. Hourly Performance (Pacific Time)
-
-```sql
--- Group by hour in Pacific time
-SELECT 
-  DATE_TRUNC('hour', 
-    b.start_at AT TIME ZONE 'America/Los_Angeles'
-  )::timestamp as booking_hour_pst,
-  COUNT(*) as bookings,
-  COUNT(DISTINCT b.technician_id) as unique_technicians,
-  COUNT(CASE WHEN p.id IS NOT NULL THEN 1 END) as payments_received
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id AND p.status = 'COMPLETED'
-WHERE b.status = 'ACCEPTED'
-  AND b.start_at >= NOW() - INTERVAL '7 days'
-GROUP BY DATE_TRUNC('hour', b.start_at AT TIME ZONE 'America/Los_Angeles')
-ORDER BY booking_hour_pst DESC;
-```
-
-### 3. Technician Performance (Pacific Time)
-
-```sql
--- Performance by technician, grouped by Pacific date
-SELECT 
-  DATE(b.start_at AT TIME ZONE 'America/Los_Angeles') as booking_date_pst,
-  tm.given_name || ' ' || tm.family_name as technician_name,
-  COUNT(b.id) as total_bookings,
-  COUNT(CASE WHEN b.status = 'ACCEPTED' THEN 1 END) as completed_bookings,
-  COUNT(CASE WHEN b.status = 'CANCELLED_BY_CUSTOMER' THEN 1 END) as cancelled_by_customer,
-  COUNT(CASE WHEN p.id IS NOT NULL THEN 1 END) as paid_bookings,
-  SUM(p.total_money_amount)::DECIMAL / 100.0 as revenue_dollars
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id AND p.status = 'COMPLETED'
-LEFT JOIN team_members tm ON b.technician_id = tm.id
-WHERE b.created_at >= NOW() - INTERVAL '30 days'
-GROUP BY booking_date_pst, technician_name
-ORDER BY booking_date_pst DESC, revenue_dollars DESC;
-```
-
-### 4. Revenue by Day of Week (Pacific Time)
-
-```sql
--- See which days of week are busiest
-SELECT 
-  TO_CHAR(
-    b.start_at AT TIME ZONE 'America/Los_Angeles',
-    'Day'
-  ) as day_of_week,
-  COUNT(b.id) as total_bookings,
-  AVG(p.total_money_amount)::DECIMAL / 100.0 as avg_transaction_dollars,
-  SUM(p.total_money_amount)::DECIMAL / 100.0 as total_revenue_dollars
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id AND p.status = 'COMPLETED'
-WHERE b.status = 'ACCEPTED'
-  AND b.created_at >= NOW() - INTERVAL '90 days'
-GROUP BY TO_CHAR(b.start_at AT TIME ZONE 'America/Los_Angeles', 'Day')
-ORDER BY 
-  CASE 
-    WHEN day_of_week = 'Sunday' THEN 1
-    WHEN day_of_week = 'Monday' THEN 2
-    WHEN day_of_week = 'Tuesday' THEN 3
-    WHEN day_of_week = 'Wednesday' THEN 4
-    WHEN day_of_week = 'Thursday' THEN 5
-    WHEN day_of_week = 'Friday' THEN 6
-    WHEN day_of_week = 'Saturday' THEN 7
-  END;
-```
-
-### 5. YTD Revenue (Year-to-Date, Pacific Time)
-
-```sql
--- Fiscal year starting Jan 1 Pacific time
-SELECT 
-  b.organization_id,
-  DATE_TRUNC('month', 
-    b.start_at AT TIME ZONE 'America/Los_Angeles'
-  )::date as month_start_pst,
-  COUNT(DISTINCT b.id) as bookings,
-  COUNT(DISTINCT p.id) as payments,
-  SUM(p.total_money_amount)::DECIMAL / 100.0 as revenue_dollars,
-  SUM(p.tip_money_amount)::DECIMAL / 100.0 as tips_dollars,
-  (SUM(p.total_money_amount)::DECIMAL / 100.0) / 
-    NULLIF(COUNT(DISTINCT b.id), 0) as avg_transaction_dollars
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id AND p.status = 'COMPLETED'
-WHERE b.status = 'ACCEPTED'
-  AND DATE_TRUNC('year', 
-    b.start_at AT TIME ZONE 'America/Los_Angeles'
-  ) = DATE_TRUNC('year', NOW() AT TIME ZONE 'America/Los_Angeles')
-GROUP BY b.organization_id, month_start_pst
-ORDER BY month_start_pst DESC;
-```
-
-### 6. Same Day Performance (Pacific Time)
-
-```sql
--- Filter by today (Pacific time), not UTC today
-SELECT 
-  b.id,
-  b.booking_id,
-  tm.given_name || ' ' || tm.family_name as technician,
-  b.start_at AT TIME ZONE 'America/Los_Angeles' as start_time_pst,
-  b.status,
-  p.status as payment_status,
-  p.total_money_amount::DECIMAL / 100.0 as payment_amount
-FROM bookings b
-LEFT JOIN payments p ON b.id = p.booking_id
-LEFT JOIN team_members tm ON b.technician_id = tm.id
-WHERE DATE(b.start_at AT TIME ZONE 'America/Los_Angeles') = 
-      DATE(NOW() AT TIME ZONE 'America/Los_Angeles')
-ORDER BY b.start_at ASC;
-```
+Never use naked `date(col)` or `col::date` for analytics grouping — those return UTC dates.
 
 ---
 
-## Important Notes
+## Why two patterns?
 
-### Timezone Conversion Formula
-
-```sql
--- Basic pattern for all queries
-timestamp_column AT TIME ZONE 'America/Los_Angeles'
-```
-
-### When Filtering by Date Range
+Historically these tables were created with `timestamp without time zone` (no tz). The application writes UTC values into them. For a no-tz column holding UTC, this is what PostgreSQL does:
 
 ```sql
--- CORRECT: Compare Pacific dates
-WHERE DATE(b.start_at AT TIME ZONE 'America/Los_Angeles') 
-      BETWEEN '2026-02-01' AND '2026-02-28'
+-- BACKWARDS: Postgres reads "treat this no-tz value as LA local time, then convert to UTC"
+SELECT '2026-04-08 23:00:00'::timestamp AT TIME ZONE 'America/Los_Angeles';
+-- → 2026-04-09 06:00:00+00  (wrong direction — shifted +7h)
 
--- WRONG: This filters by UTC, not Pacific
-WHERE b.start_at >= '2026-02-01' AND b.start_at <= '2026-02-28'
+-- CORRECT: first mark it as UTC, then convert to LA local time
+SELECT ('2026-04-08 23:00:00'::timestamp AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles';
+-- → 2026-04-08 16:00:00    (4pm LA, as intended)
 ```
 
-### DST Handling
-
-PostgreSQL automatically handles Daylight Saving Time transitions:
-- PST (UTC-8): November - March
-- PDT (UTC-7): March - November
-
-Using `'America/Los_Angeles'` timezone includes DST logic automatically.
-
-### Group By with Timezone
-
-Always apply timezone conversion BEFORE grouping:
-
-```sql
--- CORRECT
-GROUP BY DATE(b.created_at AT TIME ZONE 'America/Los_Angeles')
-
--- WRONG (groups by UTC dates)
-GROUP BY DATE(b.created_at)
-```
+For a proper `timestamptz` column, the single `AT TIME ZONE 'America/Los_Angeles'` is correct and the double version is backwards.
 
 ---
 
-## Testing Your Queries
+## Column type reference
 
-### Verify Timezone Handling
+**`timestamp without time zone` (need double AT TIME ZONE):**
+- `bookings.start_at`, `bookings.created_at`, `bookings.updated_at`
+- `booking_segments.booking_start_at`
+- `orders.created_at`, `orders.updated_at`, `orders.closed_at`
+- `payments.created_at`, `payments.updated_at`, `payments.square_created_at`
+- `order_line_items.order_created_at`
+- `notification_events."createdAt"`, `notification_events."sentAt"`
+- `device_pass_registrations."createdAt"`
+- `locations.created_at/updated_at`, `team_members.created_at/updated_at`
+
+**`timestamp with time zone` (need single AT TIME ZONE):**
+- `customer_analytics.first_visit_at`, `.first_booking_at`, `.last_booking_at`, `.created_at`, `.updated_at`
+- `master_earnings_ledger.created_at`
+- `referral_rewards.created_at`
+- `gift_card_transactions.created_at`
+- `booking_segments.created_at`, `.updated_at`
+- `admin_created_booking_facts.updated_at`
+- `master_performance_daily.updated_at`
+
+When in doubt, check:
 
 ```sql
--- Check current UTC time
-SELECT NOW();
-
--- Check current Pacific time
-SELECT NOW() AT TIME ZONE 'America/Los_Angeles';
-
--- Check a booking's times
-SELECT 
-  id,
-  booking_id,
-  created_at as utc_time,
-  created_at AT TIME ZONE 'America/Los_Angeles' as pacific_time
-FROM bookings
-LIMIT 1;
-```
-
-### Validate Data Integrity
-
-```sql
--- Make sure all timestamps are timestamptz
-SELECT 
-  table_name,
-  column_name,
-  data_type
+SELECT column_name, data_type
 FROM information_schema.columns
-WHERE table_name IN ('bookings', 'payments', 'orders', 'booking_segments')
-  AND data_type LIKE '%timestamp%'
-ORDER BY table_name, column_name;
+WHERE table_schema='public' AND table_name='<your_table>'
+  AND data_type LIKE '%timestamp%';
+```
+
+> ⚠️ A single query file can reference both buckets — for example, `get_master_salary` filters on both `bookings.start_at` (no-tz) and `master_earnings_ledger.created_at` (tz). Fixes must be per-column, not a blanket find-and-replace.
+
+---
+
+## Example queries
+
+### 1. Daily revenue (Pacific)
+
+```sql
+-- payments.created_at is timestamp without time zone → double AT TIME ZONE
+SELECT
+  (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date_pacific,
+  SUM(p.total_money_amount)::numeric / 100.0 AS revenue_dollars
+FROM payments p
+WHERE p.status = 'COMPLETED'
+  AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date
+      >= (CURRENT_DATE - INTERVAL '30 days')::date
+GROUP BY 1
+ORDER BY 1 DESC;
+```
+
+### 2. Bookings per Pacific day
+
+```sql
+-- bookings.start_at is timestamp without time zone → double AT TIME ZONE
+SELECT
+  (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date_pacific,
+  COUNT(*) AS bookings_count
+FROM bookings b
+WHERE b.status = 'ACCEPTED'
+GROUP BY 1
+ORDER BY 1 DESC;
+```
+
+### 3. Query mixing both bucket types
+
+```sql
+-- bookings.start_at      → no-tz, needs double
+-- master_earnings_ledger.created_at → tz, needs single
+SELECT
+  mel.team_member_id,
+  SUM(mel.amount_amount) AS total_cents
+FROM master_earnings_ledger mel
+LEFT JOIN bookings b ON b.id = mel.booking_id
+WHERE (
+  (b.id IS NOT NULL
+    AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= '2026-04-01')
+  OR
+  (b.id IS NULL
+    AND (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date >= '2026-04-01')
+)
+GROUP BY mel.team_member_id;
+```
+
+### 4. "Today" in Pacific time
+
+```sql
+-- For filtering against "today in LA" — CURRENT_TIMESTAMP is a timestamptz,
+-- so use the single AT TIME ZONE pattern.
+WHERE (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date
+    = (CURRENT_TIMESTAMP AT TIME ZONE 'America/Los_Angeles')::date
 ```
 
 ---
 
-## Migration Checklist
+## Common mistakes
 
-- [x] Change `webhook-processors.js` to use `::timestamptz`
-- [x] Verify `referrals/route.js` uses `::timestamptz`
-- [x] Run migration script to convert columns to `timestamptz`
-- [ ] Update all analytics queries to use `AT TIME ZONE 'America/Los_Angeles'`
-- [ ] Test dashboard with new timezone handling
-- [ ] Update documentation for engineers
+1. **Naked `date(col)` on a no-tz UTC column** — returns UTC date; a 4pm Pacific booking (11pm UTC same day) still shows up today, but a 5pm Pacific booking (00:00 UTC next day) jumps forward one day.
+
+   ```sql
+   -- WRONG (returns UTC calendar date)
+   SELECT date(b.start_at) FROM bookings b;
+
+   -- RIGHT
+   SELECT (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date FROM bookings b;
+   ```
+
+2. **Single `AT TIME ZONE 'America/Los_Angeles'` on a no-tz UTC column** — treats the stored value as if it were LA local time and converts it to UTC. Shifts dates 7–8 hours in the wrong direction.
+
+3. **Double `AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles'` on a timestamptz column** — the first `AT TIME ZONE 'UTC'` strips timezone info (returning a no-tz value in UTC), then the second treats it as LA time. Also wrong, shifts dates 7–8 hours in the wrong direction.
+
+4. **Comparing a timestamp column directly against a date literal**
+
+   ```sql
+   -- For a no-tz column with UTC values this compares in UTC, not Pacific.
+   WHERE b.start_at >= '2026-04-01'
+   ```
 
 ---
 
-## Common Mistakes to Avoid
+## DST
 
-1. **❌ Forgetting AT TIME ZONE**
-   ```sql
-   -- WRONG: Returns UTC dates
-   SELECT DATE(created_at) FROM bookings;
-   
-   -- CORRECT: Returns Pacific dates
-   SELECT DATE(created_at AT TIME ZONE 'America/Los_Angeles') FROM bookings;
-   ```
+PostgreSQL handles DST automatically when you use a named zone like `'America/Los_Angeles'`. No special handling needed — both UTC→LA conversions above correctly cross the DST boundary.
 
-2. **❌ Comparing dates without timezone**
-   ```sql
-   -- WRONG: Day boundaries are in UTC
-   WHERE created_at > '2026-02-01'
-   
-   -- CORRECT: Day boundaries are in Pacific time
-   WHERE created_at AT TIME ZONE 'America/Los_Angeles' > '2026-02-01'
-   ```
+---
 
-3. **❌ Forgetting to cast result back to timestamp**
-   ```sql
-   -- WRONG: Returns time with timezone offset string
-   SELECT created_at AT TIME ZONE 'America/Los_Angeles'
-   
-   -- CORRECT: Returns clean timestamp for display
-   SELECT (created_at AT TIME ZONE 'America/Los_Angeles')::timestamp
-   ```
+## Longer-term fix
 
-4. **❌ Using NOW() instead of NOW() AT TIME ZONE**
-   ```sql
-   -- WRONG: NOW() returns UTC
-   WHERE created_at > NOW()
-   
-   -- CORRECT: For Pacific-based logic
-   WHERE created_at AT TIME ZONE 'America/Los_Angeles' > 
-        (NOW() AT TIME ZONE 'America/Los_Angeles')::date
-   ```
-
-
-
+The right structural fix is to migrate all no-tz UTC columns (`bookings.start_at`, `orders.created_at`, `payments.created_at`, etc.) to `timestamptz`, which removes the two-bucket footgun and lets every query use the single `AT TIME ZONE` pattern. This is tracked as a separate project — until then, respect the two-bucket rule above.

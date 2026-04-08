@@ -38,8 +38,8 @@ BEGIN
       AND p.status = 'COMPLETED'
       AND cardinality(p.refund_ids) = 0
       AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= v_start
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < v_end
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= v_start
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < v_end
       AND (loc_id IS NULL OR COALESCE(b.location_id, b2.location_id) = loc_id)
     GROUP BY 1
   ),
@@ -60,8 +60,8 @@ BEGIN
     WHERE mel.organization_id = org_id
       AND (
         (b.id IS NOT NULL
-          AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date >= v_start
-          AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date < v_end)
+          AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= v_start
+          AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < v_end)
         OR
         (b.id IS NULL
           AND (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date >= v_start
@@ -81,8 +81,8 @@ BEGIN
     WHERE b.organization_id = org_id
       AND b.status = 'ACCEPTED'
       AND b.technician_id IS NOT NULL
-      AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date >= v_start
-      AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date < v_end
+      AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= v_start
+      AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < v_end
       AND (loc_id IS NULL OR b.location_id = loc_id)
     GROUP BY b.technician_id
   ),

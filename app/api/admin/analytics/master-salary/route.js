@@ -76,8 +76,8 @@ export async function GET(request) {
         AND p.status = 'COMPLETED'
         AND cardinality(p.refund_ids) = 0
         AND COALESCE(p.technician_id, b.technician_id, b2.technician_id) IS NOT NULL
-        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date
+        AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+        AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date
         ${locationId ? `AND COALESCE(b.location_id, b2.location_id) = $3::uuid` : ''}
       GROUP BY 1
     `
@@ -98,9 +98,11 @@ export async function GET(request) {
       LEFT JOIN bookings b ON b.id = mel.booking_id AND b.organization_id = mel.organization_id
       WHERE mel.organization_id = $1::uuid
         AND (
-          (b.id IS NOT NULL AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-            AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date)
+          -- bookings.start_at is timestamp without time zone (UTC values) → double AT TIME ZONE
+          (b.id IS NOT NULL AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+            AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date)
           OR
+          -- master_earnings_ledger.created_at is timestamptz → single AT TIME ZONE
           (b.id IS NULL AND (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
             AND (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date)
         )
@@ -119,8 +121,8 @@ export async function GET(request) {
       WHERE b.organization_id = $1::uuid
         AND b.status = 'ACCEPTED'
         AND b.technician_id IS NOT NULL
-        AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-        AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date
+        AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+        AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < ${endDateParam}::date
         ${locationFilter}
       GROUP BY b.technician_id
     `

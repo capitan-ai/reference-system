@@ -52,8 +52,8 @@ async function main() {
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND b.technician_id IS NOT NULL
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND NOT EXISTS (
         SELECT 1 FROM master_earnings_ledger mel
         WHERE mel.booking_id = p.booking_id
@@ -237,8 +237,8 @@ async function main() {
     WHERE p.organization_id = $1::uuid
       AND p.status = 'COMPLETED'
       AND b.technician_id IS NOT NULL
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-      AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+      AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
       AND NOT EXISTS (
         SELECT 1 FROM master_earnings_ledger mel
         WHERE mel.booking_id = p.booking_id
@@ -272,8 +272,8 @@ async function main() {
       WHERE p.organization_id = $1::uuid
         AND p.status = 'COMPLETED'
         AND b.technician_id IS NOT NULL
-        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-        AND (p.created_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date
+        AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+        AND (p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date
         AND NOT EXISTS (
           SELECT 1 FROM master_earnings_ledger mel
           WHERE mel.booking_id = p.booking_id
@@ -336,8 +336,8 @@ async function main() {
     WHERE mel.organization_id = $1::uuid
       AND (
         (b.id IS NOT NULL
-          AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
-          AND (b.start_at AT TIME ZONE 'America/Los_Angeles')::date < $3::date)
+          AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date >= $2::date
+          AND (b.start_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date < $3::date)
         OR
         (b.id IS NULL
           AND (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date >= $2::date

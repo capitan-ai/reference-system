@@ -43,9 +43,10 @@ ledger_agg AS (
   GROUP BY 1, 2, 3, 4
 ),
 -- Ledger entries without location (booking_id null) - use created_at, attribute to org's first location
+-- mel.created_at is timestamptz, so single AT TIME ZONE is correct (do not add a 'UTC' hop).
 ledger_no_loc AS (
   SELECT
-    (mel.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date AS date,
+    (mel.created_at AT TIME ZONE 'America/Los_Angeles')::date AS date,
     mel.team_member_id AS master_id,
     mel.organization_id,
     (SELECT id FROM locations WHERE organization_id = mel.organization_id ORDER BY created_at ASC LIMIT 1) AS location_id,
@@ -190,6 +191,9 @@ ON CONFLICT (date, master_id, location_id) DO UPDATE SET
            AND updated_at < NOW() - INTERVAL '5 minutes'`,
         organizationId
       );
+    }, {
+      maxWait: 10_000,   // wait up to 10s to acquire a connection
+      timeout: 60_000,   // allow up to 60s for the transaction body (default is 5s)
     });
 
     console.log(`[REFRESH-MASTER-PERFORMANCE] ✅ Success for org: ${organizationId}`);
