@@ -567,6 +567,29 @@ export async function POST(request) {
               bookingId: bookingData.id || bookingData.bookingId
             })
             await referralsRoute.processBookingUpdated(bookingData, eventData.event_id, eventData.created_at)
+
+            // Refresh customer_analytics for this customer (real-time)
+            const customerId = bookingData.customer_id || bookingData.customerId
+            if (customerId && webhookOrganizationId) {
+              try {
+                const { refreshCustomerAnalyticsForSingleCustomer } = await import('../../../lib/analytics/refresh-single-customer-analytics.js')
+                await refreshCustomerAnalyticsForSingleCustomer(webhookOrganizationId, customerId)
+                logInfo("customer_analytics.updated", {
+                  logId: correlationId,
+                  organizationId: webhookOrganizationId,
+                  customerId: customerId
+                })
+              } catch (analyticsError) {
+                // Non-fatal: log warning but don't fail webhook
+                logWarn("customer_analytics.update_failed", {
+                  logId: correlationId,
+                  organizationId: webhookOrganizationId,
+                  customerId: customerId,
+                  error: analyticsError.message
+                })
+              }
+            }
+
             logInfo("booking.updated.success", {
               logId: correlationId,
               organizationId: webhookOrganizationId,

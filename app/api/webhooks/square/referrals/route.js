@@ -6,6 +6,7 @@ const { saveApplicationLog } = require('../../../../../lib/workflows/application
 const { sendReferralCodeEmail, sendGiftCardIssuedEmail, sendReferralCodeUsageNotification, trackNotification } = require('../../../../../lib/email-service-simple')
 const { sendReferralCodeSms, sendGiftCardSmsNotification, sendPostVisitReminderSms, REFERRAL_PROGRAM_SMS_TEMPLATE } = require('../../../../../lib/twilio-service')
 const { normalizeGiftCardNumber } = require('../../../../../lib/wallet/giftcard-number-utils')
+const { refreshCustomerAnalyticsForSingleCustomer } = require('../../../../../lib/analytics/refresh-single-customer-analytics')
 // Import payment saving function from main webhook handler
 // Note: route.js uses ES6 exports, so we need to use dynamic import
 // Since this is a CommonJS file, we'll use a simpler approach: directly call the function
