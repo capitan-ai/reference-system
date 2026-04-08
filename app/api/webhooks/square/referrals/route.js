@@ -4322,6 +4322,10 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
     const version = bookingData.version || null
     const updatedAt = bookingData.updated_at || bookingData.updatedAt ? new Date(bookingData.updated_at || bookingData.updatedAt) : new Date()
     const appointmentSegments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+    const startAt = bookingData.start_at || bookingData.startAt || null
+    const allDay = bookingData.all_day ?? bookingData.allDay ?? null
+    const transitionTimeMinutes = bookingData.transition_time_minutes ?? bookingData.transitionTimeMinutes ?? null
+    const locationType = bookingData.location_type || bookingData.locationType || null
 
     // Find existing booking(s) - there may be multiple records for multi-service bookings
     const existingBookings = await prisma.$queryRaw`
@@ -4530,7 +4534,27 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         updateFields.push('version = $' + (updateValues.length + 1))
         updateValues.push(version)
       }
-      
+
+      if (startAt) {
+        updateFields.push('start_at = $' + (updateValues.length + 1) + '::timestamptz')
+        updateValues.push(new Date(startAt))
+      }
+
+      if (allDay !== null) {
+        updateFields.push('all_day = $' + (updateValues.length + 1))
+        updateValues.push(allDay)
+      }
+
+      if (transitionTimeMinutes !== null) {
+        updateFields.push('transition_time_minutes = $' + (updateValues.length + 1))
+        updateValues.push(transitionTimeMinutes)
+      }
+
+      if (locationType) {
+        updateFields.push('location_type = $' + (updateValues.length + 1))
+        updateValues.push(locationType)
+      }
+
       if (locationUuid) {
         updateFields.push('location_id = $' + (updateValues.length + 1) + '::uuid')
         updateValues.push(locationUuid)
@@ -4581,6 +4605,54 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
         console.log(`✅ Updated booking ${bookingUuid} (${baseBookingId})`)
       } else {
         console.log(`ℹ️ No fields to update for booking ${bookingUuid}`)
+      }
+    }
+
+    // Update first_visit_at on square_existing_clients when a booking is
+    // rescheduled (start_at changed) or cancelled. Recalculate from the DB
+    // so all edge cases (cancel-one-of-many, reschedule) are handled correctly.
+    const isCancellation = status && (
+      status === 'CANCELLED_BY_CUSTOMER' ||
+      status === 'CANCELLED_BY_SELLER' ||
+      status === 'NO_SHOW'
+    )
+    const firstVisitOrgId = existingBookings[0]?.organization_id
+
+    if (customerId && firstVisitOrgId && (isCancellation || startAt)) {
+      try {
+        // Find the earliest remaining ACCEPTED/COMPLETED booking for this customer
+        const earliest = await prisma.$queryRaw`
+          SELECT MIN(start_at) AS min_start
+          FROM bookings
+          WHERE customer_id = ${customerId}
+            AND organization_id = ${firstVisitOrgId}::uuid
+            AND status IN ('ACCEPTED', 'COMPLETED')
+        `
+        const minStart = earliest[0]?.min_start || null
+
+        if (minStart) {
+          await prisma.$executeRaw`
+            UPDATE square_existing_clients
+            SET first_visit_at = ${minStart}::timestamptz,
+                updated_at = NOW()
+            WHERE square_customer_id = ${customerId}
+              AND organization_id = ${firstVisitOrgId}::uuid
+          `
+          console.log(`   ✅ Updated first_visit_at = ${new Date(minStart).toISOString()} for customer ${customerId}`)
+        } else {
+          // No ACCEPTED/COMPLETED bookings remain → clear first_visit_at
+          await prisma.$executeRaw`
+            UPDATE square_existing_clients
+            SET first_visit_at = NULL,
+                updated_at = NOW()
+            WHERE square_customer_id = ${customerId}
+              AND organization_id = ${firstVisitOrgId}::uuid
+          `
+          console.log(`   ✅ Cleared first_visit_at (no accepted bookings remain) for customer ${customerId}`)
+        }
+      } catch (err) {
+        // Non-fatal: log but don't throw — booking update already succeeded
+        console.warn(`   ⚠️ Could not update first_visit_at for customer ${customerId}: ${err.message}`)
       }
     }
 
