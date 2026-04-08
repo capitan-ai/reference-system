@@ -9,8 +9,14 @@
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') })
+const axios = require('axios')
 const prisma = require('../lib/prisma-client')
-const { getBookingsApi } = require('../lib/utils/square-client')
+
+const SQUARE_TOKEN = (process.env.SQUARE_ACCESS_TOKEN || '').replace(/^Bearer /, '').trim()
+const SQUARE_BASE_URL =
+  process.env.SQUARE_ENV === 'sandbox' || process.env.SQUARE_ENVIRONMENT === 'sandbox'
+    ? 'https://connect.squareupsandbox.com/v2'
+    : 'https://connect.squareup.com/v2'
 
 function parseArgs() {
   const argv = process.argv.slice(2)
@@ -87,9 +93,14 @@ async function syncOne(squareBookingId, dryRun) {
     select: { square_merchant_id: true },
   })
 
-  const api = getBookingsApi()
-  const res = await api.retrieveBooking(squareBookingId)
-  const b = res.result?.booking
+  const res = await axios.get(`${SQUARE_BASE_URL}/bookings/${squareBookingId}`, {
+    headers: {
+      Authorization: `Bearer ${SQUARE_TOKEN}`,
+      'Square-Version': '2025-02-20',
+      Accept: 'application/json',
+    },
+  })
+  const b = res.data?.booking
 
   if (!b) {
     console.error(`❌ Square returned no booking for ${squareBookingId}`)
