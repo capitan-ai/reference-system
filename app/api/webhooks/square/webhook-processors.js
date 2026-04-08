@@ -269,6 +269,46 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
       console.error(`[WEBHOOK-PROCESSOR] ⚠️ Failed to create booking snapshot:`, snapshotError.message)
     }
 
+    // Recalculate square_existing_clients.first_visit_at and refresh customer_analytics
+    // for this customer. Without this, queue-path booking updates leave first_visit_at
+    // and customer_analytics stale (e.g. when a booking is rescheduled).
+    if (customerId && organizationId) {
+      try {
+        const earliest = await prisma.$queryRaw`
+          SELECT MIN(start_at) AS min_start
+          FROM bookings
+          WHERE customer_id = ${customerId}
+            AND organization_id = ${organizationId}::uuid
+            AND status IN ('ACCEPTED', 'COMPLETED')
+        `
+        const minStart = earliest[0]?.min_start || null
+        if (minStart) {
+          await prisma.$executeRaw`
+            UPDATE square_existing_clients
+            SET first_visit_at = ${minStart}::timestamptz, updated_at = NOW()
+            WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
+          `
+        } else {
+          await prisma.$executeRaw`
+            UPDATE square_existing_clients
+            SET first_visit_at = NULL, updated_at = NOW()
+            WHERE square_customer_id = ${customerId}
+              AND organization_id = ${organizationId}::uuid
+          `
+        }
+      } catch (firstVisitError) {
+        console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Failed to update first_visit_at for ${customerId}:`, firstVisitError.message)
+      }
+
+      try {
+        const { refreshCustomerAnalyticsForSingleCustomer } = await import('../../../../lib/analytics/refresh-single-customer-analytics.js')
+        await refreshCustomerAnalyticsForSingleCustomer(organizationId, customerId)
+      } catch (analyticsError) {
+        console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Failed to refresh customer_analytics for ${customerId}:`, analyticsError.message)
+      }
+    }
+
     console.log(`[WEBHOOK-PROCESSOR] ✅ Saved booking ${bookingId}`)
   } catch (error) {
     console.error(`[WEBHOOK-PROCESSOR] ❌ Error saving booking ${bookingId}:`, error.message)
