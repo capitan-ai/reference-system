@@ -3,6 +3,7 @@ import { createRequire } from 'module'
 import { Prisma } from '@prisma/client'
 import prisma from '../../../../lib/prisma-client'
 import locationResolver from '../../../../lib/location-resolver'
+import { refreshCustomerAnalyticsForSingleCustomer } from '../../../../lib/analytics/refresh-single-customer-analytics'
 
 const require = createRequire(import.meta.url)
 const { logInfo, logWarn, logError, logDebug } = require('../../../../lib/observability/logger')
@@ -572,7 +573,6 @@ export async function POST(request) {
             const customerId = bookingData.customer_id || bookingData.customerId
             if (customerId && webhookOrganizationId) {
               try {
-                const { refreshCustomerAnalyticsForSingleCustomer } = await import('../../../lib/analytics/refresh-single-customer-analytics.js')
                 await refreshCustomerAnalyticsForSingleCustomer(webhookOrganizationId, customerId)
                 logInfo("customer_analytics.updated", {
                   logId: correlationId,
