@@ -594,6 +594,26 @@ export async function processRefundCreated(payload, eventId, eventCreatedAt) {
       await prisma.masterEarningsLedger.createMany({ data: reversalEntries })
       console.log(`[WEBHOOK-PROCESSOR] ✅ Created ${reversalEntries.length} REVERSAL entries for refund ${refundId} (ratio: ${refundRatio})`)
     }
+
+    // Re-fetch the payment from Square API to refresh raw_json with the now-
+    // populated `refunded_money` field. The analytics revenue view subtracts
+    // refunds via `LEAST(raw_json->refunded_money, amount_money)`, and that
+    // field is only populated by Square once a refund has been issued — so
+    // without this resync, our view will not see the refund and over-count
+    // revenue. savePaymentToDatabase already does a fresh API fetch internally
+    // (added in 5f09fd4), so a stub `{id: paymentId}` is enough.
+    //
+    // Wrapped in its own try/catch: if the resync fails for any reason, the
+    // REVERSAL ledger entries above are still committed (the more important
+    // bookkeeping). A daily cron of scripts/reconcile-stale-payment-statuses.js
+    // is the safety net for any failures here.
+    try {
+      const { savePaymentToDatabase } = await import('./route.js')
+      await savePaymentToDatabase({ id: paymentId }, 'refund.created.payment_resync', eventId, eventCreatedAt)
+      console.log(`[WEBHOOK-PROCESSOR] ✅ Resynced payment ${paymentId} after refund (refunded_money now in raw_json)`)
+    } catch (resyncError) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Failed to resync payment ${paymentId} after refund: ${resyncError.message}`)
+    }
   } catch (error) {
     console.error(`[WEBHOOK-PROCESSOR] ❌ Error processing refund ${refundId}:`, error.message)
     throw error
