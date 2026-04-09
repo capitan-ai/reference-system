@@ -53,42 +53,54 @@ function header(title) {
 
 // Manual aggregation that mirrors the LIVE view definition exactly.
 // Source of truth: pg_get_viewdef('analytics_revenue_by_location_daily').
+// Updated 2026-04-08 (migration 20260408210000) — now also excludes gift card
+// sales (Square defers them) and subtracts refunded amounts.
 const MANUAL_AGG_SQL = `
   WITH payment_locations AS (
     SELECT
       p.id AS payment_id,
       p.organization_id,
-      p.location_id::uuid AS location_id,
+      p.location_id,
       COALESCE(p.square_created_at, p.created_at) AS payment_date,
       p.amount_money_amount,
+      LEAST(
+        COALESCE((p.raw_json->'refunded_money'->>'amount')::int, 0),
+        p.amount_money_amount
+      ) AS refunded_cents,
       p.customer_id
     FROM payments p
-    LEFT JOIN orders o ON o.id = p.order_id::uuid
+    LEFT JOIN orders o ON o.id = p.order_id
     WHERE p.status = 'COMPLETED'
       AND p.location_id IS NOT NULL
       AND (o.state IS NULL OR o.state <> 'OPEN')
+      AND NOT COALESCE(o.raw_json->'lineItems' @> '[{"itemType": "GIFT_CARD"}]'::jsonb, FALSE)
 
     UNION ALL
 
     SELECT
       p.id AS payment_id,
       p.organization_id,
-      o.location_id::uuid AS location_id,
+      o.location_id,
       COALESCE(p.square_created_at, p.created_at) AS payment_date,
       p.amount_money_amount,
+      LEAST(
+        COALESCE((p.raw_json->'refunded_money'->>'amount')::int, 0),
+        p.amount_money_amount
+      ) AS refunded_cents,
       p.customer_id
     FROM payments p
-    INNER JOIN orders o ON p.order_id::uuid = o.id
+    INNER JOIN orders o ON p.order_id = o.id
     WHERE p.status = 'COMPLETED'
       AND p.location_id IS NULL
       AND p.order_id IS NOT NULL
       AND o.location_id IS NOT NULL
       AND o.state <> 'OPEN'
+      AND NOT (o.raw_json->'lineItems' @> '[{"itemType": "GIFT_CARD"}]'::jsonb)
   )
   SELECT
     ((pl.payment_date AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date)::text AS date,
     l.name AS location_name,
-    SUM(pl.amount_money_amount)::bigint AS revenue_cents,
+    SUM(pl.amount_money_amount - pl.refunded_cents)::bigint AS revenue_cents,
     COUNT(DISTINCT pl.payment_id)::bigint AS payment_count,
     COUNT(DISTINCT pl.customer_id) FILTER (WHERE pl.customer_id IS NOT NULL)::bigint AS unique_customers
   FROM payment_locations pl
@@ -114,13 +126,17 @@ const MANUAL_AGG_SQL = `
   const hasOpenFilter = /o\.state.*OPEN/.test(viewDef);
   const usesAmountMoneyAmount = /amount_money_amount/.test(viewDef);
   const usesSquareCreatedAt = /square_created_at/.test(viewDef);
+  const excludesGiftCards = /GIFT_CARD/.test(viewDef);
+  const subtractsRefunds = /refunded_money/.test(viewDef);
 
   console.log(`  Double AT TIME ZONE (UTC → LA):     ${hasDoubleTz ? '✓' : '✗ MISSING'}`);
   console.log(`  o.state <> 'OPEN' filter:           ${hasOpenFilter ? '✓' : '✗ MISSING'}`);
   console.log(`  Uses amount_money_amount:           ${usesAmountMoneyAmount ? '✓' : '✗ MISSING'}`);
   console.log(`  Uses COALESCE(square_created_at):   ${usesSquareCreatedAt ? '✓' : '✗ MISSING'}`);
+  console.log(`  Excludes gift cards:                ${excludesGiftCards ? '✓' : '✗ MISSING'}`);
+  console.log(`  Subtracts refunded_money:           ${subtractsRefunds ? '✓' : '✗ MISSING'}`);
 
-  if (!hasDoubleTz || !hasOpenFilter || !usesAmountMoneyAmount || !usesSquareCreatedAt) {
+  if (!hasDoubleTz || !hasOpenFilter || !usesAmountMoneyAmount || !usesSquareCreatedAt || !excludesGiftCards || !subtractsRefunds) {
     console.log(
       '\n  ⚠  Live view does not match the expected production definition.'
     );
