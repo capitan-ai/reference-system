@@ -60,10 +60,11 @@ function getSquareEnvironmentName() {
   return squareEnv.getSquareEnvironmentName()
 }
 
-const { 
-  getOrdersApi, 
-  getLocationsApi, 
-  getBookingsApi 
+const {
+  getOrdersApi,
+  getPaymentsApi,
+  getLocationsApi,
+  getBookingsApi
 } = require('../../../../lib/utils/square-client')
 
 /**
@@ -1045,6 +1046,37 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     }
 
     const paymentId = paymentData.id
+
+    // Defensive fresh fetch from Square API. Square does not guarantee
+    // webhook delivery order — payment.created (status=APPROVED, for delayed-
+    // capture flows) can arrive AFTER payment.updated (status=COMPLETED),
+    // and the upsert below would then overwrite the more recent state with
+    // the stale event. Same defense as processOrderWebhook (which always
+    // calls ordersApi.retrieveOrder).
+    //
+    // On 2026-04-08 we found 1 payment ($130) stuck on APPROVED for 6 days
+    // because of this — Square Sales Summary correctly counted it in Net
+    // Sales but our dashboard view (which filters status='COMPLETED') hid it.
+    //
+    // Callers that already hold a fresh API response (e.g. sync scripts that
+    // just iterated Square API) can pass `paymentData._isFreshFromApi = true`
+    // to skip the extra fetch.
+    if (!paymentData._isFreshFromApi) {
+      try {
+        const paymentsApi = getPaymentsApi()
+        const apiResp = await paymentsApi.getPayment(paymentId)
+        const freshPayment = apiResp?.result?.payment
+        if (freshPayment) {
+          if (freshPayment.status !== paymentData.status) {
+            console.log(`🔄 Payment ${paymentId} fresh fetch: webhook said status='${paymentData.status}', Square API says status='${freshPayment.status}'`)
+          }
+          paymentData = freshPayment
+        }
+      } catch (apiError) {
+        console.warn(`⚠️ Could not fetch fresh payment ${paymentId} from Square API: ${apiError.message}. Falling back to webhook payload.`)
+      }
+    }
+
     const customerId = getValue(paymentData, 'customerId', 'customer_id')
     let locationId = getValue(paymentData, 'locationId', 'location_id')
     const orderId = getValue(paymentData, 'orderId', 'order_id')
