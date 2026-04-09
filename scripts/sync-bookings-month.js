@@ -19,11 +19,40 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 
 const fs = require('fs')
 const path = require('path')
-const axios = require('axios')
+const https = require('https')
+const { URL } = require('url')
 const prisma = require('../lib/prisma-client')
-// NOTE: Square SDK hangs on require() in some environments — use direct HTTP API
-// (same approach as scripts/sync-booking-from-square.js).
+// NOTE: Square SDK hangs on require() in some environments — use direct HTTP API.
+// We also avoid `axios` here (loads after prisma cause intermittent hangs on this
+// machine), use built-in `https` module instead.
 const { applySquareBookingToDb } = require('../lib/sync/apply-square-booking')
+
+function httpsGetJson(url, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const opts = {
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers,
+    }
+    const req = https.request(opts, (res) => {
+      let data = ''
+      res.on('data', (chunk) => (data += chunk))
+      res.on('end', () => {
+        let body
+        try {
+          body = JSON.parse(data)
+        } catch (e) {
+          body = data
+        }
+        resolve({ status: res.statusCode, data: body })
+      })
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
 
 const SQUARE_TOKEN = (process.env.SQUARE_ACCESS_TOKEN || '').replace(/^Bearer /, '').trim()
 const SQUARE_BASE_URL =
@@ -130,20 +159,15 @@ function pacificMonthRange(year, month) {
 async function listBookingsPage(params, attempt = 0) {
   const { limit, cursor, startAtMin, startAtMax } = params
   try {
-    const queryParams = {
-      limit,
-      start_at_min: startAtMin,
-      start_at_max: startAtMax,
-    }
-    if (cursor) queryParams.cursor = cursor
-    const res = await axios.get(`${SQUARE_BASE_URL}/bookings`, {
-      headers: {
-        Authorization: `Bearer ${SQUARE_TOKEN}`,
-        'Square-Version': '2025-02-20',
-        Accept: 'application/json',
-      },
-      params: queryParams,
-      validateStatus: () => true,
+    const qs = new URLSearchParams()
+    qs.set('limit', String(limit))
+    qs.set('start_at_min', startAtMin)
+    qs.set('start_at_max', startAtMax)
+    if (cursor) qs.set('cursor', cursor)
+    const res = await httpsGetJson(`${SQUARE_BASE_URL}/bookings?${qs.toString()}`, {
+      Authorization: `Bearer ${SQUARE_TOKEN}`,
+      'Square-Version': '2025-02-20',
+      Accept: 'application/json',
     })
     if (res.status !== 200) {
       throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.data?.errors || res.data)}`)
@@ -196,13 +220,10 @@ async function fetchAllBookingsForRange(startIso, endIso, rateLimitMs) {
 async function fetchSingleBooking(bookingId, rateLimitMs) {
   if (rateLimitMs > 0) await sleep(rateLimitMs)
   try {
-    const res = await axios.get(`${SQUARE_BASE_URL}/bookings/${bookingId}`, {
-      headers: {
-        Authorization: `Bearer ${SQUARE_TOKEN}`,
-        'Square-Version': '2025-02-20',
-        Accept: 'application/json',
-      },
-      validateStatus: () => true,
+    const res = await httpsGetJson(`${SQUARE_BASE_URL}/bookings/${bookingId}`, {
+      Authorization: `Bearer ${SQUARE_TOKEN}`,
+      'Square-Version': '2025-02-20',
+      Accept: 'application/json',
     })
     if (res.status === 200 && res.data?.booking) {
       return { found: true, booking: res.data.booking }
