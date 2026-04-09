@@ -53,8 +53,9 @@ function header(title) {
 
 // Manual aggregation that mirrors the LIVE view definition exactly.
 // Source of truth: pg_get_viewdef('analytics_revenue_by_location_daily').
-// Updated 2026-04-08 (migration 20260408210000) — now also excludes gift card
-// sales (Square defers them) and subtracts refunded amounts.
+// Updated 2026-04-08 (migration 20260408220000) — now also includes payments
+// on OPEN-state orders (Square does too), and detects gift cards in BOTH
+// camelCase and snake_case line item structures.
 const MANUAL_AGG_SQL = `
   WITH payment_locations AS (
     SELECT
@@ -72,8 +73,8 @@ const MANUAL_AGG_SQL = `
     LEFT JOIN orders o ON o.id = p.order_id
     WHERE p.status = 'COMPLETED'
       AND p.location_id IS NOT NULL
-      AND (o.state IS NULL OR o.state <> 'OPEN')
       AND NOT COALESCE(o.raw_json->'lineItems' @> '[{"itemType": "GIFT_CARD"}]'::jsonb, FALSE)
+      AND NOT COALESCE(o.raw_json->'line_items' @> '[{"item_type": "GIFT_CARD"}]'::jsonb, FALSE)
 
     UNION ALL
 
@@ -94,8 +95,8 @@ const MANUAL_AGG_SQL = `
       AND p.location_id IS NULL
       AND p.order_id IS NOT NULL
       AND o.location_id IS NOT NULL
-      AND o.state <> 'OPEN'
       AND NOT (o.raw_json->'lineItems' @> '[{"itemType": "GIFT_CARD"}]'::jsonb)
+      AND NOT (o.raw_json->'line_items' @> '[{"item_type": "GIFT_CARD"}]'::jsonb)
   )
   SELECT
     ((pl.payment_date AT TIME ZONE 'UTC' AT TIME ZONE 'America/Los_Angeles')::date)::text AS date,
@@ -123,20 +124,24 @@ const MANUAL_AGG_SQL = `
   const viewDef = def[0].def;
   const hasDoubleTz =
     /AT TIME ZONE\s+'UTC'.*AT TIME ZONE\s+'America\/Los_Angeles'/is.test(viewDef);
-  const hasOpenFilter = /o\.state.*OPEN/.test(viewDef);
+  // OPEN filter was REMOVED in 20260408220000 — Square counts OPEN-order
+  // payments in Net Sales (open tabs/layaway with captured payments).
+  const noOpenFilter = !/o\.state.*OPEN/.test(viewDef);
   const usesAmountMoneyAmount = /amount_money_amount/.test(viewDef);
   const usesSquareCreatedAt = /square_created_at/.test(viewDef);
-  const excludesGiftCards = /GIFT_CARD/.test(viewDef);
+  const excludesGiftCardsCamel = /lineItems.*GIFT_CARD/s.test(viewDef);
+  const excludesGiftCardsSnake = /line_items.*GIFT_CARD/s.test(viewDef);
   const subtractsRefunds = /refunded_money/.test(viewDef);
 
   console.log(`  Double AT TIME ZONE (UTC → LA):     ${hasDoubleTz ? '✓' : '✗ MISSING'}`);
-  console.log(`  o.state <> 'OPEN' filter:           ${hasOpenFilter ? '✓' : '✗ MISSING'}`);
+  console.log(`  No OPEN filter (Square counts them):${noOpenFilter ? '✓' : '✗ STILL HAS FILTER'}`);
   console.log(`  Uses amount_money_amount:           ${usesAmountMoneyAmount ? '✓' : '✗ MISSING'}`);
   console.log(`  Uses COALESCE(square_created_at):   ${usesSquareCreatedAt ? '✓' : '✗ MISSING'}`);
-  console.log(`  Excludes gift cards:                ${excludesGiftCards ? '✓' : '✗ MISSING'}`);
+  console.log(`  Excludes gift cards (camelCase):    ${excludesGiftCardsCamel ? '✓' : '✗ MISSING'}`);
+  console.log(`  Excludes gift cards (snake_case):   ${excludesGiftCardsSnake ? '✓' : '✗ MISSING'}`);
   console.log(`  Subtracts refunded_money:           ${subtractsRefunds ? '✓' : '✗ MISSING'}`);
 
-  if (!hasDoubleTz || !hasOpenFilter || !usesAmountMoneyAmount || !usesSquareCreatedAt || !excludesGiftCards || !subtractsRefunds) {
+  if (!hasDoubleTz || !noOpenFilter || !usesAmountMoneyAmount || !usesSquareCreatedAt || !excludesGiftCardsCamel || !excludesGiftCardsSnake || !subtractsRefunds) {
     console.log(
       '\n  ⚠  Live view does not match the expected production definition.'
     );
