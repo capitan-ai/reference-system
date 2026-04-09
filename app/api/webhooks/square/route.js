@@ -2445,7 +2445,13 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
       const createdAt = order.created_at ? new Date(order.created_at) : new Date()
       const updatedAt = order.updated_at ? new Date(order.updated_at) : new Date()
       const closedAt = order.closed_at ? new Date(order.closed_at) : null
-      const orderStateValue = orderState || order.state || null
+      // Prefer the fresh state from the Square API (retrieved at line 2158)
+      // over the webhook event metadata (orderState). Square webhook metadata
+      // carries the state at the moment of the event, which can lag behind
+      // the order's true current state — observed in production where 7+
+      // orders/week were stuck with column state='OPEN' while raw_json
+      // (built from the API response) correctly showed 'COMPLETED'.
+      const orderStateValue = order.state || orderState || null
       const versionValue = order.version ? Number(order.version) : null
       const rawJsonValue = safeStringify(order) // Use safeStringify to handle BigInt values
       const sourceName = order.source?.name || null
@@ -2662,7 +2668,7 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               ${orderId},
               ${locationUuid}::uuid,
               ${customerId},
-              ${orderState || order.state || null},
+              ${order.state || orderState || null},
               ${order.version ? Number(order.version) : null},
               ${order.reference_id || null},
               ${fbToInt(fbTotalMoney.amount)},
