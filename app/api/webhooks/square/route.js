@@ -1070,7 +1070,11 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           if (freshPayment.status !== paymentData.status) {
             console.log(`🔄 Payment ${paymentId} fresh fetch: webhook said status='${paymentData.status}', Square API says status='${freshPayment.status}'`)
           }
-          paymentData = freshPayment
+          // Square SDK returns BigInt for money amounts (e.g. 14000n).
+          // Prisma expects plain Int. Convert all BigInt → Number.
+          paymentData = JSON.parse(JSON.stringify(freshPayment, (k, v) =>
+            typeof v === 'bigint' ? Number(v) : v
+          ))
         }
       } catch (apiError) {
         console.warn(`⚠️ Could not fetch fresh payment ${paymentId} from Square API: ${apiError.message}. Falling back to webhook payload.`)
@@ -1344,7 +1348,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
     // Extract processing fees (same as backfill script)
     const processingFees = getValue(paymentData, 'processingFee', 'processing_fee') || []
     const firstProcessingFee = Array.isArray(processingFees) ? processingFees[0] : processingFees
-    const processingFeeAmount = firstProcessingFee?.amountMoney?.amount || firstProcessingFee?.amount_money?.amount || null
+    const rawFeeAmount = firstProcessingFee?.amountMoney?.amount || firstProcessingFee?.amount_money?.amount || null
+    const processingFeeAmount = rawFeeAmount != null ? Number(rawFeeAmount) : null
     const processingFeeCurrency = firstProcessingFee?.amountMoney?.currency || firstProcessingFee?.amount_money?.currency || 'USD'
     const processingFeeType = firstProcessingFee?.type || null
 
@@ -1416,14 +1421,14 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       order_id: orderUuid, // Use UUID, not square order_id
       booking_id: null, // Will be populated later if available from order
       
-      // Money amounts (all in cents)
-      amount_money_amount: amountMoney.amount || 0,
+      // Money amounts (all in cents) — Number() to convert BigInt from Square SDK
+      amount_money_amount: Number(amountMoney.amount || 0),
       amount_money_currency: amountMoney.currency || 'USD',
-      tip_money_amount: tipMoney.amount || null,
+      tip_money_amount: tipMoney.amount != null ? Number(tipMoney.amount) : null,
       tip_money_currency: tipMoney.currency || 'USD',
-      total_money_amount: totalMoney.amount || 0,
+      total_money_amount: Number(totalMoney.amount || 0),
       total_money_currency: totalMoney.currency || 'USD',
-      approved_money_amount: approvedMoney.amount || null,
+      approved_money_amount: approvedMoney.amount != null ? Number(approvedMoney.amount) : null,
       approved_money_currency: approvedMoney.currency || 'USD',
       
       // Status
@@ -1453,8 +1458,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
       card_bin: card.bin || null,
       card_brand: card.cardBrand || card.card_brand || null,
       card_type: card.cardType || card.card_type || null,
-      card_exp_month: card.expMonth || card.exp_month || null,
-      card_exp_year: card.expYear || card.exp_year || null,
+      card_exp_month: card.expMonth || card.exp_month ? Number(card.expMonth || card.exp_month) : null,
+      card_exp_year: card.expYear || card.exp_year ? Number(card.expYear || card.exp_year) : null,
       card_fingerprint: card.fingerprint || null,
       card_last_4: card.last4 || card.last_4 || null,
       card_payment_account_reference: card.paymentAccountReference || card.payment_account_reference || null,
@@ -1587,10 +1592,10 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           payment_id: paymentUuid, // ✅ FIX: Use UUID, not Square ID
           tender_id: tender.id || null,
           type: tender.type || null,
-          amount_money_amount: tenderAmountMoney.amount || 0,
+          amount_money_amount: Number(tenderAmountMoney.amount || 0),
           amount_money_currency: tenderAmountMoney.currency || 'USD',
           note: tender.note || null,
-          
+
           // Card details
           card_status: tenderCardDetails.status || null,
           card_application_cryptogram: tenderCard.applicationCryptogram || tenderCard.application_cryptogram || null,
@@ -1601,8 +1606,8 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
           card_bin: tenderCard.bin || null,
           card_brand: tenderCard.cardBrand || tenderCard.card_brand || null,
           card_type: tenderCard.cardType || tenderCard.card_type || null,
-          card_exp_month: tenderCard.expMonth || tenderCard.exp_month || null,
-          card_exp_year: tenderCard.expYear || tenderCard.exp_year || null,
+          card_exp_month: tenderCard.expMonth || tenderCard.exp_month ? Number(tenderCard.expMonth || tenderCard.exp_month) : null,
+          card_exp_year: tenderCard.expYear || tenderCard.exp_year ? Number(tenderCard.expYear || tenderCard.exp_year) : null,
           card_fingerprint: tenderCard.fingerprint || null,
           card_last_4: tenderCard.last4 || tenderCard.last_4 || null,
           card_payment_account_reference: tenderCard.paymentAccountReference || tenderCard.payment_account_reference || null,
