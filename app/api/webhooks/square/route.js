@@ -67,16 +67,32 @@ const {
   getBookingsApi
 } = require('../../../../lib/utils/square-client')
 
+// Retry helper for transient Square API errors (502, 503, 504)
+async function retrySquareApi(fn, { maxRetries = 2, label = 'square_api' } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      const isTransient = /\b(502|503|504)\b/.test(error.message) ||
+                          [502, 503, 504].includes(error.statusCode)
+      if (!isTransient || attempt === maxRetries) throw error
+      const delayMs = 1000 * (attempt + 1)
+      console.log(`⏳ [${label}] Transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delayMs}ms...`)
+      await new Promise(r => setTimeout(r, delayMs))
+    }
+  }
+}
+
 /**
  * Derive booking_id from Square API
- * 
+ *
  * This function:
  * 1. Calls Square Orders API to get full order with line_items
  * 2. Calls Square Bookings API (listBookings) with customerId, locationId, date range
  * 3. Matches bookings by service_variation_id overlap
  * 4. Filters by time: booking.start_at <= order.created_at (service finished before payment)
  * 5. Selects the closest match by time proximity
- * 
+ *
  * @param {string} squareOrderId - Square order ID
  * @returns {Promise<{bookingId: string|null, confidence: string, source: string}>}
  */
@@ -86,7 +102,10 @@ async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
   try {
     // Step 1: Get full order from Square API
     const ordersApi = getOrdersApi()
-    const orderResponse = await ordersApi.retrieveOrder(squareOrderId)
+    const orderResponse = await retrySquareApi(
+      () => ordersApi.retrieveOrder(squareOrderId),
+      { label: 'DERIVE-BOOKING/retrieveOrder' }
+    )
     const order = orderResponse.result?.order
     
     if (!order) {
@@ -153,21 +172,24 @@ async function deriveBookingFromSquareApi(squareOrderId, correlationId = null) {
       try {
         // Square SDK listBookings signature (positional parameters):
         // listBookings(limit?, cursor?, customerId?, teamMemberId?, locationId?, startAt?, endAt?)
-        const response = await bookingsApi.listBookings(
-          100, // limit
-          cursor || undefined,
-          customerId, // filter by customer
-          undefined, // teamMemberId
-          locationId, // filter by location
-          startOfWindow.toISOString(), // start_at_min
-          endOfWindow.toISOString() // start_at_max
+        const response = await retrySquareApi(
+          () => bookingsApi.listBookings(
+            100, // limit
+            cursor || undefined,
+            customerId, // filter by customer
+            undefined, // teamMemberId
+            locationId, // filter by location
+            startOfWindow.toISOString(), // start_at_min
+            endOfWindow.toISOString() // start_at_max
+          ),
+          { label: 'DERIVE-BOOKING/listBookings' }
         )
-        
+
         const bookings = response.result?.bookings || []
         allBookings = allBookings.concat(bookings)
         cursor = response.result?.cursor
         pageCount++
-        
+
         console.log(`   Page ${pageCount}: Found ${bookings.length} bookings (total: ${allBookings.length})`)
       } catch (apiError) {
         console.error(`❌ [DERIVE-BOOKING] Square Bookings API error:`, apiError.message)
