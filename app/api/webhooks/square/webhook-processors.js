@@ -341,8 +341,9 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
   const familyName = cleanValue(customerData.family_name || customerData.familyName)
   const emailAddress = cleanValue(customerData.email_address || customerData.emailAddress || customerData.email)
   const phoneNumber = cleanValue(customerData.phone_number || customerData.phoneNumber || customerData.phone)
+  const creationSource = cleanValue(customerData.creation_source || customerData.creationSource)
 
-  console.log(`[WEBHOOK-PROCESSOR] Processing customer ${customerId}: ${givenName} ${familyName}`)
+  console.log(`[WEBHOOK-PROCESSOR] Processing customer ${customerId}: ${givenName} ${familyName} (creationSource: ${creationSource || 'unknown'})`)
 
   try {
     let organizationId = null
@@ -352,7 +353,7 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
     if (defaultOrg?.[0]?.id) {
       organizationId = defaultOrg[0].id
     }
-    
+
     if (!organizationId) {
       console.warn(`[WEBHOOK-PROCESSOR] ⚠️ No organization found, skipping customer ${customerId}`)
       return
@@ -361,24 +362,164 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
     await prisma.$executeRaw`
       INSERT INTO square_existing_clients (
         organization_id, square_customer_id, given_name, family_name, email_address, phone_number,
-        raw_json, created_at, updated_at
+        creation_source, raw_json, created_at, updated_at
       ) VALUES (
         ${organizationId}::uuid, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
-        ${JSON.stringify(customerData)}::jsonb, NOW(), NOW()
+        ${creationSource}, ${JSON.stringify(customerData)}::jsonb, NOW(), NOW()
       )
       ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
         given_name = COALESCE(EXCLUDED.given_name, square_existing_clients.given_name),
         family_name = COALESCE(EXCLUDED.family_name, square_existing_clients.family_name),
         email_address = COALESCE(EXCLUDED.email_address, square_existing_clients.email_address),
         phone_number = COALESCE(EXCLUDED.phone_number, square_existing_clients.phone_number),
+        creation_source = COALESCE(EXCLUDED.creation_source, square_existing_clients.creation_source),
         raw_json = EXCLUDED.raw_json,
         updated_at = NOW()
     `
+
+    // If this is a merged customer, try to consolidate referral data from the old record
+    if (creationSource === 'MERGE' && emailAddress) {
+      console.log(`[WEBHOOK-PROCESSOR] 🔀 Merged customer detected: ${customerId}, checking for old records...`)
+      await consolidateMergedCustomer(organizationId, customerId, emailAddress, phoneNumber)
+    }
 
     console.log(`[WEBHOOK-PROCESSOR] ✅ Saved customer ${customerId}`)
   } catch (error) {
     console.error(`[WEBHOOK-PROCESSOR] ❌ Error saving customer ${customerId}:`, error.message)
     throw error
+  }
+}
+
+/**
+ * Process customer.updated webhook
+ */
+export async function processCustomerUpdated(payload, eventId, eventCreatedAt) {
+  console.log(`[WEBHOOK-PROCESSOR] processCustomerUpdated called for event ${eventId}`)
+
+  const customerData = payload?.object?.customer || payload?.customer || payload
+  if (!customerData?.id) {
+    console.warn(`[WEBHOOK-PROCESSOR] No customer ID found in payload`)
+    return
+  }
+
+  const customerId = customerData.id
+  const givenName = cleanValue(customerData.given_name || customerData.givenName)
+  const familyName = cleanValue(customerData.family_name || customerData.familyName)
+  const emailAddress = cleanValue(customerData.email_address || customerData.emailAddress || customerData.email)
+  const phoneNumber = cleanValue(customerData.phone_number || customerData.phoneNumber || customerData.phone)
+  const creationSource = cleanValue(customerData.creation_source || customerData.creationSource)
+
+  console.log(`[WEBHOOK-PROCESSOR] Updating customer ${customerId}: ${givenName} ${familyName} (creationSource: ${creationSource || 'unknown'})`)
+
+  try {
+    let organizationId = null
+    const defaultOrg = await prisma.$queryRaw`
+      SELECT id FROM organizations WHERE is_active = true ORDER BY created_at LIMIT 1
+    `
+    if (defaultOrg?.[0]?.id) {
+      organizationId = defaultOrg[0].id
+    }
+
+    if (!organizationId) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ No organization found, skipping customer update ${customerId}`)
+      return
+    }
+
+    await prisma.$executeRaw`
+      INSERT INTO square_existing_clients (
+        organization_id, square_customer_id, given_name, family_name, email_address, phone_number,
+        creation_source, raw_json, created_at, updated_at
+      ) VALUES (
+        ${organizationId}::uuid, ${customerId}, ${givenName}, ${familyName}, ${emailAddress}, ${phoneNumber},
+        ${creationSource}, ${JSON.stringify(customerData)}::jsonb, NOW(), NOW()
+      )
+      ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
+        given_name = COALESCE(EXCLUDED.given_name, square_existing_clients.given_name),
+        family_name = COALESCE(EXCLUDED.family_name, square_existing_clients.family_name),
+        email_address = COALESCE(EXCLUDED.email_address, square_existing_clients.email_address),
+        phone_number = COALESCE(EXCLUDED.phone_number, square_existing_clients.phone_number),
+        creation_source = COALESCE(EXCLUDED.creation_source, square_existing_clients.creation_source),
+        raw_json = EXCLUDED.raw_json,
+        updated_at = NOW()
+    `
+
+    // If this is a merged customer, consolidate referral data from old record
+    if (creationSource === 'MERGE' && emailAddress) {
+      console.log(`[WEBHOOK-PROCESSOR] 🔀 Merged customer detected via update: ${customerId}`)
+      await consolidateMergedCustomer(organizationId, customerId, emailAddress, phoneNumber)
+    }
+
+    console.log(`[WEBHOOK-PROCESSOR] ✅ Updated customer ${customerId}`)
+  } catch (error) {
+    console.error(`[WEBHOOK-PROCESSOR] ❌ Error updating customer ${customerId}:`, error.message)
+    throw error
+  }
+}
+
+/**
+ * Consolidate referral data from old (pre-merge) customer record into the new surviving record.
+ * Looks up old records by matching email or phone, then copies referral fields.
+ */
+async function consolidateMergedCustomer(organizationId, newCustomerId, emailAddress, phoneNumber) {
+  try {
+    // Find old records with the same email (different Square ID) that have referral data
+    const oldRecords = await prisma.$queryRaw`
+      SELECT square_customer_id, personal_code, referral_code, referral_url,
+             got_signup_bonus, activated_as_referrer, used_referral_code,
+             gift_card_id, gift_card_gan, total_referrals, total_rewards,
+             first_payment_completed, gift_card_order_id, gift_card_line_item_uid,
+             gift_card_delivery_channel, gift_card_activation_url, gift_card_pass_kit_url,
+             gift_card_digital_email
+      FROM square_existing_clients
+      WHERE organization_id = ${organizationId}::uuid
+        AND square_customer_id != ${newCustomerId}
+        AND email_address IS NOT NULL
+        AND LOWER(email_address) = LOWER(${emailAddress})
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `
+
+    if (!oldRecords || oldRecords.length === 0) {
+      console.log(`[WEBHOOK-PROCESSOR] No old records found for email ${emailAddress}`)
+      return
+    }
+
+    const old = oldRecords[0]
+    console.log(`[WEBHOOK-PROCESSOR] 🔀 Found old record: ${old.square_customer_id}`)
+    console.log(`[WEBHOOK-PROCESSOR]   personal_code: ${old.personal_code}, got_signup_bonus: ${old.got_signup_bonus}`)
+    console.log(`[WEBHOOK-PROCESSOR]   activated_as_referrer: ${old.activated_as_referrer}, used_referral_code: ${old.used_referral_code}`)
+
+    // Copy referral data from old record to new record (only fill NULLs/defaults)
+    await prisma.$executeRaw`
+      UPDATE square_existing_clients
+      SET
+        personal_code = COALESCE(square_existing_clients.personal_code, ${old.personal_code}),
+        referral_code = COALESCE(square_existing_clients.referral_code, ${old.referral_code}),
+        referral_url = COALESCE(square_existing_clients.referral_url, ${old.referral_url}),
+        got_signup_bonus = COALESCE(square_existing_clients.got_signup_bonus, ${old.got_signup_bonus}),
+        activated_as_referrer = COALESCE(square_existing_clients.activated_as_referrer, ${old.activated_as_referrer}),
+        used_referral_code = COALESCE(square_existing_clients.used_referral_code, ${old.used_referral_code}),
+        gift_card_id = COALESCE(square_existing_clients.gift_card_id, ${old.gift_card_id}),
+        gift_card_gan = COALESCE(square_existing_clients.gift_card_gan, ${old.gift_card_gan}),
+        total_referrals = GREATEST(COALESCE(square_existing_clients.total_referrals, 0), COALESCE(${old.total_referrals}, 0)),
+        total_rewards = GREATEST(COALESCE(square_existing_clients.total_rewards, 0), COALESCE(${old.total_rewards}, 0)),
+        first_payment_completed = COALESCE(square_existing_clients.first_payment_completed, ${old.first_payment_completed}),
+        gift_card_order_id = COALESCE(square_existing_clients.gift_card_order_id, ${old.gift_card_order_id}),
+        gift_card_line_item_uid = COALESCE(square_existing_clients.gift_card_line_item_uid, ${old.gift_card_line_item_uid}),
+        gift_card_delivery_channel = COALESCE(square_existing_clients.gift_card_delivery_channel, ${old.gift_card_delivery_channel}),
+        gift_card_activation_url = COALESCE(square_existing_clients.gift_card_activation_url, ${old.gift_card_activation_url}),
+        gift_card_pass_kit_url = COALESCE(square_existing_clients.gift_card_pass_kit_url, ${old.gift_card_pass_kit_url}),
+        gift_card_digital_email = COALESCE(square_existing_clients.gift_card_digital_email, ${old.gift_card_digital_email}),
+        merged_from_customer_id = ${old.square_customer_id},
+        updated_at = NOW()
+      WHERE organization_id = ${organizationId}::uuid
+        AND square_customer_id = ${newCustomerId}
+    `
+
+    console.log(`[WEBHOOK-PROCESSOR] ✅ Consolidated referral data from ${old.square_customer_id} → ${newCustomerId}`)
+  } catch (error) {
+    console.error(`[WEBHOOK-PROCESSOR] ⚠️ Error consolidating merged customer:`, error.message)
+    // Non-fatal — don't throw, the customer record was already saved
   }
 }
 

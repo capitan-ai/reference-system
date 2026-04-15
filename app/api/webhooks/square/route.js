@@ -739,6 +739,7 @@ export async function POST(request) {
       // These include: customer.created, gift_card.*, refund.*, team_member.created
       const queueableEventTypes = [
         'customer.created',
+        'customer.updated',
         'gift_card.activity.created',
         'gift_card.activity.updated',
         'gift_card.customer_linked',
