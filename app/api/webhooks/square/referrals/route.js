@@ -3188,29 +3188,8 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
       }
     }
 
-    // Send post-visit reminder SMS (every visit, every customer)
-    if (customer.phone_number && customer.personal_code) {
-      try {
-        const smsResult = await sendPostVisitReminderSms({
-          to: customer.phone_number,
-          customerName: customer.given_name || 'there',
-          referralCode: customer.personal_code
-        })
-        if (smsResult.success && !smsResult.skipped) {
-          await trackNotification({
-            channel: 'SMS',
-            templateType: 'POST_VISIT_REMINDER',
-            status: 'sent',
-            customerId,
-            externalId: smsResult.sid,
-            organizationId,
-            metadata: { referralCode: customer.personal_code, paymentId }
-          })
-        }
-      } catch (err) {
-        console.warn(`⚠️ Post-visit SMS failed for ${customerId}: ${err.message}`)
-      }
-    }
+    // Post-visit referral SMS is sent from the payment.created/payment.updated handlers
+    // in this route's POST function (with dedup) — no longer here to avoid double-sending.
 
     // Check if this is their first payment
     if (customer.first_payment_completed) {
@@ -6230,7 +6209,117 @@ export async function POST(request) {
       
       console.log('💰 Received payment.created event')
       console.log('   Payment data:', safeStringify(paymentData))
-      
+
+      // --- Post-visit referral SMS (non-blocking) ---
+      try {
+        const pStatus = paymentData?.status
+        const pCustomerId = paymentData?.customerId || paymentData?.customer_id
+        if ((pStatus === 'COMPLETED' || pStatus === 'APPROVED') && pCustomerId) {
+          const pLocationId = paymentData?.location_id || paymentData?.locationId
+          let smsOrgId = null
+          if (pLocationId) {
+            smsOrgId = await resolveOrganizationIdFromLocationId(pLocationId)
+          }
+          if (!smsOrgId) {
+            const pMerchantId = webhookData.merchant_id || paymentData?.merchant_id || paymentData?.merchantId
+            if (pMerchantId) {
+              smsOrgId = await resolveOrganizationId(pMerchantId)
+            }
+          }
+          if (smsOrgId) {
+            const custRow = await prisma.$queryRaw`
+              SELECT phone_number, personal_code, referral_url, given_name, square_customer_id
+              FROM square_existing_clients
+              WHERE square_customer_id = ${pCustomerId}
+                AND organization_id = ${smsOrgId}::uuid
+              LIMIT 1
+            `
+            const c = custRow?.[0]
+            // If customer has no personal_code yet, generate one and save it
+            if (c && !c.personal_code) {
+              try {
+                const customerName = c.given_name || ''
+                const newCode = await generateUniquePersonalCode(customerName, pCustomerId, smsOrgId)
+                const newUrl = generateReferralUrl(newCode)
+                await prisma.$executeRaw`
+                  UPDATE square_existing_clients
+                  SET personal_code = ${newCode}, referral_url = ${newUrl}
+                  WHERE square_customer_id = ${pCustomerId}
+                    AND organization_id = ${smsOrgId}::uuid
+                `
+                c.personal_code = newCode
+                c.referral_url = newUrl
+                console.log(`📲 Generated referral code ${newCode} for customer ${pCustomerId}`)
+              } catch (codeErr) {
+                console.warn(`⚠️ Failed to generate referral code for ${pCustomerId}: ${codeErr.message}`)
+              }
+            }
+            if (c?.phone_number && c?.personal_code) {
+              const pId = paymentData?.id || paymentData?.paymentId
+              const refUrl = c.referral_url || generateReferralUrl(c.personal_code)
+              // Race-safe dedup: claim a slot FIRST via INSERT, then send SMS
+              const notifId = `pvr-${pId}-${Date.now()}`
+              let claimed = false
+              try {
+                await prisma.$executeRaw`
+                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
+                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM notification_events
+                    WHERE channel = 'SMS'
+                      AND "templateType" = 'POST_VISIT_REMINDER'
+                      AND (
+                        metadata->>'paymentId' = ${pId}
+                        OR (
+                          "customerId" = ${pCustomerId}
+                          AND "createdAt" > NOW() - INTERVAL '24 hours'
+                        )
+                      )
+                  )
+                `
+                const inserted = await prisma.$queryRaw`
+                  SELECT id FROM notification_events WHERE id = ${notifId} LIMIT 1
+                `
+                claimed = inserted && inserted.length > 0
+              } catch (claimErr) {
+                console.warn(`⚠️ Post-visit SMS claim failed: ${claimErr.message}`)
+              }
+
+              if (claimed) {
+                const smsResult = await sendPostVisitReminderSms({
+                  to: c.phone_number,
+                  customerName: c.given_name || 'there',
+                  referralCode: c.personal_code,
+                  referralUrl: refUrl
+                })
+                try {
+                  if (smsResult.success && !smsResult.skipped) {
+                    await prisma.$executeRaw`
+                      UPDATE notification_events
+                      SET status = 'sent'::"NotificationStatus", "externalId" = ${smsResult.sid}, "sentAt" = NOW(), "statusAt" = NOW()
+                      WHERE id = ${notifId}
+                    `
+                  } else {
+                    await prisma.$executeRaw`
+                      UPDATE notification_events
+                      SET status = 'failed'::"NotificationStatus", "errorMessage" = ${smsResult.reason || smsResult.error || 'skipped'}, "statusAt" = NOW()
+                      WHERE id = ${notifId}
+                    `
+                  }
+                } catch (updateErr) {
+                  console.warn(`⚠️ Post-visit SMS status update failed: ${updateErr.message}`)
+                }
+                console.log(`📲 Post-visit SMS ${smsResult.success ? 'sent' : 'failed'} for ${pCustomerId} (${smsResult.skipped ? 'skipped' : smsResult.sid || smsResult.reason})`)
+              } else {
+                console.log(`📲 Post-visit SMS skipped for ${pCustomerId} (already sent)`)
+              }
+            }
+          }
+        }
+      } catch (smsErr) {
+        console.warn(`⚠️ Post-visit SMS error: ${smsErr.message}`)
+      }
+
       if (paymentData && paymentData.status === 'COMPLETED') {
         console.log('✅ Payment completed, processing...')
         const paymentResourceId = paymentData.id || paymentData.paymentId
@@ -6456,7 +6545,122 @@ export async function POST(request) {
       await processGiftCardRedemptions(paymentData, paymentOrgId)
       
       console.log('💰 Received payment.updated event')
-      
+
+      // --- Post-visit referral SMS (non-blocking) ---
+      // Fires on APPROVED or COMPLETED so the customer gets SMS right after paying
+      try {
+        const pStatus = paymentData?.status
+        const pCustomerId = paymentData?.customerId || paymentData?.customer_id
+        if ((pStatus === 'COMPLETED' || pStatus === 'APPROVED') && pCustomerId) {
+          // Resolve organization_id from location
+          const pLocationId = paymentData?.location_id || paymentData?.locationId
+          let smsOrgId = null
+          if (pLocationId) {
+            smsOrgId = await resolveOrganizationIdFromLocationId(pLocationId)
+          }
+          if (!smsOrgId) {
+            const pMerchantId = webhookData.merchant_id || paymentData?.merchant_id || paymentData?.merchantId
+            if (pMerchantId) {
+              smsOrgId = await resolveOrganizationId(pMerchantId)
+            }
+          }
+          if (smsOrgId) {
+            const custRow = await prisma.$queryRaw`
+              SELECT phone_number, personal_code, referral_url, given_name, square_customer_id
+              FROM square_existing_clients
+              WHERE square_customer_id = ${pCustomerId}
+                AND organization_id = ${smsOrgId}::uuid
+              LIMIT 1
+            `
+            const c = custRow?.[0]
+            // If customer has no personal_code yet, generate one and save it
+            if (c && !c.personal_code) {
+              try {
+                const customerName = c.given_name || ''
+                const newCode = await generateUniquePersonalCode(customerName, pCustomerId, smsOrgId)
+                const newUrl = generateReferralUrl(newCode)
+                await prisma.$executeRaw`
+                  UPDATE square_existing_clients
+                  SET personal_code = ${newCode}, referral_url = ${newUrl}
+                  WHERE square_customer_id = ${pCustomerId}
+                    AND organization_id = ${smsOrgId}::uuid
+                `
+                c.personal_code = newCode
+                c.referral_url = newUrl
+                console.log(`📲 Generated referral code ${newCode} for customer ${pCustomerId}`)
+              } catch (codeErr) {
+                console.warn(`⚠️ Failed to generate referral code for ${pCustomerId}: ${codeErr.message}`)
+              }
+            }
+            if (c?.phone_number && c?.personal_code) {
+              const pId = paymentData?.id || paymentData?.paymentId
+              const refUrl = c.referral_url || generateReferralUrl(c.personal_code)
+              // Race-safe dedup: claim a slot FIRST via INSERT, then send SMS
+              // If another webhook already claimed it, the INSERT fails and we skip
+              const notifId = `pvr-${pId}-${Date.now()}`
+              let claimed = false
+              try {
+                await prisma.$executeRaw`
+                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
+                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM notification_events
+                    WHERE channel = 'SMS'
+                      AND "templateType" = 'POST_VISIT_REMINDER'
+                      AND (
+                        metadata->>'paymentId' = ${pId}
+                        OR (
+                          "customerId" = ${pCustomerId}
+                          AND "createdAt" > NOW() - INTERVAL '24 hours'
+                        )
+                      )
+                  )
+                `
+                // Check if the row was actually inserted (returns affected row count)
+                const inserted = await prisma.$queryRaw`
+                  SELECT id FROM notification_events WHERE id = ${notifId} LIMIT 1
+                `
+                claimed = inserted && inserted.length > 0
+              } catch (claimErr) {
+                console.warn(`⚠️ Post-visit SMS claim failed: ${claimErr.message}`)
+              }
+
+              if (claimed) {
+                const smsResult = await sendPostVisitReminderSms({
+                  to: c.phone_number,
+                  customerName: c.given_name || 'there',
+                  referralCode: c.personal_code,
+                  referralUrl: refUrl
+                })
+                // Update the queued record with actual send result
+                try {
+                  if (smsResult.success && !smsResult.skipped) {
+                    await prisma.$executeRaw`
+                      UPDATE notification_events
+                      SET status = 'sent'::"NotificationStatus", "externalId" = ${smsResult.sid}, "sentAt" = NOW(), "statusAt" = NOW()
+                      WHERE id = ${notifId}
+                    `
+                  } else {
+                    await prisma.$executeRaw`
+                      UPDATE notification_events
+                      SET status = 'failed'::"NotificationStatus", "errorMessage" = ${smsResult.reason || smsResult.error || 'skipped'}, "statusAt" = NOW()
+                      WHERE id = ${notifId}
+                    `
+                  }
+                } catch (updateErr) {
+                  console.warn(`⚠️ Post-visit SMS status update failed: ${updateErr.message}`)
+                }
+                console.log(`📲 Post-visit SMS ${smsResult.success ? 'sent' : 'failed'} for ${pCustomerId} (${smsResult.skipped ? 'skipped' : smsResult.sid || smsResult.reason})`)
+              } else {
+                console.log(`📲 Post-visit SMS skipped for ${pCustomerId} (already sent)`)
+              }
+            }
+          }
+        }
+      } catch (smsErr) {
+        console.warn(`⚠️ Post-visit SMS error: ${smsErr.message}`)
+      }
+
       if (paymentData && paymentData.status === 'COMPLETED') {
         console.log('✅ Payment completed, processing...')
         const paymentResourceId = paymentData.id || paymentData.paymentId

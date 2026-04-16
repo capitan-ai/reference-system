@@ -8,6 +8,10 @@ import { refreshCustomerAnalyticsForSingleCustomer } from '../../../../lib/analy
 const require = createRequire(import.meta.url)
 const { logInfo, logWarn, logError, logDebug } = require('../../../../lib/observability/logger')
 const { resolveLocationUuidForSquareLocationId } = locationResolver
+const { sendPostVisitReminderSms } = require('../../../../lib/twilio-service')
+const { trackNotification } = require('../../../../lib/email-service-simple')
+const { generateReferralUrl } = require('../../../../lib/utils/referral-url')
+const { generateUniquePersonalCode } = require('../../../../lib/webhooks/giftcard-processors')
 
 // Helper to safely stringify objects with BigInt values
 function safeStringify(value) {
@@ -683,6 +687,116 @@ export async function POST(request) {
             
             // Update order_line_items with technician_id and administrator_id when payment arrives
             await updateOrderLineItemsWithTechnician(orderId, correlationId)
+          }
+
+          // --- Post-visit referral SMS (non-blocking) ---
+          try {
+            const paymentStatus = paymentData.status || paymentData.payment_status
+            const customerId = paymentData.customer_id || paymentData.customerId
+            if ((paymentStatus === 'COMPLETED' || paymentStatus === 'APPROVED') && customerId && webhookOrganizationId) {
+              const customerRow = await prisma.$queryRaw`
+                SELECT phone_number, personal_code, referral_url, given_name
+                FROM square_existing_clients
+                WHERE square_customer_id = ${customerId}
+                  AND organization_id = ${webhookOrganizationId}::uuid
+                LIMIT 1
+              `
+              const cust = customerRow?.[0]
+              // If customer has no personal_code yet, generate one and save it
+              if (cust && !cust.personal_code) {
+                try {
+                  const newCode = await generateUniquePersonalCode(cust.given_name || '', customerId, webhookOrganizationId)
+                  const newUrl = generateReferralUrl(newCode)
+                  await prisma.$executeRaw`
+                    UPDATE square_existing_clients
+                    SET personal_code = ${newCode}, referral_url = ${newUrl}
+                    WHERE square_customer_id = ${customerId}
+                      AND organization_id = ${webhookOrganizationId}::uuid
+                  `
+                  cust.personal_code = newCode
+                  cust.referral_url = newUrl
+                  logInfo('payment.post_visit_sms.code_generated', { logId: correlationId, customerId, code: newCode })
+                } catch (codeErr) {
+                  logWarn('payment.post_visit_sms.code_gen_failed', { logId: correlationId, customerId, error: codeErr.message })
+                }
+              }
+              if (cust?.phone_number && cust?.personal_code) {
+                const paymentId = paymentData.id
+                const referralUrl = cust.referral_url || generateReferralUrl(cust.personal_code)
+                // Race-safe dedup: claim a slot FIRST via atomic INSERT, then send SMS
+                const notifId = `pvr-${paymentId}-${Date.now()}`
+                let claimed = false
+                try {
+                  await prisma.$executeRaw`
+                    INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
+                    SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${customerId}, ${customerId}, ${JSON.stringify({ referralCode: cust.personal_code, paymentId, referralUrl })}::jsonb, NOW(), NOW(), ${webhookOrganizationId}::uuid
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM notification_events
+                      WHERE channel = 'SMS'
+                        AND "templateType" = 'POST_VISIT_REMINDER'
+                        AND (
+                          metadata->>'paymentId' = ${paymentId}
+                          OR (
+                            "customerId" = ${customerId}
+                            AND "createdAt" > NOW() - INTERVAL '24 hours'
+                          )
+                        )
+                    )
+                  `
+                  const inserted = await prisma.$queryRaw`
+                    SELECT id FROM notification_events WHERE id = ${notifId} LIMIT 1
+                  `
+                  claimed = inserted && inserted.length > 0
+                } catch (claimErr) {
+                  logWarn('payment.post_visit_sms.claim_failed', { logId: correlationId, error: claimErr.message })
+                }
+
+                if (claimed) {
+                  const smsResult = await sendPostVisitReminderSms({
+                    to: cust.phone_number,
+                    customerName: cust.given_name || 'there',
+                    referralCode: cust.personal_code,
+                    referralUrl
+                  })
+                  try {
+                    if (smsResult.success && !smsResult.skipped) {
+                      await prisma.$executeRaw`
+                        UPDATE notification_events
+                        SET status = 'sent'::"NotificationStatus", "externalId" = ${smsResult.sid}, "sentAt" = NOW(), "statusAt" = NOW()
+                        WHERE id = ${notifId}
+                      `
+                    } else {
+                      await prisma.$executeRaw`
+                        UPDATE notification_events
+                        SET status = 'failed'::"NotificationStatus", "errorMessage" = ${smsResult.reason || smsResult.error || 'skipped'}, "statusAt" = NOW()
+                        WHERE id = ${notifId}
+                      `
+                    }
+                  } catch (updateErr) {
+                    logWarn('payment.post_visit_sms.update_failed', { logId: correlationId, error: updateErr.message })
+                  }
+                  logInfo('payment.post_visit_sms.sent', {
+                    logId: correlationId,
+                    customerId,
+                    paymentId,
+                    skipped: smsResult.skipped || false
+                  })
+                } else {
+                  logInfo('payment.post_visit_sms.dedup', {
+                    logId: correlationId,
+                    customerId,
+                    paymentId,
+                    reason: 'already_sent'
+                  })
+                }
+              }
+            }
+          } catch (smsError) {
+            logWarn('payment.post_visit_sms.error', {
+              logId: correlationId,
+              error: smsError.message,
+              paymentId: paymentData?.id
+            })
           }
         } catch (paymentError) {
           logError("payment.error", {
@@ -2184,6 +2298,69 @@ async function updateOrderLineItemsWithTechnician(orderId, correlationId = null)
   }
 }
 
+/**
+ * Insert a line item using raw SQL instead of prisma.orderLineItem.create().
+ * Bypasses Prisma client schema caching issues that silently break inserts
+ * when the generated client doesn't match production DB columns.
+ */
+async function insertLineItemRawSQL(prisma, d, lineItem, organizationId, safeStringify) {
+  const newId = crypto.randomUUID()
+  await prisma.$executeRaw`
+    INSERT INTO order_line_items (
+      id, organization_id, order_id, location_id, customer_id,
+      technician_id, administrator_id, uid,
+      service_variation_id, catalog_version, quantity, name, variation_name, item_type, discount_name,
+      metadata, custom_attributes, fulfillments, applied_taxes, applied_discounts, applied_service_charges,
+      note, modifiers,
+      base_price_money_amount, base_price_money_currency,
+      gross_sales_money_amount, gross_sales_money_currency,
+      total_tax_money_amount, total_tax_money_currency,
+      total_discount_money_amount, total_discount_money_currency,
+      total_money_amount, total_money_currency,
+      variation_total_price_money_amount, variation_total_price_money_currency,
+      total_service_charge_money_amount, total_service_charge_money_currency,
+      total_card_surcharge_money_amount, total_card_surcharge_money_currency,
+      order_state, order_version, order_created_at, order_updated_at, order_closed_at,
+      order_total_tax_money_amount, order_total_tax_money_currency,
+      order_total_discount_money_amount, order_total_discount_money_currency,
+      order_total_tip_money_amount, order_total_tip_money_currency,
+      order_total_money_amount, order_total_money_currency,
+      order_total_service_charge_money_amount, order_total_service_charge_money_currency,
+      order_total_card_surcharge_money_amount, order_total_card_surcharge_money_currency,
+      raw_json, created_at, updated_at
+    ) VALUES (
+      ${newId}::uuid, ${organizationId}::uuid, ${d.order_id}::uuid, ${d.location_id}, ${d.customer_id},
+      ${d.technician_id}::uuid, ${d.administrator_id}::uuid, ${d.uid},
+      ${d.service_variation_id}, ${d.catalog_version}, ${d.quantity}, ${d.name}, ${d.variation_name}, ${d.item_type}, ${d.discount_name},
+      ${d.metadata ? safeStringify(d.metadata) : null}::jsonb,
+      ${d.custom_attributes ? safeStringify(d.custom_attributes) : null}::jsonb,
+      ${d.fulfillments ? safeStringify(d.fulfillments) : null}::jsonb,
+      ${d.applied_taxes ? safeStringify(d.applied_taxes) : null}::jsonb,
+      ${d.applied_discounts ? safeStringify(d.applied_discounts) : null}::jsonb,
+      ${d.applied_service_charges ? safeStringify(d.applied_service_charges) : null}::jsonb,
+      ${d.note},
+      ${d.modifiers ? safeStringify(d.modifiers) : null}::jsonb,
+      ${d.base_price_money_amount}, ${d.base_price_money_currency},
+      ${d.gross_sales_money_amount}, ${d.gross_sales_money_currency},
+      ${d.total_tax_money_amount}, ${d.total_tax_money_currency},
+      ${d.total_discount_money_amount}, ${d.total_discount_money_currency},
+      ${d.total_money_amount}, ${d.total_money_currency},
+      ${d.variation_total_price_money_amount}, ${d.variation_total_price_money_currency},
+      ${d.total_service_charge_money_amount}, ${d.total_service_charge_money_currency},
+      ${d.total_card_surcharge_money_amount}, ${d.total_card_surcharge_money_currency},
+      ${d.order_state}, ${d.order_version}, ${d.order_created_at}, ${d.order_updated_at}, ${d.order_closed_at},
+      ${d.order_total_tax_money_amount}, ${d.order_total_tax_money_currency},
+      ${d.order_total_discount_money_amount}, ${d.order_total_discount_money_currency},
+      ${d.order_total_tip_money_amount}, ${d.order_total_tip_money_currency},
+      ${d.order_total_money_amount}, ${d.order_total_money_currency},
+      ${d.order_total_service_charge_money_amount}, ${d.order_total_service_charge_money_currency},
+      ${d.order_total_card_surcharge_money_amount}, ${d.order_total_card_surcharge_money_currency},
+      ${safeStringify(lineItem)}::jsonb, NOW(), NOW()
+    )
+    ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING
+  `
+}
+
 async function processOrderWebhook(webhookData, eventType, webhookMerchantId = null, correlationId = null) {
   try {
     // Extract order_id from webhook payload structure
@@ -2222,6 +2399,13 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         logError("order.api_not_found", { logId: correlationId, orderId })
         return
       }
+
+      // Square SDK v44 returns BigInt for money amounts (e.g. 14000n).
+      // Prisma expects plain Int. Convert all BigInt → Number up front
+      // (same pattern as payment handler at line ~1098).
+      order = JSON.parse(JSON.stringify(order, (k, v) =>
+        typeof v === 'bigint' ? Number(v) : v
+      ))
     } catch (apiError) {
       logError("order.api_error", { logId: correlationId, orderId, error: apiError.message })
       if (apiError.errors) {
@@ -2791,6 +2975,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     }
 
     // 2. Process each line item
+    let lineItemSuccesses = 0
+    let lineItemFailures = 0
     for (const lineItem of lineItems) {
       try {
         // Match this line item's service to the correct technician
@@ -2849,55 +3035,55 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           note: lineItem.note || null,
           modifiers: lineItem.modifiers ? JSON.parse(safeStringify(lineItem.modifiers)) : null,
           
-          // Money fields (use ?? instead of || to preserve 0 values)
-          base_price_money_amount: lineItem.base_price_money?.amount ?? null,
+          // Money fields — explicit Number() for defense against BigInt from Square SDK v44
+          base_price_money_amount: lineItem.base_price_money?.amount != null ? Number(lineItem.base_price_money.amount) : null,
           base_price_money_currency: lineItem.base_price_money?.currency || 'USD',
-          
-          gross_sales_money_amount: lineItem.gross_sales_money?.amount ?? null,
+
+          gross_sales_money_amount: lineItem.gross_sales_money?.amount != null ? Number(lineItem.gross_sales_money.amount) : null,
           gross_sales_money_currency: lineItem.gross_sales_money?.currency || 'USD',
-          
-          total_tax_money_amount: lineItem.total_tax_money?.amount ?? 0,
+
+          total_tax_money_amount: lineItem.total_tax_money?.amount != null ? Number(lineItem.total_tax_money.amount) : 0,
           total_tax_money_currency: lineItem.total_tax_money?.currency || 'USD',
-          
-          total_discount_money_amount: lineItem.total_discount_money?.amount ?? 0,
+
+          total_discount_money_amount: lineItem.total_discount_money?.amount != null ? Number(lineItem.total_discount_money.amount) : 0,
           total_discount_money_currency: lineItem.total_discount_money?.currency || 'USD',
-          
-          total_money_amount: lineItem.total_money?.amount ?? null,
+
+          total_money_amount: lineItem.total_money?.amount != null ? Number(lineItem.total_money.amount) : null,
           total_money_currency: lineItem.total_money?.currency || 'USD',
-          
-          variation_total_price_money_amount: lineItem.variation_total_price_money?.amount ?? null,
+
+          variation_total_price_money_amount: lineItem.variation_total_price_money?.amount != null ? Number(lineItem.variation_total_price_money.amount) : null,
           variation_total_price_money_currency: lineItem.variation_total_price_money?.currency || 'USD',
-          
-          total_service_charge_money_amount: lineItem.total_service_charge_money?.amount ?? 0,
+
+          total_service_charge_money_amount: lineItem.total_service_charge_money?.amount != null ? Number(lineItem.total_service_charge_money.amount) : 0,
           total_service_charge_money_currency: lineItem.total_service_charge_money?.currency || 'USD',
-          
-          total_card_surcharge_money_amount: lineItem.total_card_surcharge_money?.amount ?? 0,
+
+          total_card_surcharge_money_amount: lineItem.total_card_surcharge_money?.amount != null ? Number(lineItem.total_card_surcharge_money.amount) : 0,
           total_card_surcharge_money_currency: lineItem.total_card_surcharge_money?.currency || 'USD',
-          
+
           // Order-level fields
           order_state: order.state || null,
-          order_version: order.version ? Number(order.version) : null, // Cast to Number (safe, Square version is small integer)
+          order_version: order.version ? Number(order.version) : null,
           order_created_at: order.created_at ? new Date(order.created_at) : null,
           order_updated_at: order.updated_at ? new Date(order.updated_at) : null,
           order_closed_at: order.closed_at ? new Date(order.closed_at) : null,
-          
-          // Order totals (use ?? instead of || to preserve 0 values)
-          order_total_tax_money_amount: order.total_tax_money?.amount ?? null,
+
+          // Order totals — explicit Number() for defense against BigInt
+          order_total_tax_money_amount: order.total_tax_money?.amount != null ? Number(order.total_tax_money.amount) : null,
           order_total_tax_money_currency: order.total_tax_money?.currency || 'USD',
-          
-          order_total_discount_money_amount: order.total_discount_money?.amount ?? null,
+
+          order_total_discount_money_amount: order.total_discount_money?.amount != null ? Number(order.total_discount_money.amount) : null,
           order_total_discount_money_currency: order.total_discount_money?.currency || 'USD',
-          
-          order_total_tip_money_amount: order.total_tip_money?.amount ?? null,
+
+          order_total_tip_money_amount: order.total_tip_money?.amount != null ? Number(order.total_tip_money.amount) : null,
           order_total_tip_money_currency: order.total_tip_money?.currency || 'USD',
-          
-          order_total_money_amount: order.total_money?.amount ?? null,
+
+          order_total_money_amount: order.total_money?.amount != null ? Number(order.total_money.amount) : null,
           order_total_money_currency: order.total_money?.currency || 'USD',
-          
-          order_total_service_charge_money_amount: order.total_service_charge_money?.amount ?? null,
+
+          order_total_service_charge_money_amount: order.total_service_charge_money?.amount != null ? Number(order.total_service_charge_money.amount) : null,
           order_total_service_charge_money_currency: order.total_service_charge_money?.currency || 'USD',
-          
-          order_total_card_surcharge_money_amount: order.total_card_surcharge_money?.amount ?? null,
+
+          order_total_card_surcharge_money_amount: order.total_card_surcharge_money?.amount != null ? Number(order.total_card_surcharge_money.amount) : null,
           order_total_card_surcharge_money_currency: order.total_card_surcharge_money?.currency || 'USD',
           
           // Raw JSON - serialize to handle BigInt values from Square API
@@ -2982,44 +3168,42 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               AND uid = ${lineItem.uid}
           `
           
-          // If no rows updated, insert new record
+          // If no rows updated, insert new record via raw SQL (bypasses Prisma client schema cache)
           if (updateResult === 0) {
-            try {
-              await prisma.orderLineItem.create({
-                data: {
-                  ...lineItemData,
-                  id: crypto.randomUUID(),
-                }
-              })
-            } catch (createError) {
-              // If it's a unique constraint error, it means another process 
-              // already created it, which is fine.
-              if (createError.code === 'P2002') {
-                console.log(`ℹ️ Line item ${lineItem.uid} already created by another process`)
-              } else {
-                throw createError
-              }
-            }
+            await insertLineItemRawSQL(prisma, lineItemData, lineItem, organizationId, safeStringify)
           }
         } else {
-          // If no uid, create new record (uid is nullable and unique)
-          await prisma.orderLineItem.create({
-            data: {
-              ...lineItemData,
-              id: crypto.randomUUID(),
-            }
-          })
+          // If no uid, create new record via raw SQL
+          await insertLineItemRawSQL(prisma, lineItemData, lineItem, organizationId, safeStringify)
         }
 
+        lineItemSuccesses++
         console.log(`✅ Saved line item: ${lineItem.uid || 'no-uid'} - ${lineItem.name || 'unnamed'}`)
       } catch (lineItemError) {
-        // Ensure error is serialized safely before logging
-        safeLogError(`❌ Error saving line item ${lineItem.uid || 'no-uid'}:`, lineItemError)
+        lineItemFailures++
+        // Log to structured logger (writes to application_logs) instead of safeLogError (console only)
+        logError('order.line_item_save_failed', {
+          logId: correlationId,
+          orderId,
+          organizationId,
+          uid: lineItem.uid || 'no-uid',
+          name: lineItem.name || 'unnamed',
+          error: lineItemError.message,
+          code: lineItemError.code,
+          technician_id: lineItemData?.technician_id || null,
+          order_uuid: lineItemData?.order_id || null,
+        })
         // Continue processing other line items - don't let one failure stop the rest
       }
     }
 
-    console.log(`✅ Processed ${lineItems.length} line items for order ${orderId}`)
+    if (lineItemFailures > 0) {
+      logError('order.line_items_partial_failure', {
+        logId: correlationId, orderId, organizationId,
+        successes: lineItemSuccesses, failures: lineItemFailures, total: lineItems.length,
+      })
+    }
+    console.log(`✅ Processed ${lineItems.length} line items for order ${orderId} (${lineItemSuccesses} saved, ${lineItemFailures} failed)`)
 
     // 3. Link any unlinked payments for this order (if payment webhook arrived before order webhook)
     // This handles the case where payment was saved with order_id = NULL
