@@ -6262,8 +6262,8 @@ export async function POST(request) {
               let claimed = false
               try {
                 await prisma.$executeRaw`
-                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
-                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
+                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", metadata, "createdAt", "statusAt", organization_id)
+                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
                   WHERE NOT EXISTS (
                     SELECT 1 FROM notification_events
                     WHERE channel = 'SMS'
@@ -6601,8 +6601,8 @@ export async function POST(request) {
               let claimed = false
               try {
                 await prisma.$executeRaw`
-                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
-                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
+                  INSERT INTO notification_events (id, channel, "templateType", status, "customerId", metadata, "createdAt", "statusAt", organization_id)
+                  SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${pCustomerId}, ${JSON.stringify({ referralCode: c.personal_code, paymentId: pId, referralUrl: refUrl })}::jsonb, NOW(), NOW(), ${smsOrgId}::uuid
                   WHERE NOT EXISTS (
                     SELECT 1 FROM notification_events
                     WHERE channel = 'SMS'

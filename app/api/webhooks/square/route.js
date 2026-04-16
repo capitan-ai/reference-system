@@ -728,8 +728,8 @@ export async function POST(request) {
                 let claimed = false
                 try {
                   await prisma.$executeRaw`
-                    INSERT INTO notification_events (id, channel, "templateType", status, "customerId", "organizationId", metadata, "createdAt", "statusAt", organization_id)
-                    SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${customerId}, ${customerId}, ${JSON.stringify({ referralCode: cust.personal_code, paymentId, referralUrl })}::jsonb, NOW(), NOW(), ${webhookOrganizationId}::uuid
+                    INSERT INTO notification_events (id, channel, "templateType", status, "customerId", metadata, "createdAt", "statusAt", organization_id)
+                    SELECT ${notifId}, 'SMS', 'POST_VISIT_REMINDER'::"NotificationTemplateType", 'queued'::"NotificationStatus", ${customerId}, ${JSON.stringify({ referralCode: cust.personal_code, paymentId, referralUrl })}::jsonb, NOW(), NOW(), ${webhookOrganizationId}::uuid
                     WHERE NOT EXISTS (
                       SELECT 1 FROM notification_events
                       WHERE channel = 'SMS'
