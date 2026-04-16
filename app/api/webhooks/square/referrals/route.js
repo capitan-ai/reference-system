@@ -6256,7 +6256,7 @@ export async function POST(request) {
             }
             if (c?.phone_number && c?.personal_code) {
               const pId = paymentData?.id || paymentData?.paymentId
-              const refUrl = c.referral_url || generateReferralUrl(c.personal_code)
+              const refUrl = generateReferralUrl(c.personal_code)
               // Race-safe dedup: claim a slot FIRST via INSERT, then send SMS
               const notifId = `pvr-${pId}-${Date.now()}`
               let claimed = false
@@ -6594,7 +6594,7 @@ export async function POST(request) {
             }
             if (c?.phone_number && c?.personal_code) {
               const pId = paymentData?.id || paymentData?.paymentId
-              const refUrl = c.referral_url || generateReferralUrl(c.personal_code)
+              const refUrl = generateReferralUrl(c.personal_code)
               // Race-safe dedup: claim a slot FIRST via INSERT, then send SMS
               // If another webhook already claimed it, the INSERT fails and we skip
               const notifId = `pvr-${pId}-${Date.now()}`

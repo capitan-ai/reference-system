@@ -722,7 +722,7 @@ export async function POST(request) {
               }
               if (cust?.phone_number && cust?.personal_code) {
                 const paymentId = paymentData.id
-                const referralUrl = cust.referral_url || generateReferralUrl(cust.personal_code)
+                const referralUrl = generateReferralUrl(cust.personal_code)
                 // Race-safe dedup: claim a slot FIRST via atomic INSERT, then send SMS
                 const notifId = `pvr-${paymentId}-${Date.now()}`
                 let claimed = false
@@ -2357,7 +2357,6 @@ async function insertLineItemRawSQL(prisma, d, lineItem, organizationId, safeStr
       ${d.order_total_card_surcharge_money_amount}, ${d.order_total_card_surcharge_money_currency},
       ${safeStringify(lineItem)}::jsonb, NOW(), NOW()
     )
-    ON CONFLICT (uid) WHERE uid IS NOT NULL DO NOTHING
   `
 }
 
