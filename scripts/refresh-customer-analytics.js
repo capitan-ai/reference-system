@@ -227,9 +227,9 @@ SELECT
   fd.first_visit_at, fd.last_visit_at, fd.customer_type, fd.gross_revenue_cents, 
   fd.last_payment_at, NOW(),
   CASE
-    WHEN fd.first_visit_at IS NULL THEN 'NEVER_BOOKED'
+    WHEN fd.first_visit_at IS NULL THEN 'NEVER_VISITED'
     WHEN fd.first_visit_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
-    WHEN fd.last_visit_at >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
+    WHEN fd.last_visit_at >= NOW() - INTERVAL '42 days' THEN 'ACTIVE'
     WHEN fd.last_visit_at >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
     ELSE 'LOST'
   END

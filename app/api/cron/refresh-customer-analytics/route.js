@@ -156,37 +156,25 @@ bookings_agg AS (
   GROUP BY 1,2
 ),
 
--- 5. Collect all unique keys
--- Include canonical_ids from aggregates AND original customer_ids that map to those canonical_ids
--- IMPORTANT: Only include customers that exist in square_existing_clients
+-- 5. Collect all unique keys (canonical IDs only — aliases collapse into their canonical row)
 keys AS (
-  SELECT DISTINCT ba.organization_id, ba.customer_id 
+  SELECT DISTINCT ba.organization_id, ba.customer_id
   FROM bookings_agg ba
-  INNER JOIN square_existing_clients sec 
-    ON ba.organization_id = sec.organization_id 
+  INNER JOIN square_existing_clients sec
+    ON ba.organization_id = sec.organization_id
     AND ba.customer_id = sec.square_customer_id
   UNION
-  SELECT DISTINCT oa.organization_id, oa.customer_id 
+  SELECT DISTINCT oa.organization_id, oa.customer_id
   FROM orders_agg oa
-  INNER JOIN square_existing_clients sec 
-    ON oa.organization_id = sec.organization_id 
+  INNER JOIN square_existing_clients sec
+    ON oa.organization_id = sec.organization_id
     AND oa.customer_id = sec.square_customer_id
   UNION
-  SELECT DISTINCT pa.organization_id, pa.customer_id 
+  SELECT DISTINCT pa.organization_id, pa.customer_id
   FROM payments_agg pa
-  INNER JOIN square_existing_clients sec 
-    ON pa.organization_id = sec.organization_id 
+  INNER JOIN square_existing_clients sec
+    ON pa.organization_id = sec.organization_id
     AND pa.customer_id = sec.square_customer_id
-  UNION
-  -- Include original customer_ids that map to canonical_ids in aggregates
-  SELECT c.organization_id, c.square_customer_id as customer_id 
-  FROM square_existing_clients c
-  INNER JOIN id_mapping m ON c.square_customer_id = m.square_customer_id
-  WHERE m.canonical_id IN (
-    SELECT customer_id FROM bookings_agg
-    UNION SELECT customer_id FROM orders_agg
-    UNION SELECT customer_id FROM payments_agg
-  )
 ),
 
 -- 6. Final calculation
@@ -252,9 +240,9 @@ SELECT
   fd.first_visit_at, fd.last_visit_at, fd.customer_type, fd.gross_revenue_cents, 
   fd.last_payment_at, NOW(),
   CASE
-    WHEN fd.first_visit_at IS NULL THEN 'NEVER_BOOKED'
+    WHEN fd.first_visit_at IS NULL THEN 'NEVER_VISITED'
     WHEN fd.first_visit_at >= NOW() - INTERVAL '30 days' THEN 'NEW'
-    WHEN fd.last_visit_at >= NOW() - INTERVAL '30 days' THEN 'ACTIVE'
+    WHEN fd.last_visit_at >= NOW() - INTERVAL '42 days' THEN 'ACTIVE'
     WHEN fd.last_visit_at >= NOW() - INTERVAL '90 days' THEN 'AT_RISK'
     ELSE 'LOST'
   END
@@ -292,17 +280,12 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
 
     // Validate data consistency
     const validationSQL = `
-      SELECT 
+      SELECT
         COUNT(*) FILTER (
-          WHERE first_booking_at IS NOT NULL 
-          AND last_booking_at IS NOT NULL 
+          WHERE first_booking_at IS NOT NULL
+          AND last_booking_at IS NOT NULL
           AND first_booking_at > last_booking_at
         ) as booking_order_errors,
-        COUNT(*) FILTER (
-          WHERE first_booking_at IS NOT NULL 
-          AND first_visit_at IS NOT NULL 
-          AND first_booking_at > first_visit_at
-        ) as booking_visit_order_errors,
         COUNT(*) FILTER (
           WHERE total_visits < booking_visits
         ) as visits_count_errors
@@ -318,11 +301,9 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
     // Convert BigInt to Number (PostgreSQL returns COUNT as BigInt; JSON.stringify cannot serialize BigInt)
     const validationSafe = {
       booking_order_errors: Number(raw.booking_order_errors ?? 0),
-      booking_visit_order_errors: Number(raw.booking_visit_order_errors ?? 0),
       visits_count_errors: Number(raw.visits_count_errors ?? 0),
     }
     if (validationSafe.booking_order_errors > 0 ||
-        validationSafe.booking_visit_order_errors > 0 ||
         validationSafe.visits_count_errors > 0) {
       console.warn('⚠️ Data validation warnings:', validationSafe)
     }
@@ -330,7 +311,6 @@ ON CONFLICT (organization_id, square_customer_id) DO UPDATE SET
     const duration = Date.now() - startTime
     console.log(`[CRON] Customer analytics refresh completed in ${duration}ms`)
     if (validationSafe.booking_order_errors > 0 ||
-        validationSafe.booking_visit_order_errors > 0 ||
         validationSafe.visits_count_errors > 0) {
       console.warn(`[CRON] Validation warnings after ${duration}ms:`, validationSafe)
     }
