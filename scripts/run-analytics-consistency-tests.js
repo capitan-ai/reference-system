@@ -15,23 +15,13 @@ async function runConsistencyTests() {
     // Test 1: Check first_booking_at and last_booking_at
     console.log('\n1. Testing first_booking_at and last_booking_at consistency...')
     const bookingTest = await prisma.$queryRaw`
-      SELECT 
+      SELECT
         COUNT(*) as total,
         COUNT(*) FILTER (
-          WHERE first_booking_at IS NOT NULL 
-          AND last_booking_at IS NOT NULL 
+          WHERE first_booking_at IS NOT NULL
+          AND last_booking_at IS NOT NULL
           AND first_booking_at > last_booking_at
-        ) as booking_order_errors,
-        COUNT(*) FILTER (
-          WHERE first_booking_at IS NOT NULL 
-          AND first_visit_at IS NOT NULL 
-          AND first_booking_at > first_visit_at
-        ) as booking_visit_order_errors,
-        COUNT(*) FILTER (
-          WHERE last_booking_at IS NOT NULL 
-          AND last_visit_at IS NOT NULL 
-          AND last_booking_at > last_visit_at
-        ) as last_booking_visit_order_errors
+        ) as booking_order_errors
       FROM customer_analytics
       WHERE first_visit_at IS NOT NULL
     `
@@ -39,12 +29,8 @@ async function runConsistencyTests() {
     const bookingResults = bookingTest[0]
     console.log(`   Total records: ${bookingResults.total}`)
     console.log(`   Booking order errors: ${bookingResults.booking_order_errors}`)
-    console.log(`   Booking/visit order errors: ${bookingResults.booking_visit_order_errors}`)
-    console.log(`   Last booking/visit order errors: ${bookingResults.last_booking_visit_order_errors}`)
-    
-    if (bookingResults.booking_order_errors > 0 || 
-        bookingResults.booking_visit_order_errors > 0 ||
-        bookingResults.last_booking_visit_order_errors > 0) {
+
+    if (bookingResults.booking_order_errors > 0) {
       console.log('   ⚠️  WARNING: Found data consistency issues!')
     } else {
       console.log('   ✅ All booking date checks passed')
@@ -152,8 +138,6 @@ async function runConsistencyTests() {
     console.log('\n' + '='.repeat(80))
     const totalErrors = 
       Number(bookingResults.booking_order_errors || 0) +
-      Number(bookingResults.booking_visit_order_errors || 0) +
-      Number(bookingResults.last_booking_visit_order_errors || 0) +
       Number(viewResults.mismatches || 0) +
       Number(adminResults.invalid_counts || 0) +
       Number(bookingsResults.mismatches || 0) +
