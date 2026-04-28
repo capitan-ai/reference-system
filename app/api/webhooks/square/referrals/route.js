@@ -4127,6 +4127,49 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
     `
     
     console.log(`✅ Saved booking ${bookingId} with service ${segment?.service_variation_id || segment?.serviceVariationId || 'N/A'}`)
+
+    // Append client_notes rows for any non-empty customer/seller note on this booking.
+    if (customerId && organizationId) {
+      try {
+        const { captureClientNote } = await import('../../../../../lib/sync/capture-client-note.js')
+        const customerNoteText = bookingData.customer_note || bookingData.customerNote
+        const sellerNoteText = bookingData.seller_note || bookingData.sellerNote
+        if (customerNoteText || sellerNoteText) {
+          const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+          const squareIds = segments.map((s) => s.service_variation_id || s.serviceVariationId).filter(Boolean)
+          let serviceNames = []
+          if (squareIds.length > 0) {
+            const svs = await prisma.serviceVariation.findMany({
+              where: { organization_id: organizationId, square_variation_id: { in: squareIds } },
+              select: { square_variation_id: true, name: true, service_name: true },
+            })
+            const nameById = new Map(svs.map((sv) => [sv.square_variation_id, sv.name || sv.service_name || null]))
+            serviceNames = squareIds.map((id) => nameById.get(id)).filter(Boolean)
+          }
+          const firstSeg = segments[0] || {}
+          const baseNote = {
+            organizationId,
+            squareCustomerId: customerId,
+            sourceId: bookingId,
+            occurredAt: bookingData.start_at || bookingData.startAt || new Date(),
+            status: bookingData.status || null,
+            serviceNames,
+            staffMemberId: firstSeg.team_member_id || firstSeg.teamMemberId || null,
+            locationId: bookingData.location_id || bookingData.locationId || null,
+            rawContext: bookingData,
+            squareUpdatedAt: bookingData.updated_at || bookingData.updatedAt || null,
+          }
+          if (customerNoteText) {
+            await captureClientNote({ ...baseNote, source: 'booking_customer_note', text: customerNoteText })
+          }
+          if (sellerNoteText) {
+            await captureClientNote({ ...baseNote, source: 'booking_seller_note', text: sellerNoteText })
+          }
+        }
+      } catch (noteError) {
+        console.warn(`⚠️ Failed to capture booking notes for ${bookingId}:`, noteError.message)
+      }
+    }
   } catch (error) {
     console.error(`❌ Error saving booking:`, error.message)
     // Don't throw - allow referral processing to continue
@@ -4638,6 +4681,47 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
 
     const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, bookingData.merchant_id || bookingData.merchantId || null, existingBookings[0]?.organization_id)
     await upsertBookingSegments(headerBookingId, bookingData, existingBookings[0]?.organization_id)
+
+    // Append client_notes rows for any non-empty customer/seller note on this booking.
+    const noteOrgId = existingBookings[0]?.organization_id
+    if (customerId && noteOrgId && (customerNote || sellerNote)) {
+      try {
+        const { captureClientNote } = await import('../../../../../lib/sync/capture-client-note.js')
+        let serviceNames = []
+        const squareIds = appointmentSegments
+          .map((s) => s.service_variation_id || s.serviceVariationId)
+          .filter(Boolean)
+        if (squareIds.length > 0) {
+          const svs = await prisma.serviceVariation.findMany({
+            where: { organization_id: noteOrgId, square_variation_id: { in: squareIds } },
+            select: { square_variation_id: true, name: true, service_name: true },
+          })
+          const nameById = new Map(svs.map((sv) => [sv.square_variation_id, sv.name || sv.service_name || null]))
+          serviceNames = squareIds.map((id) => nameById.get(id)).filter(Boolean)
+        }
+        const firstSeg = appointmentSegments[0] || {}
+        const baseNote = {
+          organizationId: noteOrgId,
+          squareCustomerId: customerId,
+          sourceId: baseBookingId,
+          occurredAt: startAt || updatedAt,
+          status,
+          serviceNames,
+          staffMemberId: firstSeg.team_member_id || firstSeg.teamMemberId || null,
+          locationId: squareLocationId,
+          rawContext: bookingData,
+          squareUpdatedAt: updatedAt,
+        }
+        if (customerNote) {
+          await captureClientNote({ ...baseNote, source: 'booking_customer_note', text: customerNote })
+        }
+        if (sellerNote) {
+          await captureClientNote({ ...baseNote, source: 'booking_seller_note', text: sellerNote })
+        }
+      } catch (noteError) {
+        console.warn(`⚠️ Failed to capture booking notes for ${baseBookingId}:`, noteError.message)
+      }
+    }
 
     console.log(`✅ Successfully processed booking.updated for ${baseBookingId}`)
       } catch (error) {

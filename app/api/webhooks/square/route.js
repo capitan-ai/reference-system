@@ -1829,6 +1829,28 @@ export async function savePaymentToDatabase(paymentData, eventType, squareEventI
         console.log(`✅ Copied booking_id from order to payment`)
       }
     }
+
+    // Append client_notes row for non-empty payment.note
+    if (customerId && organizationId && (paymentData.note || paymentData.Note)) {
+      try {
+        const { captureClientNote } = await import('../../../../lib/sync/capture-client-note.js')
+        await captureClientNote({
+          organizationId,
+          squareCustomerId: customerId,
+          source: 'payment_note',
+          sourceId: paymentId,
+          text: paymentData.note || paymentData.Note,
+          occurredAt: paymentData.created_at || paymentData.createdAt || new Date(),
+          status: paymentData.status || null,
+          amountCents: Number((paymentData.amount_money || paymentData.amountMoney || {}).amount) || null,
+          locationId,
+          rawContext: paymentData,
+          squareUpdatedAt: paymentData.updated_at || paymentData.updatedAt || null,
+        })
+      } catch (noteError) {
+        console.warn(`⚠️ Failed to capture payment.note for ${paymentId}:`, noteError.message)
+      }
+    }
   } catch (error) {
     console.error(`❌ Failed to save payment to database:`, error.message)
     if (error.stack) {
@@ -3108,7 +3130,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           // Try to update existing record first
           const updateResult = await prisma.$executeRaw`
             UPDATE order_line_items
-            SET 
+            SET
+              order_id = ${lineItemData.order_id}::uuid,
               location_id = ${lineItemData.location_id},
               customer_id = ${lineItemData.customer_id},
               technician_id = ${lineItemData.technician_id}::uuid,
@@ -3250,7 +3273,52 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
     // 5. Update order_line_items with technician_id and administrator_id from booking
     // (Payment might not exist yet, so this will try again later via payment webhook)
     await updateOrderLineItemsWithTechnician(orderId)
-    
+
+    // 6. Append client_notes rows for any non-empty order.note or per-line-item notes.
+    // Idempotent — same text on the same (order, lineItemUid) is a no-op.
+    if (customerId && organizationId) {
+      try {
+        const { captureClientNote } = await import('../../../../lib/sync/capture-client-note.js')
+        const baseLineItemServiceNames = (order.line_items || order.lineItems || [])
+          .map((li) => li.name)
+          .filter(Boolean)
+        const orderTotalCents = Number((order.total_money || order.totalMoney || {}).amount) || null
+        const orderOccurredAt = order.created_at || order.createdAt || new Date()
+        const baseOrder = {
+          organizationId,
+          squareCustomerId: customerId,
+          sourceId: orderId,
+          occurredAt: orderOccurredAt,
+          status: order.state || null,
+          rawContext: order,
+          squareUpdatedAt: order.updated_at || order.updatedAt || null,
+          locationId: finalLocationId,
+        }
+        if (order.note) {
+          await captureClientNote({
+            ...baseOrder,
+            source: 'order_note',
+            text: order.note,
+            amountCents: orderTotalCents,
+            serviceNames: baseLineItemServiceNames,
+          })
+        }
+        for (const li of (order.line_items || order.lineItems || [])) {
+          if (!li?.note) continue
+          await captureClientNote({
+            ...baseOrder,
+            source: 'order_line_item_note',
+            sourceLineItemUid: li.uid || null,
+            text: li.note,
+            amountCents: Number((li.total_money || li.totalMoney || {}).amount) || null,
+            serviceNames: li.name ? [li.name] : [],
+          })
+        }
+      } catch (noteError) {
+        console.warn(`⚠️ Failed to capture order/line-item notes for ${orderId}:`, noteError.message)
+      }
+    }
+
   } catch (error) {
     safeLogError(`❌ Error processing order webhook (${eventType}):`, error)
     // Re-throw a clean error without BigInt values so Next.js can serialize it

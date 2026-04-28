@@ -18,9 +18,31 @@ function cleanValue(val) {
 
 // Helper to safely stringify objects with BigInt values
 function safeStringify(value) {
-  return JSON.stringify(value, (_key, val) => 
+  return JSON.stringify(value, (_key, val) =>
     typeof val === 'bigint' ? val.toString() : val
   )
+}
+
+// Capture customer.note (the persistent note on the customer's Square card) into client_notes.
+// No-op for empty notes; idempotent on identical text.
+async function captureCustomerCardNote(organizationId, squareCustomerId, customerData) {
+  const noteText = customerData?.note || customerData?.Note
+  if (!noteText || !String(noteText).trim()) return
+  try {
+    const { captureClientNote } = await import('../../../../lib/sync/capture-client-note.js')
+    await captureClientNote({
+      organizationId,
+      squareCustomerId,
+      source: 'customer_card_note',
+      sourceId: squareCustomerId,
+      text: noteText,
+      occurredAt: customerData.updated_at || customerData.updatedAt || customerData.created_at || customerData.createdAt || new Date(),
+      rawContext: customerData,
+      squareUpdatedAt: customerData.updated_at || customerData.updatedAt || null,
+    })
+  } catch (err) {
+    console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Failed to capture customer.note for ${squareCustomerId}:`, err.message)
+  }
 }
 
 async function upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData) {
@@ -261,6 +283,48 @@ export async function processBookingCreated(payload, eventId, eventCreatedAt) {
 
     await upsertBookingSegmentsFromPayload(bookingId, organizationId, bookingData)
 
+    // Append client_notes rows for any non-empty customer_note / seller_note on this booking.
+    // Idempotent (unique index on text_hash) — re-delivered webhooks are no-ops.
+    try {
+      const { captureClientNote } = await import('../../../../lib/sync/capture-client-note.js')
+      const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
+      const squareServiceVariationIds = segments
+        .map((s) => s.service_variation_id || s.serviceVariationId)
+        .filter(Boolean)
+      let serviceNames = []
+      if (squareServiceVariationIds.length > 0) {
+        const svs = await prisma.serviceVariation.findMany({
+          where: { organization_id: organizationId, square_variation_id: { in: squareServiceVariationIds } },
+          select: { square_variation_id: true, name: true, service_name: true },
+        })
+        const nameById = new Map(svs.map((sv) => [sv.square_variation_id, sv.name || sv.service_name || null]))
+        serviceNames = squareServiceVariationIds.map((id) => nameById.get(id)).filter(Boolean)
+      }
+      const baseNote = {
+        organizationId,
+        squareCustomerId: customerId,
+        sourceId: bookingId,
+        occurredAt: bookingStartAt,
+        status,
+        amountCents: null,
+        serviceNames,
+        staffMemberId: technicianId || null,
+        locationId,
+        rawContext: bookingData,
+        squareUpdatedAt: bookingUpdatedAt,
+      }
+      const customerNoteText = bookingData.customer_note || bookingData.customerNote
+      const sellerNoteText = bookingData.seller_note || bookingData.sellerNote
+      if (customerId && customerNoteText) {
+        await captureClientNote({ ...baseNote, source: 'booking_customer_note', text: customerNoteText })
+      }
+      if (customerId && sellerNoteText) {
+        await captureClientNote({ ...baseNote, source: 'booking_seller_note', text: sellerNoteText })
+      }
+    } catch (noteError) {
+      console.warn(`[WEBHOOK-PROCESSOR] ⚠️ Failed to capture booking notes for ${bookingId}:`, noteError.message)
+    }
+
     // NEW: Create financial snapshot for Master Economics
     try {
       const { upsertBookingSnapshot } = await import('../../../../lib/workers/master-snapshot-service.js')
@@ -383,6 +447,8 @@ export async function processCustomerCreated(payload, eventId, eventCreatedAt) {
       await consolidateMergedCustomer(organizationId, customerId, emailAddress, phoneNumber)
     }
 
+    await captureCustomerCardNote(organizationId, customerId, customerData)
+
     console.log(`[WEBHOOK-PROCESSOR] ✅ Saved customer ${customerId}`)
   } catch (error) {
     console.error(`[WEBHOOK-PROCESSOR] ❌ Error saving customer ${customerId}:`, error.message)
@@ -448,6 +514,8 @@ export async function processCustomerUpdated(payload, eventId, eventCreatedAt) {
       console.log(`[WEBHOOK-PROCESSOR] 🔀 Merged customer detected via update: ${customerId}`)
       await consolidateMergedCustomer(organizationId, customerId, emailAddress, phoneNumber)
     }
+
+    await captureCustomerCardNote(organizationId, customerId, customerData)
 
     console.log(`[WEBHOOK-PROCESSOR] ✅ Updated customer ${customerId}`)
   } catch (error) {
