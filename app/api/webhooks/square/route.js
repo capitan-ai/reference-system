@@ -3187,9 +3187,10 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
               raw_json = COALESCE(${safeStringify(lineItem)}::jsonb, order_line_items.raw_json),
               updated_at = NOW()
             WHERE organization_id = ${organizationId}::uuid
+              AND order_id = ${lineItemData.order_id}::uuid
               AND uid = ${lineItem.uid}
           `
-          
+
           // If no rows updated, insert new record via raw SQL (bypasses Prisma client schema cache)
           if (updateResult === 0) {
             await insertLineItemRawSQL(prisma, lineItemData, lineItem, organizationId, safeStringify)
