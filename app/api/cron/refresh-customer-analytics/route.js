@@ -33,7 +33,9 @@ async function handle(request) {
 
   try {
     const isFull = url.searchParams.get('mode') === 'full' || url.searchParams.get('full') === 'true'
-    const bookingsDateFilter = isFull ? "" : "AND b_inner.start_at >= now() - interval '90 days'"
+    // first_visit_at / first_booking_at / last_booking_at / b_count are inherently all-time
+    // aggregates — never window them, even in incremental mode. Other money/recency aggregates
+    // keep their 90-day window for compute economy.
     const paymentsDateFilter = isFull ? "" : "AND p_inner.created_at >= now() - interval '90 days'"
     const ordersDateFilter = isFull ? "" : "AND o_inner.created_at >= now() - interval '90 days'"
 
@@ -152,7 +154,6 @@ bookings_agg AS (
   FROM bookings b_inner
   LEFT JOIN id_mapping m ON b_inner.customer_id = m.square_customer_id
   WHERE b_inner.customer_id IS NOT NULL
-    ${bookingsDateFilter}
   GROUP BY 1,2
 ),
 
@@ -187,7 +188,7 @@ final_data AS (
     c.phone_number,
     b.first_b AS first_booking_at,  -- Только букинги (ACCEPTED/COMPLETED)
     b.last_b AS last_booking_at,    -- Только букинги (ACCEPTED/COMPLETED)
-    CASE WHEN b.first_b IS NULL THEN oa.first_any_o WHEN oa.first_any_o IS NULL THEN b.first_b ELSE LEAST(b.first_b, oa.first_any_o) END AS first_visit_at,
+    b.first_b AS first_visit_at,    -- bookings-only per definition; retail-only customers get NULL
     CASE WHEN b.last_b IS NULL THEN oa.last_any_o WHEN oa.last_any_o IS NULL THEN b.last_b ELSE GREATEST(b.last_b, oa.last_any_o) END AS last_visit_at,
     (COALESCE(b.b_count,0) + COALESCE(oa.service_order_count,0) + COALESCE(oa.training_order_count,0)) AS total_visits,
     COALESCE(b.b_count,0) AS booking_visits,
