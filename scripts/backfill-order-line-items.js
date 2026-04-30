@@ -264,7 +264,9 @@ async function main() {
                 order_total_card_surcharge_money_currency = ${oCur('total_card_surcharge_money')},
                 raw_json = ${safeStringify(liSafe)}::jsonb,
                 updated_at = NOW()
-              WHERE organization_id = ${ORG_ID}::uuid AND uid = ${uid}
+              WHERE organization_id = ${ORG_ID}::uuid
+                AND order_id = ${row.order_uuid}::uuid
+                AND uid = ${uid}
             `
           }
 
