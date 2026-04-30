@@ -3204,7 +3204,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
         console.log(`✅ Saved line item: ${lineItem.uid || 'no-uid'} - ${lineItem.name || 'unnamed'}`)
       } catch (lineItemError) {
         lineItemFailures++
-        // Log to structured logger (writes to application_logs) instead of safeLogError (console only)
+        // lineItemData is block-scoped to the try above; rederive logging fields from outer scope.
+        const svcId = lineItem.catalog_object_id || null
         logError('order.line_item_save_failed', {
           logId: correlationId,
           orderId,
@@ -3213,8 +3214,8 @@ async function processOrderWebhook(webhookData, eventType, webhookMerchantId = n
           name: lineItem.name || 'unnamed',
           error: lineItemError.message,
           code: lineItemError.code,
-          technician_id: lineItemData?.technician_id || null,
-          order_uuid: lineItemData?.order_id || null,
+          technician_id: svcId ? (serviceTechnicianMap.get(svcId) || null) : null,
+          order_uuid: orderUuid || null,
         })
         // Continue processing other line items - don't let one failure stop the rest
       }

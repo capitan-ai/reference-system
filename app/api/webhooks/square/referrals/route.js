@@ -3837,13 +3837,14 @@ async function processPaymentCompletion(paymentData, runContext = {}) {
  * If segment is provided, creates a booking record for that specific service
  * For multi-service bookings, creates multiple records with unique IDs
  */
-async function saveBookingToDatabase(bookingData, segment, customerId, merchantId = null, organizationId = null) {
+async function saveBookingToDatabase(bookingData, _segment, customerId, merchantId = null, organizationId = null) {
+  // _segment is intentionally ignored — bookings is now strictly one row per
+  // Square booking (canonical id). Per-service fields are derived from
+  // appointment_segments[0]; the full per-segment list lives in booking_segments.
   try {
-    const baseBookingId = bookingData.id || bookingData.bookingId
-    const bookingId = segment 
-      ? `${baseBookingId}-${segment.service_variation_id || segment.serviceVariationId || 'unknown'}` // Unique ID per service
-      : baseBookingId
-    
+    const bookingId = bookingData.id || bookingData.bookingId
+    const firstSegment = (bookingData.appointment_segments || bookingData.appointmentSegments || [])[0] || null
+
     const creatorDetails = bookingData.creator_details || bookingData.creatorDetails || {}
     const address = bookingData.address || {}
     
@@ -3991,9 +3992,9 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       return
     }
     
-    // Resolve service_variation_id from Square ID to internal UUID
+    // Resolve service_variation_id from Square ID to internal UUID (from segment[0])
     let serviceVariationUuid = null
-    const squareServiceVariationId = segment?.service_variation_id || segment?.serviceVariationId
+    const squareServiceVariationId = firstSegment?.service_variation_id || firstSegment?.serviceVariationId
     if (squareServiceVariationId && finalOrganizationId) {
       try {
         const svRecord = await prisma.$queryRaw`
@@ -4013,9 +4014,9 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
       }
     }
     
-    // Resolve technician_id from Square ID to internal UUID
+    // Resolve technician_id from Square ID to internal UUID (from segment[0])
     let technicianUuid = null
-    const squareTeamMemberId = segment?.team_member_id || segment?.teamMemberId
+    const squareTeamMemberId = firstSegment?.team_member_id || firstSegment?.teamMemberId
     if (squareTeamMemberId && finalOrganizationId) {
       try {
         const tmRecord = await prisma.$queryRaw`
@@ -4098,11 +4099,11 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         ${address.administrative_district_level_1 || address.administrativeDistrictLevel1 || null},
         ${address.postal_code || address.postalCode || null},
         ${serviceVariationUuid ? Prisma.sql`${serviceVariationUuid}::uuid` : Prisma.sql`NULL`},
-        ${segment?.service_variation_version || segment?.serviceVariationVersion ? BigInt(segment.service_variation_version || segment.serviceVariationVersion) : null},
-        ${segment?.duration_minutes || segment?.durationMinutes || null},
-        ${segment?.intermission_minutes || segment?.intermissionMinutes || 0},
+        ${firstSegment?.service_variation_version || firstSegment?.serviceVariationVersion ? BigInt(firstSegment.service_variation_version || firstSegment.serviceVariationVersion) : null},
+        ${firstSegment?.duration_minutes || firstSegment?.durationMinutes || null},
+        ${firstSegment?.intermission_minutes || firstSegment?.intermissionMinutes || 0},
         ${technicianUuid ? Prisma.sql`${technicianUuid}::uuid` : Prisma.sql`NULL`},
-        ${segment?.any_team_member ?? segment?.anyTeamMember ?? false},
+        ${firstSegment?.any_team_member ?? firstSegment?.anyTeamMember ?? false},
         ${bookingData.customer_note || bookingData.customerNote || null},
         ${bookingData.seller_note || bookingData.sellerNote || null},
         ${finalMerchantId},
@@ -4126,7 +4127,7 @@ async function saveBookingToDatabase(bookingData, segment, customerId, merchantI
         creator_type = COALESCE(bookings.creator_type, EXCLUDED.creator_type)
     `
     
-    console.log(`✅ Saved booking ${bookingId} with service ${segment?.service_variation_id || segment?.serviceVariationId || 'N/A'}`)
+    console.log(`✅ Saved booking ${bookingId} (segment[0] service: ${firstSegment?.service_variation_id || firstSegment?.serviceVariationId || 'N/A'})`)
 
     // Append client_notes rows for any non-empty customer/seller note on this booking.
     if (customerId && organizationId) {
@@ -4350,12 +4351,12 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
     const transitionTimeMinutes = bookingData.transition_time_minutes ?? bookingData.transitionTimeMinutes ?? null
     const locationType = bookingData.location_type || bookingData.locationType || null
 
-    // Find existing booking(s) - there may be multiple records for multi-service bookings
+    // Find existing booking — one canonical row per Square booking.
     const existingBookings = await prisma.$queryRaw`
       SELECT id, organization_id, booking_id, service_variation_id, technician_id, administrator_id, version, status
       FROM bookings
-      WHERE booking_id LIKE ${`${baseBookingId}%`}
-      ORDER BY created_at ASC
+      WHERE booking_id = ${baseBookingId}
+      LIMIT 1
     `
 
     if (!existingBookings || existingBookings.length === 0) {
@@ -4427,31 +4428,17 @@ async function processBookingUpdated(bookingData, eventId = null, eventCreatedAt
           return
         }
         
-      // Save booking using the same logic as processBookingCreated
-      const segments = bookingData.appointment_segments || bookingData.appointmentSegments || []
-      
-      if (segments.length === 0) {
-        // No services, save booking as-is
-        await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
-      } else {
-        // Multiple services - create one booking per service
-        for (const segment of segments) {
-          await saveBookingToDatabase(bookingData, segment, customerId, merchantId, organizationId)
-        }
-        console.log(`✅ Created ${segments.length} booking record(s) from booking.updated webhook`)
-      }
-
-      // After creating the booking records, we should return early because we've already done the work
-      // and processBookingUpdated would otherwise try to update the records we just created.
+      // Create one canonical bookings row + per-segment booking_segments rows.
+      await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
       const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
       await upsertBookingSegments(headerBookingId, bookingData, organizationId)
-      
+
       console.log(`✅ Successfully created booking ${baseBookingId} from booking.updated webhook`)
       return
     }
 
-    console.log(`✅ Found ${existingBookings.length} booking record(s) for ${baseBookingId}`)
-    // Update each booking record (for multi-service bookings)
+    console.log(`✅ Found booking record for ${baseBookingId}`)
+    // One canonical row per Square booking — single iteration.
     for (const existingBooking of existingBookings) {
       const organizationId = existingBooking.organization_id
       const bookingUuid = existingBooking.id
@@ -4820,16 +4807,9 @@ async function processBookingCreated(bookingData, runContext = {}) {
       throw new Error(`Cannot process booking: organization_id is required but could not be resolved. Booking ID: ${bookingId}, Customer ID: ${customerId}, Location ID: ${bookingData.location_id || bookingData.locationId || 'missing'}`)
     }
     
-    if (segments.length === 0) {
-      // No services, save booking as-is
-      await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
-    } else {
-      // Multiple services - create one booking per service
-      for (const segment of segments) {
-        await saveBookingToDatabase(bookingData, segment, customerId, merchantId, organizationId)
-      }
-      console.log(`✅ Saved ${segments.length} booking record(s) for booking ${bookingId}`)
-    }
+    // One canonical row per Square booking. Per-service detail is upserted
+    // into booking_segments below.
+    await saveBookingToDatabase(bookingData, null, customerId, merchantId, organizationId)
 
     const headerBookingId = await ensureBookingHeaderId(bookingData, customerId, merchantId, organizationId)
     await upsertBookingSegments(headerBookingId, bookingData, organizationId)
