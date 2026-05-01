@@ -376,22 +376,26 @@
 
       <div class="title-block">
         <div class="title-eyebrow">STAFF INTAKE · STEP 1 OF 2</div>
-        <div class="title">Customer details</div>
-        <div class="subtitle">Please fill in the customer's information before handing the device over for their feedback.</div>
+        <div class="title">Find the customer</div>
+        <div class="subtitle">Select yourself, then enter the client's phone number to pull their details from today's bookings.</div>
       </div>
 
-      <!-- Customer name (from lookup or manual) -->
+      <!-- Administrator selector (pills from DB) — FIRST -->
       <div class="q">
-        <div class="q-label"><span class="q-num">01</span>Customer name</div>
-        <input class="field" type="text" name="customer_name" id="customerName" placeholder="First name and last initial" required autocomplete="off">
+        <div class="q-label"><span class="q-num">01</span>Who are you today?
+          <span class="q-hint">Select your name from the team</span>
+        </div>
+        <div class="admin-pills" id="adminPills">
+          <div class="lookup-loading">Loading administrators...</div>
+        </div>
       </div>
 
       <!-- Phone number — triggers lookup -->
       <div class="q">
-        <div class="q-label"><span class="q-num">02</span>Phone number
-          <span class="q-hint">Lookup bookings from today</span>
+        <div class="q-label"><span class="q-num">02</span>Client phone number
+          <span class="q-hint">We'll find their booking automatically</span>
         </div>
-        <input class="field" type="tel" name="customer_phone" id="customerPhone" placeholder="(415) 000-0000" required autocomplete="off">
+        <input class="field" type="tel" name="customer_phone" id="customerPhone" placeholder="(415) 000-0000" autocomplete="off">
       </div>
 
       <!-- Lookup zone — hidden, reveals on 10-digit phone -->
@@ -402,18 +406,14 @@
         </div>
       </div>
 
-      <!-- Administrator selector (pills from DB) -->
-      <div class="q">
-        <div class="q-label"><span class="q-num">03</span>Who are you today?
-          <span class="q-hint">Select the front desk person handling intake</span>
-        </div>
-        <div class="admin-pills" id="adminPills">
-          <div class="lookup-loading">Loading administrators...</div>
-        </div>
+      <!-- Customer name (from lookup) — hidden until found -->
+      <div class="q" id="customerNameSection" style="display:none">
+        <div class="q-label"><span class="q-num">03</span>Customer name</div>
+        <input class="field" type="text" name="customer_name" id="customerName" placeholder="First name and last initial" required autocomplete="off">
       </div>
 
-      <!-- Nail technician (from booking, or manual override) -->
-      <div class="q">
+      <!-- Nail technician (from booking, or manual override) — hidden until found -->
+      <div class="q" id="masterNameSection" style="display:none">
         <div class="q-label"><span class="q-num">04</span>Nail technician
           <span class="q-hint">Master who served the customer today</span>
         </div>
@@ -421,7 +421,7 @@
       </div>
 
       <!-- Date — auto -->
-      <div class="q">
+      <div class="q" id="serviceDateSection" style="display:none">
         <div class="q-label"><span class="q-num">05</span>Service date</div>
         <input class="field" type="date" name="service_date" id="serviceDate" required>
       </div>
@@ -942,6 +942,9 @@
       session.masterName = '';
       session.masterId = null;
       session.bookingId = null;
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
       return;
     }
 
@@ -955,6 +958,9 @@
       session.masterName = '';
       session.masterId = null;
       session.bookingId = null;
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
       return;
     }
 
@@ -975,6 +981,9 @@
         session.masterId = booking.technician_id;
         session.bookingId = booking.booking_id;
         document.getElementById('customerName').value = fullName;
+        document.getElementById('customerNameSection').style.display = 'block';
+        document.getElementById('masterNameSection').style.display = 'block';
+        document.getElementById('serviceDateSection').style.display = 'block';
 
         // Auto-highlight admin pill if it matches
         highlightAdminPillByTechName(techName);
@@ -1012,6 +1021,9 @@
           session.masterId = techId;
           session.bookingId = booking.booking_id;
           document.getElementById('customerName').value = fullName;
+          document.getElementById('customerNameSection').style.display = 'block';
+          document.getElementById('masterNameSection').style.display = 'block';
+          document.getElementById('serviceDateSection').style.display = 'block';
 
           // Highlight selection
           document.querySelectorAll('.segment-option').forEach(o => o.classList.remove('selected'));
@@ -1069,6 +1081,9 @@
               session.masterId = opt.dataset.segTechId;
               session.bookingId = bookingId;
               document.getElementById('customerName').value = fullName;
+              document.getElementById('customerNameSection').style.display = 'block';
+              document.getElementById('masterNameSection').style.display = 'block';
+              document.getElementById('serviceDateSection').style.display = 'block';
               highlightAdminPillByTechName(opt.dataset.segTechName);
             });
           });
@@ -1081,6 +1096,9 @@
           session.masterId = techId;
           session.bookingId = bookingId;
           document.getElementById('customerName').value = fullName;
+          document.getElementById('customerNameSection').style.display = 'block';
+          document.getElementById('masterNameSection').style.display = 'block';
+          document.getElementById('serviceDateSection').style.display = 'block';
 
           document.querySelectorAll('.booking-card').forEach(c => c.classList.remove('selected'));
           card.classList.add('selected');
@@ -1112,7 +1130,11 @@
     session.masterName = document.getElementById('masterName').value.trim();
     session.serviceDate = document.getElementById('serviceDate').value;
 
-    // Validate: customer name and master name required
+    // Validate: admin selected, customer name and master name required
+    if (!session.adminId) {
+      alert('Please select who you are');
+      return;
+    }
     if (!session.customerName || !session.masterName) {
       alert('Please fill in customer name and master name');
       return;
@@ -1125,6 +1147,17 @@
     document.getElementById('adminForm').style.display = 'none';
     document.getElementById('feedbackForm').style.display = 'block';
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  // Phone input handler — show fields only after successful lookup
+  phoneInput.addEventListener('change', e => {
+    const phone10 = e.target.value.replace(/\D/g, '').slice(-10);
+    if (phone10.length === 10 && session.customerName) {
+      // Only show remaining fields if lookup succeeded
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
+    }
   });
 
   // Load admins on page load
