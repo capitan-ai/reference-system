@@ -16,7 +16,7 @@ export async function GET() {
       where: {
         organization_id: orgId,
         role: {
-          in: ['ADMIN', 'MANAGER', 'TOP_MASTER'],
+          in: ['ADMIN', 'TOP_MASTER', 'MASTER'],
         },
         status: 'ACTIVE',
         is_system: false,
