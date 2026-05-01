@@ -27,8 +27,6 @@ function normalizePhone(raw) {
   return String(raw).replace(/\D/g, '').slice(-10)
 }
 
-const QUALITY_VALUES = new Set(['very', 'satisfied', 'better'])
-const CARED_VALUES = new Set(['yes', 'mostly', 'no'])
 const AWARENESS_VALUES = new Set(['yes', 'no'])
 const SOURCE_VALUES = new Set(['google', 'instagram', 'influencer', 'friend', 'walkin', 'tiktok'])
 const ISSUE_VALUES = new Set(['quality', 'cleanliness', 'atmosphere', 'comfort', 'nothing'])
@@ -122,11 +120,8 @@ export async function POST(request) {
       booking_id: bookingId,
       service_date: serviceDate,
       rating,
-      quality: pickEnum(body.quality, QUALITY_VALUES),
-      cared: pickEnum(body.cared, CARED_VALUES),
       source: pickEnum(body.source, SOURCE_VALUES),
       improve_text: body.improve ? String(body.improve).trim() || null : null,
-      concern_detail: body.concern_detail ? String(body.concern_detail).trim() || null : null,
       issues,
       awareness: pickEnum(body.awareness, AWARENESS_VALUES),
       raw_payload: body

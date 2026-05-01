@@ -486,43 +486,17 @@
         <input type="hidden" name="rating" id="ratingInput">
       </div>
 
-      <!-- 3. Service quality satisfaction -->
+      <!-- 3. Open improvement -->
       <div class="q">
-        <div class="q-label"><span class="q-num">03</span>How satisfied were you with your service quality?</div>
-        <div class="options" style="grid-template-columns:1fr 1fr 1fr">
-          <label class="opt"><input type="radio" name="quality" value="very" class="quality-rb"><span class="dot"></span><span class="opt-text">Very satisfied</span></label>
-          <label class="opt"><input type="radio" name="quality" value="satisfied" class="quality-rb"><span class="dot"></span><span class="opt-text">Satisfied</span></label>
-          <label class="opt"><input type="radio" name="quality" value="better" class="quality-rb"><span class="dot"></span><span class="opt-text">Could be better</span></label>
-        </div>
-      </div>
-
-      <!-- 4. Welcomed & cared for -->
-      <div class="q">
-        <div class="q-label"><span class="q-num">04</span>Did you feel welcomed and cared for during your visit?</div>
-        <div class="options" style="grid-template-columns:1fr 1fr 1fr">
-          <label class="opt"><input type="radio" name="cared" value="yes" class="cared-rb"><span class="dot"></span><span class="opt-text">Yes</span></label>
-          <label class="opt"><input type="radio" name="cared" value="mostly" class="cared-rb"><span class="dot"></span><span class="opt-text">Mostly</span></label>
-          <label class="opt"><input type="radio" name="cared" value="no" class="cared-rb"><span class="dot"></span><span class="opt-text">No</span></label>
-        </div>
-      </div>
-
-      <!-- Conditional concern block — appears for low ratings -->
-      <div class="concern-block" id="concernBlock">
-        <div class="concern-title">We're truly sorry your visit fell short. Please tell us exactly what happened — every word will be read by the owner.</div>
-        <textarea class="field" name="concern_detail" placeholder="What went wrong, who was involved, and how can we make it right..."></textarea>
-      </div>
-
-      <!-- 5. Open improvement -->
-      <div class="q">
-        <div class="q-label"><span class="q-num">05</span>Is there anything we could improve?
+        <div class="q-label"><span class="q-num">03</span>Is there anything we could improve?
           <span class="q-hint">A short note is plenty — even one word helps</span>
         </div>
         <textarea class="field" name="improve" placeholder="What we could do better next time..."></textarea>
       </div>
 
-      <!-- 6. Did anything bother you -->
+      <!-- 4. Did anything bother you -->
       <div class="q">
-        <div class="q-label"><span class="q-num">06</span>Did anything bother you today?
+        <div class="q-label"><span class="q-num">04</span>Did anything bother you today?
           <span class="q-hint">Tick anything that didn't feel right</span>
         </div>
         <div class="options">
@@ -538,7 +512,7 @@
 
       <!-- 7. Awareness question -->
       <div class="q">
-        <div class="q-label"><span class="q-num">07</span>Do you already know about our referral program?</div>
+        <div class="q-label"><span class="q-num">05</span>Do you already know about our referral program?</div>
         <div class="options" style="grid-template-columns:1fr 1fr">
           <label class="opt"><input type="radio" name="awareness" value="yes"><span class="dot"></span><span class="opt-text">Yes</span></label>
           <label class="opt"><input type="radio" name="awareness" value="no"><span class="dot"></span><span class="opt-text">No</span></label>
@@ -1183,15 +1157,8 @@
       ratingBtns.forEach(x => x.classList.remove('active'));
       b.classList.add('active');
       ratingInput.value = b.dataset.val;
-      updateConcernBlock();
     });
   });
-
-  // Quality + Cared radios trigger concern block check
-  const qualityRbs = document.querySelectorAll('.quality-rb');
-  const caredRbs = document.querySelectorAll('.cared-rb');
-  qualityRbs.forEach(r => r.addEventListener('change', updateConcernBlock));
-  caredRbs.forEach(r => r.addEventListener('change', updateConcernBlock));
 
   // Issue checkboxes — "Nothing" mutually exclusive with the others, and triggers concern
   const issueChecks = document.querySelectorAll('.issue-cb');
@@ -1200,7 +1167,6 @@
   issueChecks.forEach(cb => {
     cb.addEventListener('change', () => {
       if (cb.checked && nothingCb.checked) nothingCb.checked = false;
-      updateConcernBlock();
     });
   });
 
@@ -1208,25 +1174,7 @@
     if (nothingCb.checked) {
       issueChecks.forEach(cb => cb.checked = false);
     }
-    updateConcernBlock();
   });
-
-  // Concern block — show whenever the experience signals dissatisfaction
-  const concernBlock = document.getElementById('concernBlock');
-
-  function updateConcernBlock() {
-    const rating = ratingInput.value;
-    const quality = document.querySelector('input[name="quality"]:checked')?.value;
-    const cared = document.querySelector('input[name="cared"]:checked')?.value;
-    const anyIssue = Array.from(issueChecks).some(cb => cb.checked);
-
-    const lowRating = rating && parseInt(rating) <= 3;
-    const poorQuality = quality === 'better';
-    const poorCare = cared === 'no' || cared === 'mostly';
-
-    const showConcern = lowRating || poorQuality || poorCare || anyIssue;
-    concernBlock.classList.toggle('show', showConcern);
-  }
 
   // CUSTOMER FORM SUBMISSION → POST to /api/feedback → success screen
   document.getElementById('feedbackForm').addEventListener('submit', async e => {
@@ -1246,11 +1194,8 @@
       booking_id: session.bookingId,
       source: document.querySelector('input[name="source"]:checked')?.value || null,
       rating: ratingInput.value || null,
-      quality: document.querySelector('input[name="quality"]:checked')?.value || null,
-      cared: document.querySelector('input[name="cared"]:checked')?.value || null,
       improve: document.querySelector('textarea[name="improve"]')?.value || '',
       issues: Array.from(document.querySelectorAll('input[name="issue"]:checked')).map(cb => cb.value),
-      concern_detail: document.querySelector('textarea[name="concern_detail"]')?.value || '',
       awareness: document.querySelector('input[name="awareness"]:checked')?.value || null,
       submitted_at: new Date().toISOString()
     };
