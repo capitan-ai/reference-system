@@ -394,13 +394,15 @@
 
       <!-- Phone number — triggers lookup -->
       <div class="q">
-        <div class="q-label"><span class="q-num">02</span>Client phone number
+        <div class="q-label"><span class="q-num">02</span>Client phone number or email
           <span class="q-hint">We'll find their booking automatically</span>
         </div>
         <input class="field" type="tel" name="customer_phone" id="customerPhone" placeholder="(415) 000-0000" autocomplete="off">
+        <div style="text-align:center;margin:12px 0;font-size:12px;color:var(--muted);letter-spacing:.1em">OR</div>
+        <input class="field" type="email" name="customer_email" id="customerEmail" placeholder="customer@email.com" autocomplete="off">
       </div>
 
-      <!-- Lookup zone — hidden, reveals on 10-digit phone -->
+      <!-- Lookup zone — hidden, reveals on 10-digit phone or valid email -->
       <div class="lookup-zone" id="lookupZone">
         <label class="lookup-label">Booking lookup</label>
         <div id="lookupContent">
@@ -867,9 +869,15 @@
 
   // Phone formatter + lookup trigger
   const phoneInput = document.getElementById('customerPhone');
+  const emailInput = document.getElementById('customerEmail');
   let lookupTimeout;
 
   phoneInput.addEventListener('input', e => {
+    // Clear email when typing phone
+    if (e.target.value.length > 0) {
+      emailInput.value = '';
+    }
+
     let v = e.target.value.replace(/\D/g, '').slice(0, 10);
     if (v.length >= 7) {
       e.target.value = `(${v.slice(0,3)}) ${v.slice(3,6)}-${v.slice(6)}`;
@@ -890,6 +898,22 @@
     }
   });
 
+  emailInput.addEventListener('input', e => {
+    // Clear phone when typing email
+    if (e.target.value.length > 0) {
+      phoneInput.value = '';
+    }
+
+    // Trigger lookup on valid email with 400ms debounce
+    clearTimeout(lookupTimeout);
+    const email = e.target.value.trim();
+    if (email && email.includes('@') && email.length > 5) {
+      lookupTimeout = setTimeout(() => performEmailLookup(email), 400);
+    } else {
+      document.getElementById('lookupZone').classList.remove('show');
+    }
+  });
+
   // Phone lookup to /api/kiosk/lookup
   async function performPhoneLookup(phone10) {
     const zone = document.getElementById('lookupZone');
@@ -899,6 +923,23 @@
 
     try {
       const res = await fetch(`/api/kiosk/lookup?phone=${phone10}`);
+      if (!res.ok) throw new Error('Lookup failed');
+      const data = await res.json();
+      handleLookupResult(data);
+    } catch (err) {
+      content.innerHTML = '<div class="lookup-notice">Could not fetch booking data</div>';
+    }
+  }
+
+  // Email lookup to /api/kiosk/lookup
+  async function performEmailLookup(email) {
+    const zone = document.getElementById('lookupZone');
+    const content = document.getElementById('lookupContent');
+    zone.classList.add('show');
+    content.innerHTML = '<div class="lookup-loading">Searching...</div>';
+
+    try {
+      const res = await fetch(`/api/kiosk/lookup?email=${encodeURIComponent(email)}`);
       if (!res.ok) throw new Error('Lookup failed');
       const data = await res.json();
       handleLookupResult(data);
@@ -1114,7 +1155,7 @@
     e.preventDefault();
 
     session.customerName = document.getElementById('customerName').value.trim();
-    session.customerPhone = document.getElementById('customerPhone').value.trim();
+    session.customerPhone = document.getElementById('customerPhone').value.trim() || document.getElementById('customerEmail').value.trim();
     session.masterName = document.getElementById('masterName').value.trim();
     session.serviceDate = document.getElementById('serviceDate').value;
 
@@ -1137,16 +1178,20 @@
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
-  // Phone input handler — show fields only after successful lookup
-  phoneInput.addEventListener('change', e => {
-    const phone10 = e.target.value.replace(/\D/g, '').slice(-10);
-    if (phone10.length === 10 && session.customerName) {
+  // Input handler — show fields only after successful lookup
+  const validateAndShowFields = () => {
+    const phone10 = phoneInput.value.replace(/\D/g, '').slice(-10);
+    const email = emailInput.value.trim();
+    if ((phone10.length === 10 || (email && email.includes('@'))) && session.customerName) {
       // Only show remaining fields if lookup succeeded
       document.getElementById('customerNameSection').style.display = 'block';
       document.getElementById('masterNameSection').style.display = 'block';
       document.getElementById('serviceDateSection').style.display = 'block';
     }
-  });
+  };
+
+  phoneInput.addEventListener('change', validateAndShowFields);
+  emailInput.addEventListener('change', validateAndShowFields);
 
   // Load admins on page load
   loadAdmins();

@@ -1,4 +1,4 @@
-// Public kiosk endpoint: looks up customer by phone and returns their bookings for today
+// Public kiosk endpoint: looks up customer by phone or email and returns their bookings for today
 // with technician info, so admin form can auto-fill customer name and master name.
 
 import db from '../../../../lib/prisma-client'
@@ -8,6 +8,11 @@ export const dynamic = 'force-dynamic'
 function normalizePhone(raw) {
   if (!raw) return ''
   return String(raw).replace(/\D/g, '').slice(-10)
+}
+
+function normalizeEmail(raw) {
+  if (!raw) return ''
+  return String(raw).toLowerCase().trim()
 }
 
 function joinName(given, family) {
@@ -22,33 +27,70 @@ export async function GET(request) {
     }
 
     const url = new URL(request.url)
-    const phone10 = normalizePhone(url.searchParams.get('phone') || '')
+    const phoneParam = url.searchParams.get('phone') || ''
+    const emailParam = url.searchParams.get('email') || ''
 
-    if (phone10.length !== 10) {
-      return Response.json({ error: 'phone must contain 10 digits' }, { status: 400 })
+    if (!phoneParam && !emailParam) {
+      return Response.json({ error: 'phone or email parameter required' }, { status: 400 })
     }
 
-    // Step A: Find customer by phone (search by normalized phone number)
-    const allClients = await db.squareExistingClient.findMany({
-    where: {
-      organization_id: orgId,
-    },
-    select: {
-      square_customer_id: true,
-      given_name: true,
-      family_name: true,
-      phone_number: true,
-    },
-  })
+    if (phoneParam && emailParam) {
+      return Response.json({ error: 'provide either phone or email, not both' }, { status: 400 })
+    }
 
-  const client = allClients.find(c => {
-    const normalized = String(c.phone_number || '').replace(/\D/g, '').slice(-10)
-    return normalized === phone10
-  })
+    let client = null
 
-  if (!client) {
-    return Response.json({ found: false }, { status: 200 })
-  }
+    if (phoneParam) {
+      const phone10 = normalizePhone(phoneParam)
+      if (phone10.length !== 10) {
+        return Response.json({ error: 'phone must contain 10 digits' }, { status: 400 })
+      }
+
+      // Step A1: Find customer by phone (search by normalized phone number)
+      const allClients = await db.squareExistingClient.findMany({
+        where: {
+          organization_id: orgId,
+        },
+        select: {
+          square_customer_id: true,
+          given_name: true,
+          family_name: true,
+          phone_number: true,
+        },
+      })
+
+      client = allClients.find(c => {
+        const normalized = String(c.phone_number || '').replace(/\D/g, '').slice(-10)
+        return normalized === phone10
+      })
+    } else if (emailParam) {
+      const normalizedEmail = normalizeEmail(emailParam)
+      if (!normalizedEmail || !normalizedEmail.includes('@')) {
+        return Response.json({ error: 'email must be a valid email address' }, { status: 400 })
+      }
+
+      // Step A2: Find customer by email
+      const allClients = await db.squareExistingClient.findMany({
+        where: {
+          organization_id: orgId,
+        },
+        select: {
+          square_customer_id: true,
+          given_name: true,
+          family_name: true,
+          email_address: true,
+        },
+      })
+
+      client = allClients.find(c => {
+        const normalized = normalizeEmail(c.email_address || '')
+        return normalized === normalizedEmail
+      })
+    }
+
+    if (!client) {
+      return Response.json({ found: false }, { status: 200 })
+    }
 
   // Step B: Query bookings for today using raw SQL with timezone cast
   const bookingRows = await db.$queryRaw`
