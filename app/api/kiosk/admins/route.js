@@ -15,7 +15,9 @@ export async function GET() {
     const admins = await db.teamMember.findMany({
       where: {
         organization_id: orgId,
-        role: 'ADMIN',
+        role: {
+          in: ['ADMIN', 'MANAGER', 'TOP_MASTER'],
+        },
         status: 'ACTIVE',
         is_system: false,
       },
