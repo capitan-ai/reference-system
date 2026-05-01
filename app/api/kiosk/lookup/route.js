@@ -28,17 +28,22 @@ export async function GET(request) {
       return Response.json({ error: 'phone must contain 10 digits' }, { status: 400 })
     }
 
-    // Step A: Find customer by phone
-    const client = await db.squareExistingClient.findFirst({
+    // Step A: Find customer by phone (search by normalized phone number)
+    const allClients = await db.squareExistingClient.findMany({
     where: {
       organization_id: orgId,
-      phone_number: { endsWith: phone10 },
     },
     select: {
       square_customer_id: true,
       given_name: true,
       family_name: true,
+      phone_number: true,
     },
+  })
+
+  const client = allClients.find(c => {
+    const normalized = String(c.phone_number || '').replace(/\D/g, '').slice(-10)
+    return normalized === phone10
   })
 
   if (!client) {
