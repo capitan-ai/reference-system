@@ -85,6 +85,11 @@ export async function POST(request) {
   const issuesIn = Array.isArray(body.issues) ? body.issues : []
   const issues = issuesIn.filter(v => ISSUE_VALUES.has(v))
 
+  let bookingId = null
+  if (body.booking_id) {
+    bookingId = String(body.booking_id)
+  }
+
   const matchedClient = await db.squareExistingClient.findFirst({
     where: {
       organization_id: orgId,
@@ -114,6 +119,7 @@ export async function POST(request) {
       square_customer_id: matchedClient?.square_customer_id || null,
       master_name: masterName,
       master_id: masterId,
+      booking_id: bookingId,
       service_date: serviceDate,
       rating,
       quality: pickEnum(body.quality, QUALITY_VALUES),

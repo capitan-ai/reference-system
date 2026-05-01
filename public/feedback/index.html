@@ -981,6 +981,9 @@
         session.masterId = booking.technician_id;
         session.bookingId = booking.booking_id;
         document.getElementById('customerName').value = fullName;
+        const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+        document.getElementById('serviceDate').value = serviceDate;
+        session.serviceDate = serviceDate;
         document.getElementById('customerNameSection').style.display = 'block';
         document.getElementById('masterNameSection').style.display = 'block';
         document.getElementById('serviceDateSection').style.display = 'block';
@@ -1021,6 +1024,9 @@
           session.masterId = techId;
           session.bookingId = booking.booking_id;
           document.getElementById('customerName').value = fullName;
+          const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+          document.getElementById('serviceDate').value = serviceDate;
+          session.serviceDate = serviceDate;
           document.getElementById('customerNameSection').style.display = 'block';
           document.getElementById('masterNameSection').style.display = 'block';
           document.getElementById('serviceDateSection').style.display = 'block';
@@ -1081,6 +1087,9 @@
               session.masterId = opt.dataset.segTechId;
               session.bookingId = bookingId;
               document.getElementById('customerName').value = fullName;
+              const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+              document.getElementById('serviceDate').value = serviceDate;
+              session.serviceDate = serviceDate;
               document.getElementById('customerNameSection').style.display = 'block';
               document.getElementById('masterNameSection').style.display = 'block';
               document.getElementById('serviceDateSection').style.display = 'block';
@@ -1096,6 +1105,9 @@
           session.masterId = techId;
           session.bookingId = bookingId;
           document.getElementById('customerName').value = fullName;
+          const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+          document.getElementById('serviceDate').value = serviceDate;
+          session.serviceDate = serviceDate;
           document.getElementById('customerNameSection').style.display = 'block';
           document.getElementById('masterNameSection').style.display = 'block';
           document.getElementById('serviceDateSection').style.display = 'block';

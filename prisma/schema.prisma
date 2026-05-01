@@ -621,6 +621,7 @@ model CustomerFeedback {
   square_customer_id  String?
   master_name         String
   master_id           String?      @db.Uuid
+  booking_id          String?      @db.Uuid
   service_date        DateTime     @db.Date
   rating              Int?
   quality             String?
@@ -635,6 +636,7 @@ model CustomerFeedback {
   raw_payload         Json
 
   organization        Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  booking             Booking?     @relation(fields: [booking_id], references: [id], onDelete: SetNull)
 
   @@index([organization_id, submitted_at(sort: Desc)], map: "customer_feedback_org_timeline_idx")
   @@index([organization_id, rating], map: "customer_feedback_org_rating_idx")
@@ -962,6 +964,7 @@ model Booking {
   order_line_items                OrderLineItem[]
   orders                          Order[]
   BookingSnapshot                 BookingSnapshot[]
+  customer_feedback               CustomerFeedback[]
 
   @@unique([organization_id, booking_id], map: "bookings_organization_booking_id_unique")
   @@index([customer_id])
