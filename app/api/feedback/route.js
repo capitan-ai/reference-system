@@ -105,7 +105,10 @@ export async function POST(request) {
         select: {
           customer_id: true,
           technician_id: true,
-          location_id: true
+          location_id: true,
+          location: {
+            select: { name: true }
+          }
         }
       })
     }
@@ -114,6 +117,7 @@ export async function POST(request) {
     const finalSquareCustomerId = squareCustomerId || bookingData?.customer_id
     const finalMasterId = masterId || bookingData?.technician_id
     const finalLocationId = locationId || bookingData?.location_id
+    const finalLocationName = bookingData?.location?.name || null
 
     // Lookup customer by phone if not provided anywhere else
     let matchedClient = null
@@ -165,6 +169,7 @@ export async function POST(request) {
         // Service data
         booking_id: bookingId,
         location_id: finalLocationId,
+        location_name: finalLocationName,
         service_date: serviceDate,
 
         // Feedback data

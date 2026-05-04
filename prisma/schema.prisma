@@ -627,6 +627,7 @@ model CustomerFeedback {
   admin_name          String?
   booking_id          String?      @db.Uuid
   location_id         String?      @db.Uuid
+  location_name       String?
   service_date        DateTime     @db.Date
   rating              Int?
   quality             String?
