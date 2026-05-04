@@ -819,10 +819,13 @@
   const session = {
     customerName: '',
     customerPhone: '',
+    squareCustomerId: null,
     masterId: null,
     masterName: '',
     adminId: null,
+    adminName: '',
     bookingId: null,
+    locationId: null,
     serviceDate: ''
   };
 
@@ -864,6 +867,7 @@
 
   function selectAdmin(adminId, adminName) {
     session.adminId = adminId;
+    session.adminName = adminName;
     document.querySelectorAll('.admin-pill').forEach(p => p.classList.remove('active'));
     document.querySelector(`[data-id="${adminId}"]`)?.classList.add('active');
   }
@@ -966,6 +970,9 @@
       return;
     }
 
+    // Capture customer ID from lookup
+    session.squareCustomerId = data.customer.square_customer_id || null;
+
     // Found customer but no booking today
     if (!data.bookings || data.bookings.length === 0) {
       content.innerHTML = '<div class="lookup-notice">No booking today — enter master name manually</div>';
@@ -976,6 +983,7 @@
       session.masterName = '';
       session.masterId = null;
       session.bookingId = null;
+      session.locationId = null;
       document.getElementById('customerNameSection').style.display = 'block';
       document.getElementById('masterNameSection').style.display = 'block';
       document.getElementById('serviceDateSection').style.display = 'block';
@@ -998,6 +1006,7 @@
         session.masterName = techName;
         session.masterId = booking.technician_id;
         session.bookingId = booking.booking_id;
+        session.locationId = booking.location_id || null;
         document.getElementById('customerName').value = fullName;
         const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
         document.getElementById('serviceDate').value = serviceDate;
@@ -1041,6 +1050,7 @@
           session.masterName = techName;
           session.masterId = techId;
           session.bookingId = booking.booking_id;
+          session.locationId = booking.location_id || null;
           document.getElementById('customerName').value = fullName;
           const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
           document.getElementById('serviceDate').value = serviceDate;
@@ -1104,6 +1114,7 @@
               session.masterName = opt.dataset.segTechName;
               session.masterId = opt.dataset.segTechId;
               session.bookingId = bookingId;
+              session.locationId = booking.location_id || null;
               document.getElementById('customerName').value = fullName;
               const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
               document.getElementById('serviceDate').value = serviceDate;
@@ -1122,6 +1133,7 @@
           session.masterName = techName;
           session.masterId = techId;
           session.bookingId = bookingId;
+          session.locationId = booking.location_id || null;
           document.getElementById('customerName').value = fullName;
           const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
           document.getElementById('serviceDate').value = serviceDate;
@@ -1145,6 +1157,7 @@
       if (p.textContent.toLowerCase().includes(techName.toLowerCase().split(' ')[0])) {
         p.classList.add('active');
         session.adminId = p.dataset.id;
+        session.adminName = p.textContent.trim();
       } else {
         p.classList.remove('active');
       }
@@ -1234,6 +1247,11 @@
     submitBtn.textContent = 'SENDING...';
 
     const feedbackData = {
+      admin_id: session.adminId,
+      admin_name: session.adminName,
+      master_id: session.masterId,
+      location_id: session.locationId,
+      square_customer_id: session.squareCustomerId,
       customer: {
         customerName: session.customerName,
         customerPhone: session.customerPhone,

@@ -56,11 +56,24 @@ export async function POST(request) {
       return Response.json({ error: 'Invalid JSON' }, { status: 400 })
     }
 
+    // Admin data (Page 1)
+    const adminId = body.admin_id ? String(body.admin_id) : null
+    const adminName = body.admin_name ? String(body.admin_name).trim() : null
+
+    // Customer data (Page 1)
     const customer = body.customer || {}
     const customerName = String(customer.customerName || '').trim()
     const customerPhone = normalizePhone(customer.customerPhone)
     const masterName = String(customer.masterName || '').trim()
     const serviceDateRaw = customer.serviceDate
+
+    // Technician data (Page 1)
+    let masterId = body.master_id ? String(body.master_id) : null
+
+    // Service data (Page 1)
+    const bookingId = body.booking_id ? String(body.booking_id) : null
+    const locationId = body.location_id ? String(body.location_id) : null
+    const squareCustomerId = body.square_customer_id ? String(body.square_customer_id) : null
 
     if (!customerName) return Response.json({ error: 'customer.customerName required' }, { status: 400 })
     if (customerPhone.length !== 10) return Response.json({ error: 'customer.customerPhone must contain 10 digits' }, { status: 400 })
@@ -84,47 +97,84 @@ export async function POST(request) {
     const issuesIn = Array.isArray(body.issues) ? body.issues : []
     const issues = issuesIn.filter(v => ISSUE_VALUES.has(v))
 
-    let bookingId = null
-    if (body.booking_id) {
-      bookingId = String(body.booking_id)
+    // Lookup booking to extract customer_id, technician_id, and location_id
+    let bookingData = null
+    if (bookingId) {
+      bookingData = await db.booking.findUnique({
+        where: { id: bookingId },
+        select: {
+          customer_id: true,
+          technician_id: true,
+          location_id: true
+        }
+      })
     }
 
-    const matchedClient = await db.squareExistingClient.findFirst({
-      where: {
-        organization_id: orgId,
-        phone_number: { endsWith: customerPhone }
-      },
-      select: { square_customer_id: true }
-    })
+    // Use booking data as source of truth when available
+    const finalSquareCustomerId = squareCustomerId || bookingData?.customer_id
+    const finalMasterId = masterId || bookingData?.technician_id
+    const finalLocationId = locationId || bookingData?.location_id
 
-    const masterMatches = await db.teamMember.findMany({
-      where: {
-        organization_id: orgId,
-        OR: [
-          { given_name: { contains: masterName, mode: 'insensitive' } },
-          { family_name: { contains: masterName, mode: 'insensitive' } }
-        ]
-      },
-      select: { id: true },
-      take: 2
-    })
-    const masterId = masterMatches.length === 1 ? masterMatches[0].id : null
+    // Lookup customer by phone if not provided anywhere else
+    let matchedClient = null
+    if (!finalSquareCustomerId) {
+      matchedClient = await db.squareExistingClient.findFirst({
+        where: {
+          organization_id: orgId,
+          phone_number: { endsWith: customerPhone }
+        },
+        select: { square_customer_id: true }
+      })
+    }
+
+    // Lookup master by name only if masterId not provided (fallback for manual entries)
+    if (!finalMasterId && masterName) {
+      const masterMatches = await db.teamMember.findMany({
+        where: {
+          organization_id: orgId,
+          OR: [
+            { given_name: { contains: masterName, mode: 'insensitive' } },
+            { family_name: { contains: masterName, mode: 'insensitive' } }
+          ]
+        },
+        select: { id: true },
+        take: 2
+      })
+      if (masterMatches.length === 1) {
+        masterId = masterMatches[0].id
+      }
+    }
 
     const created = await db.customerFeedback.create({
       data: {
         organization_id: orgId,
+
+        // Admin/Staff data
+        admin_id: adminId,
+        admin_name: adminName,
+
+        // Customer data
         customer_name: customerName,
         customer_phone: customerPhone,
-        square_customer_id: matchedClient?.square_customer_id || null,
+        square_customer_id: finalSquareCustomerId || matchedClient?.square_customer_id || null,
+
+        // Technician data
+        master_id: finalMasterId,
         master_name: masterName,
-        master_id: masterId,
+
+        // Service data
         booking_id: bookingId,
+        location_id: finalLocationId,
         service_date: serviceDate,
+
+        // Feedback data
         rating,
         source: pickEnum(body.source, SOURCE_VALUES),
         improve_text: body.improve ? String(body.improve).trim() || null : null,
         issues,
         awareness: pickEnum(body.awareness, AWARENESS_VALUES),
+
+        // Metadata
         raw_payload: body
       },
       select: { id: true }
