@@ -4,7 +4,7 @@
   "installCommand": "npm install && npx prisma generate",
   "framework": "nextjs",
   "functions": {
-    "app/api/**/*.(js|ts)": {
+    "app/api/**/*.ts": {
       "maxDuration": 30
     }
   },
