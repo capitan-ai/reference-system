@@ -3,11 +3,6 @@
   "buildCommand": "npm run build",
   "installCommand": "npm install && npx prisma generate",
   "framework": "nextjs",
-  "functions": {
-    "app/api/**/*.ts": {
-      "maxDuration": 30
-    }
-  },
   "env": {
     "NODE_ENV": "production",
     "NODE_OPTIONS": "--no-deprecation"
