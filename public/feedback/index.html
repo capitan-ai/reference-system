@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZORINA — Customer Feedback</title>
+<style>
+  :root{
+    --bg:#F2EBDD;
+    --bg-card:#ffffff;
+    --ink:#333;
+    --ink-soft:#666;
+    --muted:#999;
+    --line:#ddd;
+    --accent:#5C6B50;
+    --accent-deep:#4A5A45;
+    --shadow: 0 4px 6px rgba(0,0,0,.1);
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-weight:400;line-height:1.5;-webkit-font-smoothing:antialiased}
+
+  body{
+    min-height:100vh;
+    padding:0 20px 80px;
+  }
+
+  .wrap{max-width:680px;margin:0 auto;position:relative;z-index:1}
+
+  .brand{text-align:center;margin-bottom:0;line-height:1}
+  .brand-logo{
+    width:auto;
+    max-width:360px;
+    height:auto;
+    display:block;
+    user-select:none;
+    -webkit-user-drag:none;
+    margin:0 auto;
+  }
+  @media(max-width:520px){
+    .brand-logo{max-width:280px}
+  }
+
+  .card{
+    background:var(--bg-card);
+    border:2px solid var(--accent);
+    border-radius:0;
+    padding:32px 56px 56px;
+    box-shadow:var(--shadow);
+    position:relative;
+    margin-top:-32px;
+  }
+
+  .title-block{text-align:center;margin-bottom:48px;padding-bottom:36px;border-bottom:1px solid var(--line)}
+  .title-eyebrow{
+    font-family:inherit;
+    font-size:10px;letter-spacing:.5em;
+    color:var(--muted);font-weight:500;
+    text-transform:uppercase;margin-bottom:18px;
+  }
+  .title{
+    font-family:inherit;
+    font-size:34px;line-height:1.15;
+    color:var(--ink);font-weight:300;
+    letter-spacing:-.02em;margin-bottom:14px;
+  }
+  .subtitle{
+    font-family:inherit;font-size:14px;
+    color:var(--ink-soft);font-weight:400;
+    letter-spacing:.005em;line-height:1.6;
+    max-width:380px;margin:0 auto;
+  }
+
+  .q{margin-bottom:36px;position:relative}
+  .q-num{font-family:inherit;font-size:10px;letter-spacing:.3em;color:var(--muted);display:inline-block;margin-right:10px;font-weight:500;text-transform:uppercase}
+  .q-label{font-family:inherit;font-size:17px;color:var(--ink);font-weight:500;margin-bottom:18px;line-height:1.4;letter-spacing:-.01em}
+  .q-hint{display:block;font-family:inherit;font-size:12px;color:var(--muted);letter-spacing:0;margin-top:6px;font-style:normal;font-weight:400}
+
+  .field{
+    width:100%;
+    background:transparent;
+    border:none;
+    border-bottom:1px solid var(--line);
+    padding:12px 0 10px;
+    font-family:inherit;
+    font-size:15px;
+    color:var(--ink);
+    transition:border-color .3s ease;
+    font-weight:400;
+    letter-spacing:-.005em;
+  }
+  .field:focus{outline:none;border-bottom-color:var(--accent)}
+  .field::placeholder{color:var(--muted);font-family:inherit;font-size:14px;font-weight:300}
+
+  .options{display:grid;grid-template-columns:1fr 1fr;gap:10px 28px}
+  @media(max-width:520px){.options{grid-template-columns:1fr}}
+
+  .opt{
+    display:flex;align-items:center;gap:12px;cursor:pointer;
+    padding:8px 2px;font-size:14px;color:var(--ink-soft);
+    transition:color .25s ease;user-select:none;position:relative;
+  }
+  .opt:hover{color:var(--ink)}
+  .opt input{position:absolute;opacity:0;pointer-events:none}
+  .dot{
+    width:14px;height:14px;border:1px solid var(--accent);border-radius:50%;
+    flex-shrink:0;position:relative;transition:all .25s ease;
+  }
+  .opt input:checked + .dot{
+    border-color:var(--accent-deep);
+    background:var(--accent-deep);
+    box-shadow:inset 0 0 0 3px var(--bg-card);
+  }
+  .opt input:checked ~ .opt-text{color:var(--ink);font-weight:400}
+
+  /* Rating row 1-5 */
+  .rating-row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px}
+  .rating-btn{
+    aspect-ratio:1;border:1px solid var(--line);background:transparent;cursor:pointer;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:2px;padding:8px 2px;transition:all .25s ease;border-radius:2px;
+    font-family:inherit;
+  }
+  .rating-btn:hover{border-color:var(--ink);background:rgba(26,20,16,.03)}
+  .rating-btn.active{border-color:var(--ink);background:var(--ink);color:var(--bg-card)}
+  .rating-num{font-size:18px;font-weight:300;color:var(--ink);letter-spacing:-.02em;line-height:1}
+  .rating-cap{font-size:8px;letter-spacing:.18em;color:var(--muted);font-weight:500;text-transform:uppercase}
+  .rating-btn.active .rating-num{color:var(--bg-card)}
+  .rating-btn.active .rating-cap{color:rgba(251,248,244,.7)}
+  @media(max-width:520px){
+    .rating-btn{padding:10px 2px}
+    .rating-num{font-size:18px}
+    .rating-cap{font-size:7px;letter-spacing:.12em}
+  }
+
+  /* NPS 0-10 scale */
+  .nps{
+    display:grid;
+    grid-template-columns:repeat(11,1fr);
+    gap:4px;
+    margin-top:8px;
+  }
+  .nps-btn{
+    aspect-ratio:1;
+    border:1px solid var(--line);
+    background:transparent;
+    cursor:pointer;
+    font-family:inherit;
+    font-size:14px;
+    color:var(--ink-soft);
+    transition:all .2s ease;
+    border-radius:2px;
+    font-weight:400;
+  }
+  .nps-btn:hover{border-color:var(--ink);color:var(--ink)}
+  .nps-btn.active{
+    background:var(--ink);
+    color:var(--bg-card);
+    border-color:var(--ink);
+    font-weight:500;
+  }
+  .nps-scale{
+    display:flex;
+    justify-content:space-between;
+    font-size:9px;
+    letter-spacing:.25em;
+    color:var(--muted);
+    margin-top:10px;
+    font-family:inherit;
+    font-weight:500;
+    text-transform:uppercase;
+  }
+  @media(max-width:520px){
+    .nps-btn{font-size:11px}
+    .nps{gap:2px}
+  }
+
+  textarea.field{
+    border:1px solid var(--line);padding:16px;min-height:110px;resize:vertical;
+    font-family:inherit;font-size:14px;line-height:1.6;font-weight:400;
+    border-radius:2px;
+  }
+  textarea.field:focus{border-color:var(--accent)}
+
+  /* Conditional concern block */
+  .concern-block{
+    background:rgba(92,107,80,.06);
+    border-left:2px solid var(--accent);
+    padding:24px 28px;
+    margin-top:18px;
+    display:none;
+    animation:slideDown .4s ease both;
+  }
+  .concern-block.show{display:block}
+  .concern-title{
+    font-family:inherit;
+    font-size:14px;color:var(--ink);margin-bottom:14px;line-height:1.5;font-weight:500;letter-spacing:-.005em;
+  }
+  @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+
+  .divider{text-align:center;margin:48px 0 36px;position:relative}
+  .divider::before{content:"";position:absolute;top:50%;left:0;right:0;height:1px;background:var(--line)}
+  .divider span{
+    background:var(--bg-card);padding:0 20px;position:relative;
+    font-family:inherit;font-size:10px;letter-spacing:.5em;color:var(--muted);
+    font-weight:500;text-transform:uppercase;
+  }
+
+  /* Referral callout */
+  .referral{
+    margin-top:40px;padding:32px 28px;
+    border:1px dashed var(--accent);
+    background:rgba(92,107,80,.06);
+    position:relative;
+  }
+  .referral-inner{
+    display:grid;
+    grid-template-columns:auto 1fr;
+    gap:28px;
+    align-items:center;
+  }
+  @media(max-width:520px){
+    .referral-inner{grid-template-columns:1fr;text-align:center;gap:20px}
+  }
+  .referral-qr{
+    width:130px;height:130px;
+    background:#fff;
+    padding:10px;
+    border:1px solid var(--line);
+    flex-shrink:0;
+  }
+  .referral-qr svg{width:100%;height:100%;display:block}
+  @media(max-width:520px){
+    .referral-qr{margin:0 auto;width:120px;height:120px}
+  }
+  .referral-content{text-align:left}
+  @media(max-width:520px){.referral-content{text-align:center}}
+  .referral-tag{font-family:inherit;font-size:10px;letter-spacing:.4em;color:var(--muted);margin-bottom:10px;font-weight:500;text-transform:uppercase}
+  .referral-title{font-family:inherit;font-size:22px;color:var(--ink);line-height:1.25;margin-bottom:14px;font-weight:300;letter-spacing:-.015em}
+  .referral-text{
+    font-family:inherit;font-size:14px;color:var(--ink-soft);
+    line-height:1.6;margin:0;font-weight:300;letter-spacing:-.005em;
+  }
+  .referral-text strong{color:var(--ink);font-weight:500}
+  .referral-cta{
+    font-family:inherit;font-size:10px;letter-spacing:.3em;
+    color:var(--ink);border-top:1px solid var(--line);
+    padding-top:14px;margin-top:18px;text-align:center;
+    font-weight:500;text-transform:uppercase;
+  }
+
+  .submit{
+    width:100%;margin-top:40px;padding:20px;
+    background:var(--ink);color:var(--bg-card);border:none;
+    font-family:inherit;font-size:11px;letter-spacing:.3em;
+    cursor:pointer;transition:all .3s ease;position:relative;overflow:hidden;
+    font-weight:500;text-transform:uppercase;border-radius:2px;
+  }
+  .submit:hover{background:#000;letter-spacing:.4em}
+  .submit::after{content:"→";margin-left:14px;transition:transform .3s ease;display:inline-block;font-weight:300}
+  .submit:hover::after{transform:translateX(6px)}
+
+  .foot{text-align:center;margin-top:40px;font-family:inherit;font-size:10px;color:var(--muted);font-weight:500;line-height:1.6;letter-spacing:.4em}
+  .foot-mark{font-family:inherit;font-size:10px;color:var(--ink);display:block;margin-top:8px;letter-spacing:.4em;font-weight:500}
+
+  .success{display:none;text-align:center;padding:48px 24px}
+  .success.show{display:block;animation:fadeUp .8s ease both}
+  .success-mark{font-family:inherit;font-size:11px;color:var(--muted);letter-spacing:.5em;font-weight:500;text-transform:uppercase}
+  .success-title{font-family:inherit;font-size:28px;color:var(--ink);margin:18px 0 14px;font-weight:300;letter-spacing:-.02em;line-height:1.2}
+  .success-text{font-family:inherit;font-size:14px;color:var(--ink-soft);line-height:1.7;max-width:380px;margin:0 auto 32px;font-weight:400}
+  .ref-code{display:inline-block;padding:22px 40px;border:1px dashed var(--accent);background:rgba(196,168,154,.08);margin-top:8px;border-radius:2px}
+  .ref-code-label{font-family:inherit;font-size:10px;letter-spacing:.4em;color:var(--muted);font-weight:500;text-transform:uppercase}
+  .ref-code-value{font-family:inherit;font-size:22px;letter-spacing:.1em;color:var(--ink);margin-top:8px;font-weight:500}
+
+  /* Reset / next customer button */
+  .reset-btn{
+    margin-top:32px;
+    padding:14px 32px;
+    background:transparent;
+    color:var(--ink);
+    border:1px solid var(--ink);
+    font-family:inherit;
+    font-size:11px;
+    letter-spacing:.3em;
+    cursor:pointer;
+    transition:all .3s ease;
+    font-weight:500;
+    text-transform:uppercase;
+    border-radius:2px;
+  }
+  .reset-btn:hover{
+    background:var(--ink);
+    color:var(--bg-card);
+  }
+
+  /* Admin page distinguishing ribbon */
+  #adminForm .title-eyebrow{color:var(--accent)}
+  #adminForm .submit{background:var(--accent)}
+  #adminForm .submit:hover{background:var(--accent-deep)}
+
+  /* Master/admin pills */
+  .admin-pills{display:flex;flex-wrap:wrap;gap:12px;margin-top:16px}
+  .admin-pill{
+    flex:0 0 auto;padding:12px 18px;border:1px solid var(--line);border-radius:20px;
+    background:var(--bg-card);cursor:pointer;font-size:14px;color:var(--ink-soft);
+    transition:all .25s ease;user-select:none;
+  }
+  .admin-pill:hover{border-color:var(--accent);color:var(--ink)}
+  .admin-pill.active{
+    background:var(--accent);color:var(--bg-card);border-color:var(--accent);font-weight:500;
+  }
+
+  /* Lookup zone — reveals after 10-digit phone */
+  .lookup-zone{
+    display:none;margin-top:28px;padding:24px;background:rgba(92,107,80,.06);
+    border-left:3px solid var(--accent);border-radius:2px;animation:slideDown .4s ease both;
+  }
+  .lookup-zone.show{display:block}
+  .lookup-label{font-size:12px;letter-spacing:.25em;color:var(--muted);font-weight:500;text-transform:uppercase;margin-bottom:12px;display:block}
+
+  .lookup-loading{text-align:center;padding:20px;color:var(--muted);font-size:13px}
+  .lookup-loading::after{
+    content:" ⟳";animation:spin 2s linear infinite;display:inline-block;
+  }
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+  .lookup-notice{
+    padding:16px;background:var(--bg-card);border-radius:2px;border:1px solid var(--line);
+    color:var(--ink-soft);font-size:13px;text-align:center;
+  }
+
+  .booking-card{
+    padding:16px;background:var(--bg-card);border-radius:2px;border-left:3px solid var(--accent);
+    margin-bottom:12px;cursor:pointer;transition:all .2s ease;
+  }
+  .booking-card:hover{box-shadow:0 2px 8px rgba(0,0,0,.08)}
+  .booking-card.selected{border-left-color:var(--ink);background:rgba(92,107,80,.06)}
+  .booking-time{font-size:14px;font-weight:500;color:var(--ink);margin-bottom:4px}
+  .booking-tech{font-size:13px;color:var(--ink-soft)}
+
+  .segment-option{
+    padding:12px;background:var(--bg-card);border-radius:2px;border:1px solid var(--line);
+    margin-bottom:8px;cursor:pointer;transition:all .2s ease;font-size:13px;
+  }
+  .segment-option:hover{border-color:var(--accent)}
+  .segment-option.selected{
+    background:var(--accent);color:var(--bg-card);border-color:var(--accent);font-weight:500;
+  }
+
+  @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+  .form-section{animation:fadeIn .6s ease both}
+  @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+
+  @media(max-width:520px){
+    body{padding:24px 14px 60px}
+    .card{padding:40px 22px 36px}
+    .title{font-size:26px}
+    .brand-logo{max-width:200px}
+    .referral{padding:24px 18px}
+    .referral-title{font-size:20px}
+    .q-label{font-size:16px}
+    .success-title{font-size:24px}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <div class="brand">
+    <img class="brand-logo" src="/logo.png" alt="Zorina Nail Studio Logo">
+  </div>
+
+  <div class="card">
+
+    <!-- ADMIN PAGE 1 — Staff intake -->
+    <form id="adminForm" class="form-section">
+
+      <div class="title-block">
+        <div class="title-eyebrow">STAFF INTAKE · STEP 1 OF 2</div>
+        <div class="title">Find the customer</div>
+        <div class="subtitle">Select yourself, then enter the client's phone number to pull their details from today's bookings.</div>
+      </div>
+
+      <!-- Administrator selector (pills from DB) — FIRST -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">01</span>Who are you today?
+          <span class="q-hint">Select your name from the team</span>
+        </div>
+        <div class="admin-pills" id="adminPills">
+          <div class="lookup-loading">Loading administrators...</div>
+        </div>
+      </div>
+
+      <!-- Phone number — triggers lookup -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">02</span>Client phone number or email
+          <span class="q-hint">We'll find their booking automatically</span>
+        </div>
+        <input class="field" type="tel" name="customer_phone" id="customerPhone" placeholder="(415) 000-0000" autocomplete="off">
+        <div style="text-align:center;margin:12px 0;font-size:12px;color:var(--muted);letter-spacing:.1em">OR</div>
+        <input class="field" type="email" name="customer_email" id="customerEmail" placeholder="customer@email.com" autocomplete="off">
+      </div>
+
+      <!-- Lookup zone — hidden, reveals on 10-digit phone or valid email -->
+      <div class="lookup-zone" id="lookupZone">
+        <label class="lookup-label">Booking lookup</label>
+        <div id="lookupContent">
+          <div class="lookup-loading">Searching...</div>
+        </div>
+      </div>
+
+      <!-- Customer name (from lookup) — hidden until found -->
+      <div class="q" id="customerNameSection" style="display:none">
+        <div class="q-label"><span class="q-num">03</span>Customer name</div>
+        <input class="field" type="text" name="customer_name" id="customerName" placeholder="First name and last initial" required autocomplete="off">
+      </div>
+
+      <!-- Nail technician (from booking, or manual override) — hidden until found -->
+      <div class="q" id="masterNameSection" style="display:none">
+        <div class="q-label"><span class="q-num">04</span>Nail technician
+          <span class="q-hint">Master who served the customer today</span>
+        </div>
+        <input class="field" type="text" name="master_name" id="masterName" placeholder="Master's name or override" required autocomplete="off">
+      </div>
+
+      <!-- Date — auto -->
+      <div class="q" id="serviceDateSection" style="display:none">
+        <div class="q-label"><span class="q-num">05</span>Service date</div>
+        <input class="field" type="date" name="service_date" id="serviceDate" required>
+      </div>
+
+      <button type="submit" class="submit">PASS TO CUSTOMER</button>
+
+      <div class="foot">
+        STAFF USE ONLY
+      </div>
+
+    </form>
+
+    <!-- CUSTOMER PAGE 2 — Feedback -->
+    <form id="feedbackForm" class="form-section" style="display:none">
+
+      <div class="title-block">
+        <div class="title-eyebrow" id="customerGreeting">YOUR FEEDBACK</div>
+        <div class="title">How was your visit with us?</div>
+        <div class="subtitle">Your honest words help us refine every detail. Tell us what didn't feel right — we want to know.</div>
+      </div>
+
+      <!-- 1. How did you hear about us -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">01</span>How did you hear about us?</div>
+        <div class="options">
+          <label class="opt"><input type="radio" name="source" value="google"><span class="dot"></span><span class="opt-text">Google / Search</span></label>
+          <label class="opt"><input type="radio" name="source" value="instagram"><span class="dot"></span><span class="opt-text">Instagram</span></label>
+          <label class="opt"><input type="radio" name="source" value="influencer"><span class="dot"></span><span class="opt-text">Influencer post</span></label>
+          <label class="opt"><input type="radio" name="source" value="friend"><span class="dot"></span><span class="opt-text">Friend / Family Recommendation</span></label>
+          <label class="opt"><input type="radio" name="source" value="walkin"><span class="dot"></span><span class="opt-text">Walk-in / Passing by</span></label>
+          <label class="opt"><input type="radio" name="source" value="yelp"><span class="dot"></span><span class="opt-text">Yelp</span></label>
+          <label class="opt"><input type="radio" name="source" value="tiktok"><span class="dot"></span><span class="opt-text">TikTok</span></label>
+          <label class="opt"><input type="radio" name="source" value="other"><span class="dot"></span><span class="opt-text">Other</span></label>
+        </div>
+        <input type="text" class="field" id="sourceOtherField" name="source_other" placeholder="Please specify..." style="display:none; margin-top:12px;">
+      </div>
+
+      <div class="divider"><span>YOUR EXPERIENCE</span></div>
+
+      <!-- 2. Overall rating 1-5 -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">02</span>How would you rate your experience today?</div>
+        <div class="rating-row" id="ratingRow">
+          <button type="button" class="rating-btn" data-val="1">
+            <span class="rating-num">😭</span>
+            <span class="rating-cap">POOR</span>
+          </button>
+          <button type="button" class="rating-btn" data-val="2">
+            <span class="rating-num">😞</span>
+            <span class="rating-cap">FAIR</span>
+          </button>
+          <button type="button" class="rating-btn" data-val="3">
+            <span class="rating-num">😊</span>
+            <span class="rating-cap">OKAY</span>
+          </button>
+          <button type="button" class="rating-btn" data-val="4">
+            <span class="rating-num">😊</span>
+            <span class="rating-cap">GREAT</span>
+          </button>
+          <button type="button" class="rating-btn" data-val="5">
+            <span class="rating-num">🥰</span>
+            <span class="rating-cap">EXCELLENT</span>
+          </button>
+        </div>
+        <input type="hidden" name="rating" id="ratingInput">
+      </div>
+
+      <!-- 3. Open improvement -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">03</span>Is there anything we could improve?
+          <span class="q-hint">A short note is plenty — even one word helps</span>
+        </div>
+        <textarea class="field" name="improve" placeholder="What we could do better next time..."></textarea>
+      </div>
+
+      <!-- 4. Did anything bother you -->
+      <div class="q" id="issueQuestion" style="border-left: 4px solid #dc2626; padding-left: 16px;">
+        <div class="q-label"><span class="q-num">04</span>Did anything bother you today?
+          <span class="q-hint">Tick anything that didn't feel right</span>
+        </div>
+        <div class="options">
+          <label class="opt"><input type="checkbox" name="issue" value="quality" class="issue-cb"><span class="dot"></span><span class="opt-text">Quality of work</span></label>
+          <label class="opt"><input type="checkbox" name="issue" value="cleanliness" class="issue-cb"><span class="dot"></span><span class="opt-text">Cleanliness</span></label>
+          <label class="opt"><input type="checkbox" name="issue" value="atmosphere" class="issue-cb"><span class="dot"></span><span class="opt-text">Atmosphere</span></label>
+          <label class="opt"><input type="checkbox" name="issue" value="comfort" class="issue-cb"><span class="dot"></span><span class="opt-text">Comfort</span></label>
+          <label class="opt"><input type="checkbox" name="issue" value="nothing" id="nothingCb"><span class="dot"></span><span class="opt-text">Nothing — it was perfect</span></label>
+        </div>
+      </div>
+
+      <div class="divider"><span>REFERRAL PROGRAM</span></div>
+
+      <!-- 7. Awareness question -->
+      <div class="q">
+        <div class="q-label"><span class="q-num">05</span>Do you already know about our referral program?</div>
+        <div class="options" style="grid-template-columns:1fr 1fr">
+          <label class="opt"><input type="radio" name="awareness" value="yes"><span class="dot"></span><span class="opt-text">Yes</span></label>
+          <label class="opt"><input type="radio" name="awareness" value="no"><span class="dot"></span><span class="opt-text">No</span></label>
+        </div>
+      </div>
+
+      <!-- REFERRAL CALLOUT -->
+      <div class="referral">
+        <div class="referral-tag" style="text-align:center;margin-bottom:18px">A GIFT FROM US</div>
+        <div class="referral-inner">
+          <div class="referral-qr">
+            <svg viewBox="0 0 29 29" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+              <rect width="29" height="29" fill="#fff"/>
+              <g fill="#1a1a1a">
+                <!-- Top-left finder pattern -->
+                <rect x="0" y="0" width="7" height="1"/>
+                <rect x="0" y="1" width="1" height="6"/>
+                <rect x="6" y="1" width="1" height="6"/>
+                <rect x="0" y="6" width="7" height="1"/>
+                <rect x="2" y="2" width="3" height="3"/>
+                <!-- Top-right finder pattern -->
+                <rect x="22" y="0" width="7" height="1"/>
+                <rect x="22" y="1" width="1" height="6"/>
+                <rect x="28" y="1" width="1" height="6"/>
+                <rect x="22" y="6" width="7" height="1"/>
+                <rect x="24" y="2" width="3" height="3"/>
+                <!-- Bottom-left finder pattern -->
+                <rect x="0" y="22" width="7" height="1"/>
+                <rect x="0" y="23" width="1" height="6"/>
+                <rect x="6" y="23" width="1" height="6"/>
+                <rect x="0" y="28" width="7" height="1"/>
+                <rect x="2" y="24" width="3" height="3"/>
+                <!-- Timing patterns -->
+                <rect x="8" y="6" width="1" height="1"/>
+                <rect x="10" y="6" width="1" height="1"/>
+                <rect x="12" y="6" width="1" height="1"/>
+                <rect x="14" y="6" width="1" height="1"/>
+                <rect x="16" y="6" width="1" height="1"/>
+                <rect x="18" y="6" width="1" height="1"/>
+                <rect x="20" y="6" width="1" height="1"/>
+                <rect x="6" y="8" width="1" height="1"/>
+                <rect x="6" y="10" width="1" height="1"/>
+                <rect x="6" y="12" width="1" height="1"/>
+                <rect x="6" y="14" width="1" height="1"/>
+                <rect x="6" y="16" width="1" height="1"/>
+                <rect x="6" y="18" width="1" height="1"/>
+                <rect x="6" y="20" width="1" height="1"/>
+                <!-- Data pattern (decorative) -->
+                <rect x="8" y="0" width="1" height="1"/>
+                <rect x="10" y="0" width="2" height="1"/>
+                <rect x="13" y="0" width="1" height="1"/>
+                <rect x="15" y="0" width="1" height="1"/>
+                <rect x="18" y="0" width="2" height="1"/>
+                <rect x="9" y="2" width="1" height="1"/>
+                <rect x="11" y="2" width="1" height="1"/>
+                <rect x="14" y="2" width="2" height="1"/>
+                <rect x="17" y="2" width="1" height="1"/>
+                <rect x="19" y="2" width="1" height="1"/>
+                <rect x="8" y="3" width="1" height="1"/>
+                <rect x="10" y="3" width="1" height="1"/>
+                <rect x="13" y="3" width="1" height="1"/>
+                <rect x="15" y="3" width="2" height="1"/>
+                <rect x="18" y="3" width="1" height="1"/>
+                <rect x="20" y="3" width="1" height="1"/>
+                <rect x="9" y="4" width="2" height="1"/>
+                <rect x="12" y="4" width="1" height="1"/>
+                <rect x="14" y="4" width="1" height="1"/>
+                <rect x="16" y="4" width="1" height="1"/>
+                <rect x="19" y="4" width="2" height="1"/>
+                <rect x="0" y="8" width="1" height="1"/>
+                <rect x="2" y="8" width="3" height="1"/>
+                <rect x="8" y="8" width="2" height="1"/>
+                <rect x="11" y="8" width="1" height="1"/>
+                <rect x="13" y="8" width="2" height="1"/>
+                <rect x="17" y="8" width="1" height="1"/>
+                <rect x="19" y="8" width="1" height="1"/>
+                <rect x="22" y="8" width="1" height="1"/>
+                <rect x="24" y="8" width="2" height="1"/>
+                <rect x="27" y="8" width="2" height="1"/>
+                <rect x="1" y="9" width="2" height="1"/>
+                <rect x="4" y="9" width="1" height="1"/>
+                <rect x="9" y="9" width="1" height="1"/>
+                <rect x="12" y="9" width="2" height="1"/>
+                <rect x="15" y="9" width="1" height="1"/>
+                <rect x="18" y="9" width="2" height="1"/>
+                <rect x="21" y="9" width="1" height="1"/>
+                <rect x="23" y="9" width="2" height="1"/>
+                <rect x="26" y="9" width="1" height="1"/>
+                <rect x="28" y="9" width="1" height="1"/>
+                <rect x="0" y="10" width="2" height="1"/>
+                <rect x="3" y="10" width="1" height="1"/>
+                <rect x="8" y="10" width="1" height="1"/>
+                <rect x="10" y="10" width="2" height="1"/>
+                <rect x="14" y="10" width="1" height="1"/>
+                <rect x="16" y="10" width="2" height="1"/>
+                <rect x="19" y="10" width="1" height="1"/>
+                <rect x="22" y="10" width="2" height="1"/>
+                <rect x="25" y="10" width="1" height="1"/>
+                <rect x="27" y="10" width="2" height="1"/>
+                <rect x="2" y="11" width="1" height="1"/>
+                <rect x="4" y="11" width="2" height="1"/>
+                <rect x="9" y="11" width="2" height="1"/>
+                <rect x="13" y="11" width="1" height="1"/>
+                <rect x="15" y="11" width="1" height="1"/>
+                <rect x="17" y="11" width="2" height="1"/>
+                <rect x="20" y="11" width="1" height="1"/>
+                <rect x="22" y="11" width="1" height="1"/>
+                <rect x="24" y="11" width="2" height="1"/>
+                <rect x="28" y="11" width="1" height="1"/>
+                <rect x="0" y="12" width="1" height="1"/>
+                <rect x="2" y="12" width="2" height="1"/>
+                <rect x="5" y="12" width="1" height="1"/>
+                <rect x="8" y="12" width="2" height="1"/>
+                <rect x="11" y="12" width="1" height="1"/>
+                <rect x="14" y="12" width="2" height="1"/>
+                <rect x="17" y="12" width="1" height="1"/>
+                <rect x="19" y="12" width="2" height="1"/>
+                <rect x="23" y="12" width="1" height="1"/>
+                <rect x="25" y="12" width="2" height="1"/>
+                <rect x="28" y="12" width="1" height="1"/>
+                <rect x="1" y="13" width="1" height="1"/>
+                <rect x="3" y="13" width="2" height="1"/>
+                <rect x="9" y="13" width="1" height="1"/>
+                <rect x="11" y="13" width="2" height="1"/>
+                <rect x="15" y="13" width="2" height="1"/>
+                <rect x="18" y="13" width="1" height="1"/>
+                <rect x="20" y="13" width="2" height="1"/>
+                <rect x="23" y="13" width="2" height="1"/>
+                <rect x="26" y="13" width="1" height="1"/>
+                <rect x="0" y="14" width="2" height="1"/>
+                <rect x="4" y="14" width="1" height="1"/>
+                <rect x="8" y="14" width="1" height="1"/>
+                <rect x="10" y="14" width="1" height="1"/>
+                <rect x="13" y="14" width="2" height="1"/>
+                <rect x="16" y="14" width="1" height="1"/>
+                <rect x="19" y="14" width="1" height="1"/>
+                <rect x="21" y="14" width="2" height="1"/>
+                <rect x="24" y="14" width="1" height="1"/>
+                <rect x="27" y="14" width="2" height="1"/>
+                <rect x="2" y="15" width="1" height="1"/>
+                <rect x="5" y="15" width="1" height="1"/>
+                <rect x="9" y="15" width="2" height="1"/>
+                <rect x="12" y="15" width="1" height="1"/>
+                <rect x="14" y="15" width="1" height="1"/>
+                <rect x="17" y="15" width="2" height="1"/>
+                <rect x="20" y="15" width="1" height="1"/>
+                <rect x="22" y="15" width="1" height="1"/>
+                <rect x="25" y="15" width="2" height="1"/>
+                <rect x="28" y="15" width="1" height="1"/>
+                <rect x="0" y="16" width="1" height="1"/>
+                <rect x="3" y="16" width="2" height="1"/>
+                <rect x="8" y="16" width="2" height="1"/>
+                <rect x="11" y="16" width="2" height="1"/>
+                <rect x="15" y="16" width="1" height="1"/>
+                <rect x="17" y="16" width="1" height="1"/>
+                <rect x="19" y="16" width="2" height="1"/>
+                <rect x="22" y="16" width="2" height="1"/>
+                <rect x="25" y="16" width="1" height="1"/>
+                <rect x="27" y="16" width="1" height="1"/>
+                <rect x="1" y="17" width="2" height="1"/>
+                <rect x="4" y="17" width="1" height="1"/>
+                <rect x="10" y="17" width="1" height="1"/>
+                <rect x="12" y="17" width="2" height="1"/>
+                <rect x="16" y="17" width="2" height="1"/>
+                <rect x="20" y="17" width="1" height="1"/>
+                <rect x="23" y="17" width="1" height="1"/>
+                <rect x="26" y="17" width="2" height="1"/>
+                <rect x="0" y="18" width="2" height="1"/>
+                <rect x="3" y="18" width="1" height="1"/>
+                <rect x="5" y="18" width="1" height="1"/>
+                <rect x="8" y="18" width="1" height="1"/>
+                <rect x="11" y="18" width="2" height="1"/>
+                <rect x="14" y="18" width="2" height="1"/>
+                <rect x="17" y="18" width="1" height="1"/>
+                <rect x="19" y="18" width="1" height="1"/>
+                <rect x="21" y="18" width="2" height="1"/>
+                <rect x="24" y="18" width="2" height="1"/>
+                <rect x="27" y="18" width="1" height="1"/>
+                <rect x="2" y="19" width="1" height="1"/>
+                <rect x="4" y="19" width="2" height="1"/>
+                <rect x="9" y="19" width="2" height="1"/>
+                <rect x="13" y="19" width="1" height="1"/>
+                <rect x="15" y="19" width="2" height="1"/>
+                <rect x="18" y="19" width="2" height="1"/>
+                <rect x="22" y="19" width="1" height="1"/>
+                <rect x="25" y="19" width="1" height="1"/>
+                <rect x="27" y="19" width="2" height="1"/>
+                <rect x="0" y="20" width="1" height="1"/>
+                <rect x="2" y="20" width="2" height="1"/>
+                <rect x="8" y="20" width="2" height="1"/>
+                <rect x="11" y="20" width="1" height="1"/>
+                <rect x="13" y="20" width="2" height="1"/>
+                <rect x="16" y="20" width="1" height="1"/>
+                <rect x="18" y="20" width="1" height="1"/>
+                <rect x="20" y="20" width="2" height="1"/>
+                <rect x="23" y="20" width="1" height="1"/>
+                <rect x="25" y="20" width="2" height="1"/>
+                <rect x="28" y="20" width="1" height="1"/>
+                <rect x="8" y="22" width="1" height="1"/>
+                <rect x="10" y="22" width="2" height="1"/>
+                <rect x="14" y="22" width="1" height="1"/>
+                <rect x="16" y="22" width="2" height="1"/>
+                <rect x="19" y="22" width="1" height="1"/>
+                <rect x="21" y="22" width="1" height="1"/>
+                <rect x="23" y="22" width="2" height="1"/>
+                <rect x="26" y="22" width="1" height="1"/>
+                <rect x="28" y="22" width="1" height="1"/>
+                <rect x="9" y="23" width="2" height="1"/>
+                <rect x="13" y="23" width="1" height="1"/>
+                <rect x="15" y="23" width="1" height="1"/>
+                <rect x="17" y="23" width="2" height="1"/>
+                <rect x="20" y="23" width="1" height="1"/>
+                <rect x="22" y="23" width="1" height="1"/>
+                <rect x="24" y="23" width="1" height="1"/>
+                <rect x="27" y="23" width="1" height="1"/>
+                <rect x="8" y="24" width="2" height="1"/>
+                <rect x="11" y="24" width="1" height="1"/>
+                <rect x="14" y="24" width="2" height="1"/>
+                <rect x="17" y="24" width="1" height="1"/>
+                <rect x="19" y="24" width="2" height="1"/>
+                <rect x="22" y="24" width="1" height="1"/>
+                <rect x="24" y="24" width="2" height="1"/>
+                <rect x="27" y="24" width="2" height="1"/>
+                <rect x="9" y="25" width="1" height="1"/>
+                <rect x="11" y="25" width="2" height="1"/>
+                <rect x="15" y="25" width="1" height="1"/>
+                <rect x="18" y="25" width="1" height="1"/>
+                <rect x="20" y="25" width="2" height="1"/>
+                <rect x="23" y="25" width="2" height="1"/>
+                <rect x="26" y="25" width="1" height="1"/>
+                <rect x="28" y="25" width="1" height="1"/>
+                <rect x="8" y="26" width="2" height="1"/>
+                <rect x="12" y="26" width="2" height="1"/>
+                <rect x="14" y="26" width="1" height="1"/>
+                <rect x="16" y="26" width="1" height="1"/>
+                <rect x="19" y="26" width="2" height="1"/>
+                <rect x="22" y="26" width="2" height="1"/>
+                <rect x="25" y="26" width="1" height="1"/>
+                <rect x="27" y="26" width="1" height="1"/>
+                <rect x="9" y="27" width="1" height="1"/>
+                <rect x="11" y="27" width="1" height="1"/>
+                <rect x="13" y="27" width="2" height="1"/>
+                <rect x="17" y="27" width="1" height="1"/>
+                <rect x="20" y="27" width="1" height="1"/>
+                <rect x="22" y="27" width="2" height="1"/>
+                <rect x="25" y="27" width="2" height="1"/>
+                <rect x="28" y="27" width="1" height="1"/>
+                <rect x="8" y="28" width="2" height="1"/>
+                <rect x="11" y="28" width="2" height="1"/>
+                <rect x="14" y="28" width="1" height="1"/>
+                <rect x="16" y="28" width="2" height="1"/>
+                <rect x="19" y="28" width="1" height="1"/>
+                <rect x="21" y="28" width="1" height="1"/>
+                <rect x="23" y="28" width="1" height="1"/>
+                <rect x="26" y="28" width="1" height="1"/>
+                <rect x="28" y="28" width="1" height="1"/>
+              </g>
+            </svg>
+          </div>
+          <div class="referral-content">
+            <div class="referral-title">A free manicure, on us.</div>
+            <div class="referral-text">
+              Share your personal referral code with friends. When they book and complete a service, <strong>they get $10 off and you get $10 off</strong>. No limit on how many friends you can invite.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="submit">SUBMIT FEEDBACK</button>
+
+      <div class="foot">
+        WITH GRATITUDE,
+        <span class="foot-mark">THE ZORINA TEAM</span>
+      </div>
+
+    </form>
+
+    <!-- SUCCESS -->
+    <div class="success" id="successView">
+      <div class="success-mark">THANK YOU</div>
+      <div class="success-title">Your honesty means everything, beauty.</div>
+      <div class="success-text">
+        We've received your feedback. Your personal referral code will arrive by SMS shortly &mdash; share it with friends, and you'll both enjoy <strong>$10 off</strong> your next visit.
+      </div>
+      <div class="success-error" id="successError" style="display:none;color:#a8503a;font-size:13px;margin-top:18px;letter-spacing:.05em"></div>
+      <button type="button" id="newCustomerBtn" class="reset-btn">START FRESH FOR NEXT CUSTOMER</button>
+      <div class="foot" style="margin-top:32px">
+        SEE YOU SOON,
+        <span class="foot-mark">ZORINA</span>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+  // Session data captured from admin page
+  const session = {
+    customerName: '',
+    customerPhone: '',
+    squareCustomerId: null,
+    masterId: null,
+    masterName: '',
+    adminId: null,
+    adminName: '',
+    bookingId: null,
+    locationId: null,
+    serviceDate: ''
+  };
+
+  // Set today's date as default in admin form
+  const dateInput = document.getElementById('serviceDate');
+  const today = new Date().toISOString().split('T')[0];
+  dateInput.value = today;
+
+  // Load administrators on page load
+  async function loadAdmins() {
+    try {
+      const res = await fetch('/api/kiosk/admins');
+      if (!res.ok) throw new Error('Failed to load admins');
+      const data = await res.json();
+      const pills = document.getElementById('adminPills');
+      pills.innerHTML = '';
+
+      if (!data.admins || data.admins.length === 0) {
+        pills.innerHTML = '<div class="lookup-notice">No admins available</div>';
+        return;
+      }
+
+      data.admins.forEach(admin => {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'admin-pill';
+        pill.textContent = [admin.given_name, admin.family_name].filter(Boolean).join(' ');
+        pill.dataset.id = admin.id;
+        pill.addEventListener('click', e => {
+          e.preventDefault();
+          selectAdmin(admin.id, [admin.given_name, admin.family_name].filter(Boolean).join(' '));
+        });
+        pills.appendChild(pill);
+      });
+    } catch (err) {
+      document.getElementById('adminPills').innerHTML = '<div class="lookup-notice">Could not load administrators</div>';
+    }
+  }
+
+  function selectAdmin(adminId, adminName) {
+    session.adminId = adminId;
+    session.adminName = adminName;
+    document.querySelectorAll('.admin-pill').forEach(p => p.classList.remove('active'));
+    document.querySelector(`[data-id="${adminId}"]`)?.classList.add('active');
+  }
+
+  // Phone formatter + lookup trigger
+  const phoneInput = document.getElementById('customerPhone');
+  const emailInput = document.getElementById('customerEmail');
+  let lookupTimeout;
+
+  phoneInput.addEventListener('input', e => {
+    // Clear email when typing phone
+    if (e.target.value.length > 0) {
+      emailInput.value = '';
+    }
+
+    let v = e.target.value.replace(/\D/g, '').slice(0, 10);
+    if (v.length >= 7) {
+      e.target.value = `(${v.slice(0,3)}) ${v.slice(3,6)}-${v.slice(6)}`;
+    } else if (v.length >= 4) {
+      e.target.value = `(${v.slice(0,3)}) ${v.slice(3)}`;
+    } else if (v.length > 0) {
+      e.target.value = `(${v}`;
+    } else {
+      e.target.value = '';
+    }
+
+    // Trigger lookup at 10 digits with 400ms debounce
+    clearTimeout(lookupTimeout);
+    if (v.length === 10) {
+      lookupTimeout = setTimeout(() => performPhoneLookup(v), 400);
+    } else {
+      document.getElementById('lookupZone').classList.remove('show');
+    }
+  });
+
+  emailInput.addEventListener('input', e => {
+    // Clear phone when typing email
+    if (e.target.value.length > 0) {
+      phoneInput.value = '';
+    }
+
+    // Trigger lookup on valid email with 400ms debounce
+    clearTimeout(lookupTimeout);
+    const email = e.target.value.trim();
+    if (email && email.includes('@') && email.length > 5) {
+      lookupTimeout = setTimeout(() => performEmailLookup(email), 400);
+    } else {
+      document.getElementById('lookupZone').classList.remove('show');
+    }
+  });
+
+  // Phone lookup to /api/kiosk/lookup
+  async function performPhoneLookup(phone10) {
+    const zone = document.getElementById('lookupZone');
+    const content = document.getElementById('lookupContent');
+    zone.classList.add('show');
+    content.innerHTML = '<div class="lookup-loading">Searching...</div>';
+
+    try {
+      const res = await fetch(`/api/kiosk/lookup?phone=${phone10}`);
+      if (!res.ok) throw new Error('Lookup failed');
+      const data = await res.json();
+      handleLookupResult(data);
+    } catch (err) {
+      content.innerHTML = '<div class="lookup-notice">Could not fetch booking data</div>';
+    }
+  }
+
+  // Email lookup to /api/kiosk/lookup
+  async function performEmailLookup(email) {
+    const zone = document.getElementById('lookupZone');
+    const content = document.getElementById('lookupContent');
+    zone.classList.add('show');
+    content.innerHTML = '<div class="lookup-loading">Searching...</div>';
+
+    try {
+      const res = await fetch(`/api/kiosk/lookup?email=${encodeURIComponent(email)}`);
+      if (!res.ok) throw new Error('Lookup failed');
+      const data = await res.json();
+      handleLookupResult(data);
+    } catch (err) {
+      content.innerHTML = '<div class="lookup-notice">Could not fetch booking data</div>';
+    }
+  }
+
+  // Multi-service lookup result handler
+  function handleLookupResult(data) {
+    const content = document.getElementById('lookupContent');
+    const masterNameInput = document.getElementById('masterName');
+
+    if (!data.found) {
+      content.innerHTML = '<div class="lookup-notice">Phone not in system — enter master name manually</div>';
+      masterNameInput.value = '';
+      session.masterName = '';
+      session.masterId = null;
+      session.bookingId = null;
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
+      return;
+    }
+
+    // Capture customer ID from lookup
+    session.squareCustomerId = data.customer.square_customer_id || null;
+
+    // Found customer but no booking today
+    if (!data.bookings || data.bookings.length === 0) {
+      content.innerHTML = '<div class="lookup-notice">No booking today — enter master name manually</div>';
+      const fullName = [data.customer.given_name, data.customer.family_name].filter(Boolean).join(' ');
+      document.getElementById('customerName').value = fullName;
+      session.customerName = fullName;
+      masterNameInput.value = '';
+      session.masterName = '';
+      session.masterId = null;
+      session.bookingId = null;
+      session.locationId = null;
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
+      return;
+    }
+
+    // Single booking case
+    if (data.bookings.length === 1) {
+      const booking = data.bookings[0];
+
+      // All segments same technician, or single segment → auto-select
+      if (!booking.segments || booking.segments.length <= 1 ||
+          booking.segments.every(s => s.technician_id === booking.segments[0].technician_id)) {
+
+        const fullName = [data.customer.given_name, data.customer.family_name].filter(Boolean).join(' ');
+        const techName = booking.technician_name || 'Unknown';
+
+        masterNameInput.value = techName;
+        session.customerName = fullName;
+        session.masterName = techName;
+        session.masterId = booking.technician_id;
+        session.bookingId = booking.booking_id;
+        session.locationId = booking.location_id || null;
+        document.getElementById('customerName').value = fullName;
+        const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+        document.getElementById('serviceDate').value = serviceDate;
+        session.serviceDate = serviceDate;
+        document.getElementById('customerNameSection').style.display = 'block';
+        document.getElementById('masterNameSection').style.display = 'block';
+        document.getElementById('serviceDateSection').style.display = 'block';
+
+        // Auto-highlight admin pill if it matches
+        highlightAdminPillByTechName(techName);
+
+        content.innerHTML = `
+          <div class="booking-card selected">
+            <div class="booking-time">${new Date(booking.start_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</div>
+            <div class="booking-tech">${techName}</div>
+          </div>
+        `;
+        return;
+      }
+
+      // Multiple segments with different technicians → show segment selector
+      content.innerHTML = '<label class="lookup-label" style="margin-bottom:12px">Which service?</label>';
+      let segmentHTML = '';
+      booking.segments.forEach((seg, i) => {
+        segmentHTML += `
+          <div class="segment-option" data-seg-id="${seg.segment_id}" data-seg-tech-id="${seg.technician_id}" data-seg-tech-name="${seg.technician_name}">
+            <strong>${seg.technician_name}</strong> — ${seg.duration_minutes}min
+          </div>
+        `;
+      });
+      content.innerHTML += segmentHTML;
+
+      document.querySelectorAll('.segment-option').forEach(opt => {
+        opt.addEventListener('click', () => {
+          const fullName = [data.customer.given_name, data.customer.family_name].filter(Boolean).join(' ');
+          const techId = opt.dataset.segTechId;
+          const techName = opt.dataset.segTechName;
+
+          masterNameInput.value = techName;
+          session.customerName = fullName;
+          session.masterName = techName;
+          session.masterId = techId;
+          session.bookingId = booking.booking_id;
+          session.locationId = booking.location_id || null;
+          document.getElementById('customerName').value = fullName;
+          const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+          document.getElementById('serviceDate').value = serviceDate;
+          session.serviceDate = serviceDate;
+          document.getElementById('customerNameSection').style.display = 'block';
+          document.getElementById('masterNameSection').style.display = 'block';
+          document.getElementById('serviceDateSection').style.display = 'block';
+
+          // Highlight selection
+          document.querySelectorAll('.segment-option').forEach(o => o.classList.remove('selected'));
+          opt.classList.add('selected');
+
+          highlightAdminPillByTechName(techName);
+        });
+      });
+      return;
+    }
+
+    // Multiple bookings → show booking list
+    content.innerHTML = '<label class="lookup-label" style="margin-bottom:12px">Which booking?</label>';
+    let bookingHTML = '';
+    data.bookings.forEach(booking => {
+      const time = new Date(booking.start_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const tech = booking.technician_name || 'Unknown';
+      bookingHTML += `
+        <div class="booking-card" data-booking-id="${booking.booking_id}" data-booking-tech-id="${booking.technician_id}" data-booking-tech-name="${tech}">
+          <div class="booking-time">${time}</div>
+          <div class="booking-tech">${tech}</div>
+        </div>
+      `;
+    });
+    content.innerHTML += bookingHTML;
+
+    document.querySelectorAll('.booking-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const bookingId = card.dataset.bookingId;
+        const techId = card.dataset.bookingTechId;
+        const techName = card.dataset.bookingTechName;
+        const booking = data.bookings.find(b => b.booking_id === bookingId);
+
+        // If this booking has multiple segments with different techs, show segment selector
+        if (booking && booking.segments && booking.segments.length > 1 &&
+            !booking.segments.every(s => s.technician_id === booking.segments[0].technician_id)) {
+
+          content.innerHTML = '<label class="lookup-label" style="margin-bottom:12px">Which service?</label>';
+          let segmentHTML = '';
+          booking.segments.forEach(seg => {
+            segmentHTML += `
+              <div class="segment-option" data-seg-id="${seg.segment_id}" data-seg-tech-id="${seg.technician_id}" data-seg-tech-name="${seg.technician_name}">
+                <strong>${seg.technician_name}</strong> — ${seg.duration_minutes}min
+              </div>
+            `;
+          });
+          content.innerHTML += segmentHTML;
+
+          document.querySelectorAll('.segment-option').forEach(opt => {
+            opt.addEventListener('click', () => {
+              const fullName = [data.customer.given_name, data.customer.family_name].filter(Boolean).join(' ');
+              masterNameInput.value = opt.dataset.segTechName;
+              session.customerName = fullName;
+              session.masterName = opt.dataset.segTechName;
+              session.masterId = opt.dataset.segTechId;
+              session.bookingId = bookingId;
+              session.locationId = booking.location_id || null;
+              document.getElementById('customerName').value = fullName;
+              const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+              document.getElementById('serviceDate').value = serviceDate;
+              session.serviceDate = serviceDate;
+              document.getElementById('customerNameSection').style.display = 'block';
+              document.getElementById('masterNameSection').style.display = 'block';
+              document.getElementById('serviceDateSection').style.display = 'block';
+              highlightAdminPillByTechName(opt.dataset.segTechName);
+            });
+          });
+        } else {
+          // Single segment or all same tech
+          const fullName = [data.customer.given_name, data.customer.family_name].filter(Boolean).join(' ');
+          masterNameInput.value = techName;
+          session.customerName = fullName;
+          session.masterName = techName;
+          session.masterId = techId;
+          session.bookingId = bookingId;
+          session.locationId = booking.location_id || null;
+          document.getElementById('customerName').value = fullName;
+          const serviceDate = new Date(booking.start_at).toISOString().split('T')[0];
+          document.getElementById('serviceDate').value = serviceDate;
+          session.serviceDate = serviceDate;
+          document.getElementById('customerNameSection').style.display = 'block';
+          document.getElementById('masterNameSection').style.display = 'block';
+          document.getElementById('serviceDateSection').style.display = 'block';
+
+          document.querySelectorAll('.booking-card').forEach(c => c.classList.remove('selected'));
+          card.classList.add('selected');
+          highlightAdminPillByTechName(techName);
+        }
+      });
+    });
+  }
+
+  // Helper: auto-highlight admin pill matching technician name (naive substring match)
+  function highlightAdminPillByTechName(techName) {
+    const pills = document.querySelectorAll('.admin-pill');
+    pills.forEach(p => {
+      if (p.textContent.toLowerCase().includes(techName.toLowerCase().split(' ')[0])) {
+        p.classList.add('active');
+        session.adminId = p.dataset.id;
+        session.adminName = p.textContent.trim();
+      } else {
+        p.classList.remove('active');
+      }
+    });
+  }
+
+  // ADMIN FORM SUBMISSION → reveal customer form
+  document.getElementById('adminForm').addEventListener('submit', e => {
+    e.preventDefault();
+
+    session.customerName = document.getElementById('customerName').value.trim();
+    session.customerPhone = document.getElementById('customerPhone').value.trim() || document.getElementById('customerEmail').value.trim();
+    session.masterName = document.getElementById('masterName').value.trim();
+    session.serviceDate = document.getElementById('serviceDate').value;
+
+    // Validate: admin selected, customer name and master name required
+    if (!session.adminId) {
+      alert('Please select who you are');
+      return;
+    }
+    if (!session.customerName || !session.masterName) {
+      alert('Please fill in customer name and master name');
+      return;
+    }
+
+    // Personalize the customer greeting
+    document.getElementById('customerGreeting').textContent = 'WELCOME, BEAUTY';
+
+    // Swap views
+    document.getElementById('adminForm').style.display = 'none';
+    document.getElementById('feedbackForm').style.display = 'block';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  // Input handler — show fields only after successful lookup
+  const validateAndShowFields = () => {
+    const phone10 = phoneInput.value.replace(/\D/g, '').slice(-10);
+    const email = emailInput.value.trim();
+    if ((phone10.length === 10 || (email && email.includes('@'))) && session.customerName) {
+      // Only show remaining fields if lookup succeeded
+      document.getElementById('customerNameSection').style.display = 'block';
+      document.getElementById('masterNameSection').style.display = 'block';
+      document.getElementById('serviceDateSection').style.display = 'block';
+    }
+  };
+
+  phoneInput.addEventListener('change', validateAndShowFields);
+  emailInput.addEventListener('change', validateAndShowFields);
+
+  // Load admins on page load
+  loadAdmins();
+
+  // Rating row 1-5
+  const ratingBtns = document.querySelectorAll('.rating-btn');
+  const ratingInput = document.getElementById('ratingInput');
+  ratingBtns.forEach(b => {
+    b.addEventListener('click', () => {
+      ratingBtns.forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      ratingInput.value = b.dataset.val;
+    });
+  });
+
+  // Issue checkboxes — "Nothing" mutually exclusive with the others, and triggers concern
+  const issueChecks = document.querySelectorAll('.issue-cb');
+  const nothingCb = document.getElementById('nothingCb');
+
+  issueChecks.forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked && nothingCb.checked) nothingCb.checked = false;
+    });
+  });
+
+  nothingCb.addEventListener('change', () => {
+    if (nothingCb.checked) {
+      issueChecks.forEach(cb => cb.checked = false);
+    }
+  });
+
+  // Show/hide "Other" text field for source question
+  const sourceRadios = document.querySelectorAll('input[name="source"]');
+  const sourceOtherField = document.getElementById('sourceOtherField');
+
+  sourceRadios.forEach(radio => {
+    radio.addEventListener('change', () => {
+      sourceOtherField.style.display = radio.value === 'other' ? 'block' : 'none';
+      if (radio.value !== 'other') {
+        sourceOtherField.value = '';
+      }
+    });
+  });
+
+  // CUSTOMER FORM SUBMISSION → POST to /api/feedback → success screen
+  document.getElementById('feedbackForm').addEventListener('submit', async e => {
+    e.preventDefault();
+
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalLabel = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'SENDING...';
+
+    const feedbackData = {
+      admin_id: session.adminId,
+      admin_name: session.adminName,
+      master_id: session.masterId,
+      location_id: session.locationId,
+      square_customer_id: session.squareCustomerId,
+      customer: {
+        customerName: session.customerName,
+        customerPhone: session.customerPhone,
+        masterName: session.masterName,
+        serviceDate: session.serviceDate
+      },
+      booking_id: session.bookingId,
+      source: document.querySelector('input[name="source"]:checked')?.value || null,
+      source_other: document.getElementById('sourceOtherField')?.value?.trim() || null,
+      rating: ratingInput.value || null,
+      improve: document.querySelector('textarea[name="improve"]')?.value || '',
+      issues: Array.from(document.querySelectorAll('input[name="issue"]:checked')).map(cb => cb.value),
+      awareness: document.querySelector('input[name="awareness"]:checked')?.value || null,
+      submitted_at: new Date().toISOString()
+    };
+
+    try {
+      const res = await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(feedbackData)
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Server error (${res.status})`);
+      }
+    } catch (err) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+      alert("Sorry — we couldn't save your feedback. Please ask staff for help.\n\n" + err.message);
+      return;
+    }
+
+    document.getElementById('feedbackForm').style.display = 'none';
+    document.getElementById('successView').classList.add('show');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  // Manual reset button on success screen
+  document.addEventListener('click', e => {
+    if (e.target && e.target.id === 'newCustomerBtn') {
+      location.reload();
+    }
+  });
+</script>
+
+</body>
+</html>

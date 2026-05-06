@@ -1,0 +1,23 @@
+{
+  "formatVersion": 1,
+  "passTypeIdentifier": "pass.com.zorinastudio.giftcard",
+  "serialNumber": "{{serialNumber}}",
+  "teamIdentifier": "{{teamIdentifier}}",
+  "organizationName": "{{organizationName}}",
+  "description": "{{description}}",
+  "logoText": "{{logoText}}",
+  "foregroundColor": "{{foregroundColor}}",
+  "backgroundColor": "{{backgroundColor}}",
+  "labelColor": "{{labelColor}}",
+  "storeCard": {
+    "primaryFields": [],
+    "secondaryFields": [],
+    "auxiliaryFields": []
+  },
+  "barcode": {
+    "message": "{{barcodeMessage}}",
+    "format": "PKBarcodeFormatQR",
+    "messageEncoding": "iso-8859-1"
+  }
+}
+

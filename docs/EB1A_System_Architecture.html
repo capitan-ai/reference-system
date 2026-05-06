@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @page {
+    size: letter;
+    margin: 0.6in 0.7in 0.5in 0.7in;
+  }
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 9.5pt;
+    line-height: 1.4;
+    color: #111;
+    margin: 0;
+    padding: 0;
+  }
+  h1 {
+    font-size: 14pt;
+    text-align: center;
+    margin: 0 0 2pt 0;
+    text-transform: uppercase;
+    letter-spacing: 1pt;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 9pt;
+    color: #444;
+    margin: 0 0 12pt 0;
+  }
+  h2 {
+    font-size: 10.5pt;
+    font-weight: bold;
+    margin: 10pt 0 4pt 0;
+    padding-bottom: 1pt;
+    border-bottom: 1.5px solid #333;
+    text-transform: uppercase;
+    letter-spacing: 0.3pt;
+    color: #222;
+  }
+  h3 {
+    font-size: 9.5pt;
+    font-weight: bold;
+    margin: 8pt 0 3pt 0;
+    color: #333;
+  }
+  p {
+    margin: 2pt 0 5pt 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 4pt 0 8pt 0;
+    font-size: 8.5pt;
+  }
+  th {
+    background-color: #1a1a1a;
+    color: white;
+    padding: 3pt 5pt;
+    text-align: left;
+    font-size: 8pt;
+  }
+  td {
+    padding: 2.5pt 5pt;
+    border-bottom: 1px solid #ddd;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background-color: #f7f7f7;
+  }
+  .arch-box {
+    border: 1px solid #999;
+    padding: 6pt 8pt;
+    margin: 4pt 0 8pt 0;
+    background: #fafafa;
+    font-family: "Courier New", monospace;
+    font-size: 8pt;
+    line-height: 1.4;
+    white-space: pre;
+  }
+  .stats-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6pt;
+    margin: 4pt 0 8pt 0;
+  }
+  .stat {
+    flex: 1;
+    min-width: 120pt;
+    background: #f0f0f0;
+    border-radius: 3pt;
+    padding: 4pt 6pt;
+    text-align: center;
+  }
+  .stat .num {
+    font-size: 12pt;
+    font-weight: bold;
+    display: block;
+  }
+  .stat .label {
+    font-size: 7pt;
+    color: #555;
+  }
+  .two-col {
+    display: flex;
+    gap: 10pt;
+  }
+  .two-col > div {
+    flex: 1;
+  }
+  .footer {
+    text-align: center;
+    font-size: 7.5pt;
+    color: #888;
+    margin-top: 6pt;
+    font-style: italic;
+  }
+  strong { font-weight: bold; }
+  .tag {
+    display: inline-block;
+    background: #e0e0e0;
+    padding: 1pt 4pt;
+    border-radius: 2pt;
+    font-size: 7.5pt;
+    font-weight: bold;
+    margin: 0 1pt;
+  }
+  .tag.novel { background: #c8e6c9; color: #1b5e20; }
+  .tag.patent { background: #bbdefb; color: #0d47a1; }
+</style>
+</head>
+<body>
+
+<h1>System Architecture Document</h1>
+<div class="subtitle">AI-Powered Business Intelligence Platform &nbsp;|&nbsp; Developer: Abylaikhan Azamatov &nbsp;|&nbsp; March 2026</div>
+
+<h2>Platform Overview</h2>
+<p>A cloud-based SaaS platform providing AI-powered business intelligence for service businesses. Built by a single developer. Currently in production processing $1.2M/year in revenue for a live client. Provisional patent filed: 8 subsystems, 40 claims.</p>
+
+<div class="stats-grid">
+  <div class="stat"><span class="num">8</span><span class="label">Patent Subsystems</span></div>
+  <div class="stat"><span class="num">40</span><span class="label">Patent Claims</span></div>
+  <div class="stat"><span class="num">65+</span><span class="label">Customer Metrics</span></div>
+  <div class="stat"><span class="num">20+</span><span class="label">Database Models</span></div>
+  <div class="stat"><span class="num">1</span><span class="label">Developer</span></div>
+</div>
+
+<h2>Technology Stack</h2>
+<div class="two-col">
+  <div>
+    <table>
+      <tr><th>Layer</th><th>Technology</th></tr>
+      <tr><td>Frontend</td><td>Next.js 14 (React 18)</td></tr>
+      <tr><td>Backend / API</td><td>Next.js API Routes (serverless)</td></tr>
+      <tr><td>Database</td><td>PostgreSQL (Neon / Supabase)</td></tr>
+      <tr><td>ORM</td><td>Prisma 5.22</td></tr>
+      <tr><td>Hosting</td><td>Vercel (serverless, edge)</td></tr>
+    </table>
+  </div>
+  <div>
+    <table>
+      <tr><th>Integration</th><th>Purpose</th></tr>
+      <tr><td>Square SDK v39</td><td>POS, Bookings, Payments, Customers</td></tr>
+      <tr><td>Twilio</td><td>SMS notifications &amp; referrals</td></tr>
+      <tr><td>SendGrid</td><td>Email campaigns &amp; referrals</td></tr>
+      <tr><td>Apple Wallet / PassKit</td><td>Digital gift card passes</td></tr>
+      <tr><td>Zod</td><td>Runtime validation</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>Architecture Diagram</h2>
+<div class="arch-box">
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          INTERNET / CLIENT LAYER                            │
+│  [Owner Dashboard]  [Customer Portal]  [Referral Pages]  [Digital Wallet]   │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │ HTTPS / TLS
+┌──────────────────────────────────┴──────────────────────────────────────────┐
+│                        SERVERLESS COMPUTE (Vercel)                          │
+│                                                                             │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌──────────────────┐   │
+│  │ Webhook API  │  │ Analytics API│  │ Referral   │  │ Wallet / Pass    │   │
+│  │ (Square)     │  │ (Dashboard)  │  │ Engine     │  │ Generator        │   │
+│  └──────┬──────┘  └──────┬───────┘  └─────┬──────┘  └────────┬─────────┘   │
+│         │                │                 │                   │             │
+│  ┌──────┴──────────────────────────────────┴───────────────────┴─────────┐   │
+│  │                    WORKER LAYER (Background Processing)              │   │
+│  │                                                                      │   │
+│  │  [Job Queue]  →  [Commission Worker]  →  [Discount Engine]          │   │
+│  │               →  [Reconciliation Engine]                             │   │
+│  │               →  [Referral Analytics Refresh]                        │   │
+│  │               →  [Customer Analytics Pipeline]                       │   │
+│  └──────────────────────────────────┬───────────────────────────────────┘   │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+┌─────────────────────────────────────┴───────────────────────────────────────┐
+│                         POSTGRESQL DATABASE (Neon)                           │
+│                                                                             │
+│  [bookings] [payments] [customers] [master_earnings] [referrals]           │
+│  [booking_snapshots] [webhook_jobs] [analytics_views] [wallet_passes]      │
+│  [organizations] [locations] [team_members] [services] [discounts]         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+┌─────────────────────────────────────┴───────────────────────────────────────┐
+│                        EXTERNAL SERVICES                                    │
+│  [Square API v2]    [Twilio SMS]    [SendGrid Email]    [Apple Wallet]     │
+└─────────────────────────────────────────────────────────────────────────────┘</div>
+
+<h2>8 Patent Subsystems</h2>
+
+<table>
+  <tr><th>#</th><th>Subsystem</th><th>Innovation</th><th>Status</th></tr>
+  <tr>
+    <td>1</td>
+    <td><strong>Snapshot Commission Economics</strong></td>
+    <td>Immutable BookingSnapshot freezes price &amp; commission at booking time. Dual-stage processing (base + discount). Append-only MasterEarningsLedger with entry types: SERVICE_COMMISSION, TIP, DISCOUNT_ADJUSTMENT.</td>
+    <td><span class="tag novel">NOVEL</span> <span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><strong>Referral Engine &amp; Fraud Prevention</strong></td>
+    <td>Dual-attribution analytics (referrer + referee value). 4-level cascading self-referral prevention: phone normalization, email matching, IP correlation, behavioral patterns. 10+ CTE SQL analytics refresh.</td>
+    <td><span class="tag novel">NOVEL</span> <span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><strong>Async Event Processing</strong></td>
+    <td>Synchronous webhook receipt + DB-backed job queue. SELECT FOR UPDATE SKIP LOCKED concurrency. Automatic retry with exponential backoff. Dead-letter handling.</td>
+    <td><span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><strong>Customer Intelligence</strong></td>
+    <td>65+ precomputed metrics via 7-stage CTE pipeline. 3-stage identity deduplication (phone → email → COALESCE merge). Temporal segmentation × behavioral classification. 35-day correction window for booking facts.</td>
+    <td><span class="tag novel">NOVEL</span> <span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><strong>Digital Wallet</strong></td>
+    <td>Serverless Apple Wallet .pkpass generation. Ephemeral certificate management (base64 env → /tmp). GAN normalization &amp; balance resolution. Real-time push updates.</td>
+    <td><span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td><strong>AI Business Analyst Agent</strong></td>
+    <td>Data aggregation → context construction → LLM invocation → recommendation validation → delivery. 5 analysis domains: retention, revenue, staff, marketing, operations. Domain-specific, not generic.</td>
+    <td><span class="tag novel">NOVEL</span> <span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>7</td>
+    <td><strong>Communication Tracking</strong></td>
+    <td>Multi-channel capture (SMS, phone, email, in-app). Admin performance metrics: response time, rebooking conversion, follow-up rates. Communication-to-outcome correlation engine.</td>
+    <td><span class="tag patent">PATENTED</span></td>
+  </tr>
+  <tr>
+    <td>8</td>
+    <td><strong>Standalone POS</strong></td>
+    <td>3-phase evolution: integration → parallel → replacement. Progressive migration from Square dependency to independent platform.</td>
+    <td><span class="tag patent">PATENTED</span></td>
+  </tr>
+</table>
+
+<h2>Booking-to-Payment Reconciliation Engine</h2>
+<p><span class="tag novel">NOVEL</span> Square's APIs have no foreign key between Bookings and Payments. This engine solves an industry-wide unsolved problem:</p>
+<div class="arch-box">
+Phase 1: API-Based Reconciliation
+  1. Fetch booking details from Square Bookings API
+  2. Extract service types from booking segments
+  3. Fetch payment line items from Square Payments API
+  4. Calculate service-type overlap score (Jaccard similarity)
+  5. If score > threshold → MATCH
+
+Phase 2: Database Temporal Fallback
+  1. Match by customer_id + location_id
+  2. Filter by time proximity (booking end_at ± 2 hours of payment created_at)
+  3. Rank by temporal distance
+  4. If unique match found → MATCH
+
+Result: Links every appointment to its payment transaction
+  → Enables accurate per-service, per-staff revenue attribution
+  → No existing platform can do this</div>
+
+<h2>Customer Intelligence Pipeline (65+ Metrics)</h2>
+<div class="two-col">
+  <div>
+    <h3>7-Stage CTE Pipeline</h3>
+    <table>
+      <tr><th>Stage</th><th>Purpose</th></tr>
+      <tr><td>1. Identity Resolution</td><td>Phone normalization + email matching + COALESCE merge</td></tr>
+      <tr><td>2. Visit History</td><td>First/last visit, frequency, gaps, regularity score</td></tr>
+      <tr><td>3. Spending Analysis</td><td>Total spend, avg ticket, trend direction, LTV</td></tr>
+      <tr><td>4. Service Preferences</td><td>Top services, category affinity, variety score</td></tr>
+      <tr><td>5. Location Behavior</td><td>Primary location, cross-location visits, loyalty</td></tr>
+      <tr><td>6. Temporal Patterns</td><td>Preferred day/time, booking lead time, seasonality</td></tr>
+      <tr><td>7. Risk Scoring</td><td>Churn probability, days since last visit, engagement score</td></tr>
+    </table>
+  </div>
+  <div>
+    <h3>Segmentation Model</h3>
+    <p><strong>Temporal (lifecycle):</strong></p>
+    <table>
+      <tr><td>NEW</td><td>First visit within 60 days</td></tr>
+      <tr><td>ACTIVE</td><td>Visited within expected interval</td></tr>
+      <tr><td>AT_RISK</td><td>Overdue by 1.5× expected interval</td></tr>
+      <tr><td>LOST</td><td>No visit in 120+ days</td></tr>
+      <tr><td>NEVER_BOOKED</td><td>Profile exists, no appointments</td></tr>
+    </table>
+    <p><strong>Behavioral (type):</strong></p>
+    <table>
+      <tr><td>SALON_CLIENT</td><td>Regular service customer</td></tr>
+      <tr><td>STUDENT</td><td>Student pricing detected</td></tr>
+      <tr><td>RETAIL</td><td>Product-only purchases</td></tr>
+      <tr><td>CANCELLED_ONLY</td><td>All bookings cancelled</td></tr>
+      <tr><td>POTENTIAL</td><td>Referred but not yet booked</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>Database Schema (20+ Models)</h2>
+<table>
+  <tr><th>Domain</th><th>Models</th><th>Key Relationships</th></tr>
+  <tr><td>Multi-tenant</td><td>organizations, locations, team_members</td><td>All data isolated by organization_id</td></tr>
+  <tr><td>Bookings</td><td>square_bookings, booking_snapshots, booking_facts</td><td>Snapshot freezes economics at creation time</td></tr>
+  <tr><td>Payments</td><td>square_payments, square_orders</td><td>Reconciled to bookings via dual-phase engine</td></tr>
+  <tr><td>Customers</td><td>square_existing_clients, customer_analytics</td><td>3-stage deduplication pipeline</td></tr>
+  <tr><td>Commissions</td><td>master_earnings_ledger, master_rates</td><td>Append-only ledger, immutable entries</td></tr>
+  <tr><td>Referrals</td><td>referral_codes, referral_tracking, referral_rewards</td><td>Dual-attribution with fraud flags</td></tr>
+  <tr><td>Processing</td><td>webhook_events, webhook_jobs, cron_logs</td><td>Job queue with SELECT FOR UPDATE SKIP LOCKED</td></tr>
+  <tr><td>Analytics</td><td>analytics_views (materialized), daily aggregates</td><td>Pre-computed for sub-second dashboard queries</td></tr>
+  <tr><td>Wallet</td><td>gift_cards, wallet_passes</td><td>Apple Wallet integration with push updates</td></tr>
+</table>
+
+<h2>Multi-Tenant SaaS Architecture</h2>
+<table>
+  <tr><th>Component</th><th>Implementation</th></tr>
+  <tr><td>Tenant Isolation</td><td>organization_id on every table. Row-level filtering on all queries. No cross-tenant data leakage.</td></tr>
+  <tr><td>Onboarding</td><td>Square OAuth 2.0 flow → automatic organization creation → data sync initiation</td></tr>
+  <tr><td>Org ID Resolution</td><td>Multi-strategy: location lookup → Square API → nested object extraction</td></tr>
+  <tr><td>Infrastructure Cost</td><td>$90/month (1 client) → $1,165/month (50 clients) — serverless scales automatically</td></tr>
+  <tr><td>Gross Margin</td><td>~88% at 50 clients</td></tr>
+</table>
+
+<div class="footer">
+  Confidential &mdash; Prepared for EB-1A Petition &mdash; Abylaikhan Azamatov &mdash; March 2026
+</div>
+
+</body>
+</html>

@@ -1,0 +1,194 @@
+/**
+ * KPI Dashboard with Period Comparison
+ * Returns 4 main KPIs: Appointments, Cancelled, No-Show, Revenue
+ * Each with comparison to previous period
+ * 
+ * GET /api/admin/analytics/kpi?organizationId=xxx&startDate=2026-02-01&endDate=2026-02-28&locationId=yyy
+ */
+
+export const dynamic = 'force-dynamic'
+
+import prisma from '@/lib/prisma-client'
+import { checkOrganizationAccess } from '@/lib/auth/check-access'
+
+function calculatePeriodDates(startDate, endDate) {
+  const start = new Date(startDate)
+  const end = new Date(endDate)
+  
+  // Calculate period length
+  const periodLength = Math.floor((end - start) / (1000 * 60 * 60 * 24)) + 1
+  
+  // Previous period
+  const prevEnd = new Date(start)
+  prevEnd.setDate(prevEnd.getDate() - 1)
+  const prevStart = new Date(prevEnd)
+  prevStart.setDate(prevStart.getDate() - periodLength + 1)
+  
+  return {
+    current: {
+      start: startDate,
+      end: endDate
+    },
+    previous: {
+      start: prevStart.toISOString().split('T')[0],
+      end: prevEnd.toISOString().split('T')[0]
+    }
+  }
+}
+
+function calculatePercentageChange(current, previous) {
+  if (previous === 0) {
+    return current > 0 ? 100 : 0
+  }
+  return ((current - previous) / previous * 100).toFixed(1)
+}
+
+export async function GET(request) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const organizationId = searchParams.get('organizationId')
+    const startDate = searchParams.get('startDate')
+    const endDate = searchParams.get('endDate')
+    const locationId = searchParams.get('locationId')
+
+    if (!organizationId) {
+      return Response.json({ error: 'organizationId is required' }, { status: 400 })
+    }
+
+    const access = await checkOrganizationAccess(request, organizationId)
+    if (!access) {
+      return Response.json({ error: 'Unauthorized' }, { status: 403 })
+    }
+
+    // If no dates provided, default to current month
+    let currentStart = startDate
+    let currentEnd = endDate
+    
+    if (!currentStart || !currentEnd) {
+      const today = new Date()
+      currentEnd = today.toISOString().split('T')[0]
+      currentStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
+    }
+
+    // Calculate previous period
+    const periods = calculatePeriodDates(currentStart, currentEnd)
+    
+    // Build parameterized KPI query
+    const kpiQueryBase = `
+      SELECT
+        SUM(a.appointments_count)::int as total_appointments,
+        SUM(a.cancelled_appointments)::int as total_cancelled,
+        SUM(a.no_show_appointments)::int as total_no_show,
+        SUM(r.revenue_dollars)::numeric as total_revenue,
+        SUM(r.payment_count)::int as total_payments
+      FROM analytics_appointments_by_location_daily a
+      FULL OUTER JOIN analytics_revenue_by_location_daily r
+        ON a.organization_id = r.organization_id
+        AND a.location_id = r.location_id
+        AND a.date = r.date
+      WHERE a.organization_id = $1::uuid
+        AND a.date BETWEEN $2::date AND $3::date
+    `
+
+    // Current period
+    const currentParams = [organizationId, periods.current.start, periods.current.end]
+    let currentQuery = kpiQueryBase
+    if (locationId) {
+      currentQuery += ` AND a.location_id = $${currentParams.length + 1}::uuid`
+      currentParams.push(locationId)
+    }
+    const currentData = await prisma.$queryRawUnsafe(currentQuery, ...currentParams)
+
+    const currentRevenue = currentData[0] || {}
+
+    // Previous period
+    const previousParams = [organizationId, periods.previous.start, periods.previous.end]
+    let previousQuery = kpiQueryBase
+    if (locationId) {
+      previousQuery += ` AND a.location_id = $${previousParams.length + 1}::uuid`
+      previousParams.push(locationId)
+    }
+    const previousData = await prisma.$queryRawUnsafe(previousQuery, ...previousParams)
+
+    const previousRevenue = previousData[0] || {}
+
+    // Extract values with defaults
+    const currAppts = currentData?.total_appointments || 0
+    const currCancelled = currentData?.total_cancelled || 0
+    const currNoShow = currentData?.total_no_show || 0
+    const currRevenue = Number(currentData?.total_revenue || 0)
+    const currPayments = currentData?.total_payments || 0
+
+    const prevAppts = previousData?.total_appointments || 0
+    const prevCancelled = previousData?.total_cancelled || 0
+    const prevNoShow = previousData?.total_no_show || 0
+    const prevRevenue = Number(previousData?.total_revenue || 0)
+    const prevPayments = previousData?.total_payments || 0
+
+    // Calculate average ticket (Revenue / Payments)
+    const currAvgTicket = currPayments > 0 ? currRevenue / currPayments : 0
+    const prevAvgTicket = prevPayments > 0 ? prevRevenue / prevPayments : 0
+
+    // Calculate changes
+    const appointmentsChange = calculatePercentageChange(currAppts, prevAppts)
+    const cancelledChange = calculatePercentageChange(currCancelled, prevCancelled)
+    const noShowChange = calculatePercentageChange(currNoShow, prevNoShow)
+    const revenueChange = calculatePercentageChange(currRevenue, prevRevenue)
+    const avgTicketChange = calculatePercentageChange(currAvgTicket, prevAvgTicket)
+
+    return Response.json({
+      periods: {
+        current: periods.current,
+        previous: periods.previous
+      },
+      kpis: {
+        appointments: {
+          label: 'Appointments',
+          current: currAppts,
+          previous: prevAppts,
+          change_percent: parseFloat(appointmentsChange),
+          change_direction: currAppts >= prevAppts ? 'up' : 'down'
+        },
+        cancelled: {
+          label: 'Cancelled',
+          current: currCancelled,
+          previous: prevCancelled,
+          change_percent: parseFloat(cancelledChange),
+          change_direction: currCancelled >= prevCancelled ? 'up' : 'down'
+        },
+        no_show: {
+          label: 'No-Show',
+          current: currNoShow,
+          previous: prevNoShow,
+          change_percent: parseFloat(noShowChange),
+          change_direction: currNoShow >= prevNoShow ? 'up' : 'down'
+        },
+        revenue: {
+          label: 'Revenue',
+          current: currRevenue,
+          current_formatted: `$${currRevenue.toFixed(2)}`,
+          previous: prevRevenue,
+          previous_formatted: `$${prevRevenue.toFixed(2)}`,
+          change_percent: parseFloat(revenueChange),
+          change_direction: currRevenue >= prevRevenue ? 'up' : 'down',
+          payments: currPayments,
+          average_transaction: currAvgTicket.toFixed(2),
+          average_transaction_change_percent: parseFloat(avgTicketChange),
+          average_transaction_change_direction: currAvgTicket >= prevAvgTicket ? 'up' : 'down'
+        }
+      },
+      summary: {
+        period_label: `${periods.current.start} to ${periods.current.end}`,
+        period_days: Math.floor((new Date(periods.current.end) - new Date(periods.current.start)) / (1000 * 60 * 60 * 24)) + 1,
+        locations: locationId ? 1 : 'All'
+      }
+    })
+  } catch (error) {
+    console.error('KPI error:', error)
+    return Response.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+

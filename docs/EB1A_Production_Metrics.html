@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @page {
+    size: letter;
+    margin: 0.6in 0.7in 0.5in 0.7in;
+  }
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 9.5pt;
+    line-height: 1.4;
+    color: #111;
+    margin: 0;
+    padding: 0;
+  }
+  h1 {
+    font-size: 14pt;
+    text-align: center;
+    margin: 0 0 2pt 0;
+    text-transform: uppercase;
+    letter-spacing: 1pt;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 9pt;
+    color: #444;
+    margin: 0 0 12pt 0;
+  }
+  h2 {
+    font-size: 10.5pt;
+    font-weight: bold;
+    margin: 10pt 0 4pt 0;
+    padding-bottom: 1pt;
+    border-bottom: 1.5px solid #333;
+    text-transform: uppercase;
+    color: #222;
+  }
+  p {
+    margin: 2pt 0 5pt 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 4pt 0 8pt 0;
+    font-size: 9pt;
+  }
+  th {
+    background-color: #1a1a1a;
+    color: white;
+    padding: 3pt 6pt;
+    text-align: left;
+    font-size: 8.5pt;
+  }
+  td {
+    padding: 3pt 6pt;
+    border-bottom: 1px solid #ddd;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background-color: #f7f7f7;
+  }
+  .stats-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8pt;
+    margin: 6pt 0 10pt 0;
+  }
+  .stat {
+    flex: 1;
+    min-width: 100pt;
+    background: #f0f0f0;
+    border-radius: 4pt;
+    padding: 6pt 8pt;
+    text-align: center;
+    border: 1px solid #ddd;
+  }
+  .stat .num {
+    font-size: 14pt;
+    font-weight: bold;
+    display: block;
+    color: #111;
+  }
+  .stat .label {
+    font-size: 7.5pt;
+    color: #555;
+    display: block;
+    margin-top: 1pt;
+  }
+  .stat.green {
+    background: #e8f5e9;
+    border-color: #4caf50;
+  }
+  .stat.green .num {
+    color: #1b5e20;
+  }
+  .stat.red {
+    background: #ffebee;
+    border-color: #ef5350;
+  }
+  .stat.red .num {
+    color: #b71c1c;
+  }
+  .stat.blue {
+    background: #e3f2fd;
+    border-color: #42a5f5;
+  }
+  .stat.blue .num {
+    color: #0d47a1;
+  }
+  .two-col {
+    display: flex;
+    gap: 10pt;
+  }
+  .two-col > div {
+    flex: 1;
+  }
+  .section-box {
+    background: #fafafa;
+    border: 1px solid #ddd;
+    padding: 6pt 10pt;
+    margin: 4pt 0 8pt 0;
+    border-radius: 3pt;
+  }
+  .check { color: #1b5e20; }
+  .footer {
+    text-align: center;
+    font-size: 7.5pt;
+    color: #888;
+    margin-top: 8pt;
+    font-style: italic;
+  }
+  strong { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>Production Metrics Report</h1>
+<div class="subtitle">AI-Powered Business Intelligence Platform &nbsp;|&nbsp; Live Deployment: Zorina Nail Studio &nbsp;|&nbsp; March 2026</div>
+
+<h2>Deployment Overview</h2>
+<p>This report documents the production metrics of the AI-powered business intelligence platform developed by Abylaikhan Azamatov, deployed for Zorina Nail Studio, San Francisco, California (2 locations: Union Street &amp; Pacific Avenue).</p>
+
+<div class="stats-grid">
+  <div class="stat blue"><span class="num">$1.2M</span><span class="label">Annual Revenue Tracked</span></div>
+  <div class="stat blue"><span class="num">2</span><span class="label">Business Locations</span></div>
+  <div class="stat blue"><span class="num">15+</span><span class="label">Staff Members</span></div>
+  <div class="stat blue"><span class="num">700+</span><span class="label">Active Clients / Month</span></div>
+  <div class="stat blue"><span class="num">1</span><span class="label">Developer (Solo)</span></div>
+</div>
+
+<h2>Monthly Operating Metrics (February 2026)</h2>
+
+<div class="stats-grid">
+  <div class="stat"><span class="num">$100,819</span><span class="label">Monthly Revenue Processed</span></div>
+  <div class="stat"><span class="num">1,025</span><span class="label">Accepted Appointments</span></div>
+  <div class="stat"><span class="num">773</span><span class="label">Payment Transactions</span></div>
+  <div class="stat"><span class="num">708</span><span class="label">Unique Active Customers</span></div>
+  <div class="stat"><span class="num">$130.42</span><span class="label">Average Transaction</span></div>
+  <div class="stat"><span class="num">282</span><span class="label">Cancellations Tracked</span></div>
+</div>
+
+<div class="two-col">
+  <div>
+    <h3 style="font-size: 9.5pt; margin: 4pt 0;">By Location &mdash; Union Street</h3>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Appointments (Accepted)</td><td><strong>527</strong></td></tr>
+      <tr><td>Revenue</td><td><strong>$54,279.10</strong></td></tr>
+      <tr><td>Avg Transaction</td><td>$103.00</td></tr>
+    </table>
+  </div>
+  <div>
+    <h3 style="font-size: 9.5pt; margin: 4pt 0;">By Location &mdash; Pacific Avenue</h3>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Appointments (Accepted)</td><td><strong>498</strong></td></tr>
+      <tr><td>Revenue</td><td><strong>$46,540.04</strong></td></tr>
+      <tr><td>Avg Transaction</td><td>$93.45</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>Historical Data Processed</h2>
+
+<div class="stats-grid">
+  <div class="stat"><span class="num">$3,380,829</span><span class="label">Total Revenue Verified</span></div>
+  <div class="stat"><span class="num">28,928</span><span class="label">Total Payments Reconciled</span></div>
+  <div class="stat"><span class="num">8,090</span><span class="label">Customer Profiles Analyzed</span></div>
+  <div class="stat"><span class="num">765</span><span class="label">Unique Dates Covered</span></div>
+</div>
+
+<div class="section-box">
+  <strong>Data Integrity Verification (Automated):</strong><br>
+  <span class="check">&#10003;</span> Revenue totals match raw payment data: $3,380,828.64<br>
+  <span class="check">&#10003;</span> Payment count matches: 28,928 payments<br>
+  <span class="check">&#10003;</span> All dates covered: 765 unique dates with no gaps<br>
+  <span class="check">&#10003;</span> No duplicate records detected<br>
+  <span class="check">&#10003;</span> No missing data detected<br>
+  <span class="check">&#10003;</span> Timezone consistency verified (Pacific Time)
+</div>
+
+<h2>Errors &amp; Fraud Detected by Platform</h2>
+
+<div class="stats-grid">
+  <div class="stat red"><span class="num">$5,133.63</span><span class="label">Revenue Reporting Error</span></div>
+  <div class="stat red"><span class="num">5.1%</span><span class="label">Revenue Inflation Rate</span></div>
+  <div class="stat red"><span class="num">47</span><span class="label">Missing Payments Found</span></div>
+  <div class="stat red"><span class="num">$5,410</span><span class="label">Referral Fraud Blocked</span></div>
+</div>
+
+<table>
+  <tr><th>Issue Detected</th><th>Root Cause</th><th>Impact</th><th>Resolution</th></tr>
+  <tr>
+    <td><strong>Revenue inflated by $5,133.63</strong></td>
+    <td>Square analytics used total_money_amount (includes tips) instead of amount_money_amount (service revenue only)</td>
+    <td>5.1% revenue inflation. Reported $105,952.77 vs actual $100,819.14</td>
+    <td>Platform uses correct field. Tips tracked separately.</td>
+  </tr>
+  <tr>
+    <td><strong>47 payments invisible</strong></td>
+    <td>Square's analytics view used INNER JOIN with locations. Payments without direct location_id were excluded.</td>
+    <td>Incomplete revenue picture. Under-counting transactions.</td>
+    <td>Platform uses UNION query to capture payments linked via orders table.</td>
+  </tr>
+  <tr>
+    <td><strong>$5,410 referral fraud</strong></td>
+    <td>Customers created multiple accounts with different phone numbers to self-refer and collect bonuses.</td>
+    <td>Direct financial loss through fraudulent reward payouts.</td>
+    <td>4-layer fraud detection: phone normalization, email matching, IP correlation, behavioral analysis.</td>
+  </tr>
+  <tr>
+    <td><strong>Mixed booking statuses</strong></td>
+    <td>Square counted ALL booking statuses as "appointments" including cancelled and no-show.</td>
+    <td>Inaccurate KPIs. Owner couldn't distinguish real vs cancelled.</td>
+    <td>Platform filters: ACCEPTED only for KPI. Tracks cancelled (282) and no-show (0) separately.</td>
+  </tr>
+</table>
+
+<h2>Customer Intelligence Output</h2>
+
+<table>
+  <tr><th>Metric Category</th><th>Count</th><th>Examples</th></tr>
+  <tr>
+    <td>Customer profiles analyzed</td>
+    <td><strong>8,090</strong></td>
+    <td>Complete history for every customer who has interacted with the business</td>
+  </tr>
+  <tr>
+    <td>Monthly active customers</td>
+    <td><strong>708</strong></td>
+    <td>Customers with at least 1 accepted appointment in the month</td>
+  </tr>
+  <tr>
+    <td>Precomputed metrics per customer</td>
+    <td><strong>65+</strong></td>
+    <td>LTV, churn risk, visit frequency, spending trend, service preferences, location affinity</td>
+  </tr>
+  <tr>
+    <td>Lifecycle segments assigned</td>
+    <td><strong>5 types</strong></td>
+    <td>NEW, ACTIVE, AT_RISK, LOST, NEVER_BOOKED</td>
+  </tr>
+  <tr>
+    <td>Behavioral classifications</td>
+    <td><strong>5 types</strong></td>
+    <td>SALON_CLIENT, STUDENT, RETAIL, CANCELLED_ONLY, POTENTIAL</td>
+  </tr>
+  <tr>
+    <td>Duplicate profiles resolved</td>
+    <td><strong>Automated</strong></td>
+    <td>3-stage deduplication: phone → email → COALESCE merge</td>
+  </tr>
+</table>
+
+<h2>Referral Program Metrics</h2>
+
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Referral codes generated</td><td>Active for all qualifying customers</td></tr>
+  <tr><td>Referral channels</td><td>SMS (Twilio) + Email (SendGrid) + Digital Wallet (Apple Wallet)</td></tr>
+  <tr><td>Fraud attempts detected &amp; blocked</td><td><strong>$5,410 worth</strong></td></tr>
+  <tr><td>Fraud detection layers</td><td>4 (phone normalization, email matching, IP correlation, behavioral patterns)</td></tr>
+  <tr><td>Attribution model</td><td>Dual-attribution: tracks both referrer contribution and referee value</td></tr>
+</table>
+
+<h2>Platform Performance</h2>
+
+<table>
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Infrastructure cost (current)</td><td>$90/month (Vercel Pro + Supabase + Twilio + SendGrid + Domain)</td></tr>
+  <tr><td>Revenue processed / infrastructure cost ratio</td><td>$100,819 : $90 = 1,120:1</td></tr>
+  <tr><td>Dashboard query response time</td><td>Sub-second (precomputed materialized views)</td></tr>
+  <tr><td>Webhook processing</td><td>Guaranteed delivery with retry + dead-letter queue</td></tr>
+  <tr><td>Data sync frequency</td><td>Real-time via Square webhooks + scheduled cron refreshes</td></tr>
+  <tr><td>Uptime</td><td>99.5%+ (Vercel serverless)</td></tr>
+  <tr><td>Database models</td><td>20+ Prisma models</td></tr>
+  <tr><td>Analytics views</td><td>Multiple materialized views with automated refresh</td></tr>
+</table>
+
+<h2>Technology Scope (Single Developer)</h2>
+
+<table>
+  <tr><th>Domain</th><th>What Was Built</th></tr>
+  <tr><td>Backend API</td><td>20+ API endpoints: webhooks, analytics, referrals, wallet, cron jobs, admin</td></tr>
+  <tr><td>Database</td><td>20+ models, materialized views, complex CTEs (10+ stage queries), indexes</td></tr>
+  <tr><td>Workers</td><td>Commission calculation, discount engine, reconciliation engine, analytics refresh</td></tr>
+  <tr><td>Integrations</td><td>Square (Bookings, Payments, Customers, Catalog, Team, Orders), Twilio, SendGrid, Apple Wallet</td></tr>
+  <tr><td>Frontend</td><td>Owner dashboard, customer portal, referral pages, digital wallet pages</td></tr>
+  <tr><td>Security</td><td>Webhook signature verification, SQL injection prevention, fraud detection, data isolation</td></tr>
+  <tr><td>DevOps</td><td>Vercel deployment, Prisma migrations, cron scheduling, environment management</td></tr>
+  <tr><td>Analytics</td><td>65+ customer metrics, revenue analytics, booking analytics, staff performance, referral analytics</td></tr>
+</table>
+
+<div class="section-box">
+  <strong>Summary:</strong> This platform processes $1.2M/year in real business data, serves 8,090+ customer profiles, reconciles 28,928+ historical payments, and has already identified $10,543+ in errors and fraud that the industry-leading platform (Square) missed. Built entirely by a single developer.
+</div>
+
+<div class="footer">
+  Confidential &mdash; Prepared for EB-1A Petition &mdash; Abylaikhan Azamatov &mdash; March 2026
+</div>
+
+</body>
+</html>
