@@ -1256,6 +1256,12 @@
   document.getElementById('feedbackForm').addEventListener('submit', async e => {
     e.preventDefault();
 
+    // Validate rating is selected
+    if (!ratingInput.value) {
+      alert('⭐ Please select a rating (Poor, Fair, Okay, Great, or Excellent)');
+      return;
+    }
+
     const submitBtn = e.target.querySelector('button[type="submit"]');
     const originalLabel = submitBtn.textContent;
     submitBtn.disabled = true;
