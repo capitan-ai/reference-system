@@ -20,6 +20,10 @@
   },
   "crons": [
     {
+      "path": "/api/feedback/daily-report",
+      "schedule": "0 3 * * *"
+    },
+    {
       "path": "/api/cron/giftcard-jobs",
       "schedule": "* * * * *"
     },
