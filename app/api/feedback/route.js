@@ -28,7 +28,7 @@ function normalizePhone(raw) {
 }
 
 const AWARENESS_VALUES = new Set(['yes', 'no'])
-const SOURCE_VALUES = new Set(['google', 'instagram', 'influencer', 'friend', 'walkin', 'yelp', 'tiktok'])
+const SOURCE_VALUES = new Set(['google', 'instagram', 'influencer', 'friend', 'walkin', 'yelp', 'tiktok', 'other'])
 const ISSUE_VALUES = new Set(['quality', 'cleanliness', 'atmosphere', 'comfort', 'nothing'])
 
 function pickEnum(value, allowed) {
