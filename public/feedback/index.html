@@ -1262,6 +1262,15 @@
       return;
     }
 
+    // Validate "Other" source requires explanation
+    const selectedSource = document.querySelector('input[name="source"]:checked')?.value;
+    const sourceOtherText = document.getElementById('sourceOtherField')?.value?.trim();
+    if (selectedSource === 'other' && !sourceOtherText) {
+      alert('Please tell us what you meant by "Other"');
+      document.getElementById('sourceOtherField').focus();
+      return;
+    }
+
     const submitBtn = e.target.querySelector('button[type="submit"]');
     const originalLabel = submitBtn.textContent;
     submitBtn.disabled = true;

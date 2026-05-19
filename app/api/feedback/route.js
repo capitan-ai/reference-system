@@ -97,6 +97,10 @@ export async function POST(request) {
     const issuesIn = Array.isArray(body.issues) ? body.issues : []
     const issues = issuesIn.filter(v => ISSUE_VALUES.has(v))
 
+    const sourceOtherDetail = body.source === 'other' && body.source_other_detail
+      ? String(body.source_other_detail).trim() || null
+      : null
+
     // Lookup booking to extract customer_id, technician_id, and location_id
     let bookingData = null
     if (bookingId) {
@@ -175,6 +179,7 @@ export async function POST(request) {
         // Feedback data
         rating,
         source: pickEnum(body.source, SOURCE_VALUES),
+        source_other_detail: sourceOtherDetail,
         improve_text: body.improve ? String(body.improve).trim() || null : null,
         issues,
         awareness: pickEnum(body.awareness, AWARENESS_VALUES),

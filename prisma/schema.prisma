@@ -633,6 +633,7 @@ model CustomerFeedback {
   quality             String?
   cared               String?
   source              String?
+  source_other_detail String?
   improve_text        String?
   concern_detail      String?
   issues              String[]     @default([])
