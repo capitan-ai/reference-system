@@ -80,7 +80,21 @@ export async function POST(request) {
     if (!masterName) return Response.json({ error: 'customer.masterName required' }, { status: 400 })
     if (!serviceDateRaw) return Response.json({ error: 'customer.serviceDate required' }, { status: 400 })
 
-    const serviceDate = new Date(serviceDateRaw)
+    // Parse date string as Pacific timezone, not UTC
+    // If form sends "05/18/2026", treat it as 05/18/2026 00:00:00 Pacific, not UTC
+    let serviceDate
+    if (typeof serviceDateRaw === 'string' && /^\d{2}\/\d{2}\/\d{4}$/.test(serviceDateRaw)) {
+      // MM/DD/YYYY format - parse as Pacific midnight
+      const [month, day, year] = serviceDateRaw.split('/')
+      const dateStr = `${year}-${month}-${day}T00:00:00`
+      const tempDate = new Date(dateStr)
+      // Create a UTC date, then adjust for Pacific offset
+      const pstOffset = -7 * 60 * 60 * 1000 // PDT is UTC-7
+      serviceDate = new Date(tempDate.getTime() - pstOffset)
+    } else {
+      serviceDate = new Date(serviceDateRaw)
+    }
+
     if (Number.isNaN(serviceDate.getTime())) {
       return Response.json({ error: 'customer.serviceDate is not a valid date' }, { status: 400 })
     }
