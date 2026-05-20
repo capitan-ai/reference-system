@@ -65,6 +65,7 @@ export async function POST(request) {
       select: {
         customer_name: true,
         master_name: true,
+        admin_name: true,
         location_name: true,
         rating: true,
         source: true,
@@ -114,32 +115,88 @@ export async function POST(request) {
       1: feedback.filter(f => f.rating === 1).length
     }
 
-    // Build table
-    let table = '<b>Today\'s Feedback Summary</b>\n'
-    table += `📊 Total: ${feedback.length} | ⭐ Avg: ${avgRating}\n\n`
-    table += '<b>Rating Distribution:</b>\n'
-    table += `5⭐ ${ratingDist[5]} | 4⭐ ${ratingDist[4]} | 3⭐ ${ratingDist[3]} | 2⭐ ${ratingDist[2]} | 1⭐ ${ratingDist[1]}\n\n`
-    table += `<b>Top Issues:</b> ${topIssues}\n\n`
-    table += '<b>Detailed Feedback:</b>\n'
+    // Calculate top masters
+    const masterStats = {}
+    feedback.forEach(f => {
+      if (f.master_name) {
+        if (!masterStats[f.master_name]) {
+          masterStats[f.master_name] = { count: 0, avgRating: 0, totalRating: 0 }
+        }
+        masterStats[f.master_name].count++
+        masterStats[f.master_name].totalRating += f.rating || 0
+      }
+    })
+    const topMasters = Object.entries(masterStats)
+      .map(([name, stats]) => ({
+        name,
+        count: stats.count,
+        avgRating: (stats.totalRating / stats.count).toFixed(1)
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 3)
 
-    // Add individual feedback (limit to last 10)
-    const recentFeedback = feedback.slice(0, 10)
+    // Build beautiful report
+    let table = '═══════════════════════════════════\n'
+    table += '<b>📊 DAILY FEEDBACK REPORT</b>\n'
+    table += `<b>${startOfDay.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</b>\n`
+    table += '═══════════════════════════════════\n\n'
+
+    // Key metrics
+    table += '<b>KEY METRICS</b>\n'
+    table += `📝 Total Feedback: <b>${feedback.length}</b>\n`
+    table += `⭐ Average Rating: <b>${avgRating}</b>/5\n`
+    table += `😊 Positive (4-5★): <b>${ratingDist[5] + ratingDist[4]}</b> (${Math.round(((ratingDist[5] + ratingDist[4]) / feedback.length) * 100)}%)\n\n`
+
+    // Rating distribution with visual
+    table += '<b>RATING BREAKDOWN</b>\n'
+    table += `5⭐ ${ratingDist[5].toString().padStart(2)} ${generateBar(ratingDist[5], Math.max(...Object.values(ratingDist)))}\n`
+    table += `4⭐ ${ratingDist[4].toString().padStart(2)} ${generateBar(ratingDist[4], Math.max(...Object.values(ratingDist)))}\n`
+    table += `3⭐ ${ratingDist[3].toString().padStart(2)} ${generateBar(ratingDist[3], Math.max(...Object.values(ratingDist)))}\n`
+    table += `2⭐ ${ratingDist[2].toString().padStart(2)} ${generateBar(ratingDist[2], Math.max(...Object.values(ratingDist)))}\n`
+    table += `1⭐ ${ratingDist[1].toString().padStart(2)} ${generateBar(ratingDist[1], Math.max(...Object.values(ratingDist)))}\n\n`
+
+    // Top issues
+    table += '<b>TOP FEEDBACK</b>\n'
+    table += `🎯 Main Theme: <b>${topIssues}</b>\n\n`
+
+    // Top masters
+    if (topMasters.length > 0) {
+      table += '<b>👑 TOP MASTERS</b>\n'
+      topMasters.forEach((master, i) => {
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'
+        table += `${medal} ${master.name}: ${master.count} feedback • ${master.avgRating}⭐\n`
+      })
+      table += '\n'
+    }
+
+    // Recent feedback
+    table += '<b>RECENT SUBMISSIONS</b>\n'
+    const recentFeedback = feedback.slice(0, 5)
     recentFeedback.forEach((f, i) => {
-      const star = f.rating ? '⭐'.repeat(f.rating) : '?'
+      const star = f.rating ? '⭐'.repeat(f.rating) : '❓'
       const time = new Date(f.submitted_at).toLocaleTimeString('en-US', {
         timeZone: 'America/Los_Angeles',
         hour: '2-digit',
         minute: '2-digit'
       })
-      table += `${i + 1}. ${f.customer_name} @ ${f.location_name || '?'} [${time}]\n`
-      table += `   ${star} ${f.master_name}\n`
+      const admin = f.admin_name ? ` • Admin: ${f.admin_name}` : ''
+      table += `\n${i + 1}. <b>${f.customer_name}</b> ${star}\n`
+      table += `   👨‍💼 ${f.master_name}${admin}\n`
       if (f.improve_text) {
-        table += `   💬 ${f.improve_text.substring(0, 50)}\n`
+        table += `   💬 "${f.improve_text.substring(0, 40)}${f.improve_text.length > 40 ? '...' : ''}"\n`
       }
     })
 
-    if (feedback.length > 10) {
-      table += `\n... and ${feedback.length - 10} more`
+    if (feedback.length > 5) {
+      table += `\n<i>... and ${feedback.length - 5} more feedback entries</i>`
+    }
+
+    table += '\n\n═══════════════════════════════════'
+
+    function generateBar(value, max) {
+      const barLength = 10
+      const filled = Math.round((value / max) * barLength)
+      return '█'.repeat(filled) + '░'.repeat(barLength - filled)
     }
 
     console.log(`[${timestamp}] Sending report to Telegram...`)
