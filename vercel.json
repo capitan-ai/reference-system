@@ -21,7 +21,7 @@
   "crons": [
     {
       "path": "/api/feedback/daily-report",
-      "schedule": "0 3 * * *"
+      "schedule": "0 * * * *"
     },
     {
       "path": "/api/cron/giftcard-jobs",
