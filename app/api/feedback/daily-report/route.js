@@ -34,9 +34,13 @@ async function sendTelegramMessage(text) {
 }
 
 export async function POST(request) {
+  const timestamp = new Date().toISOString()
+  console.log(`[${timestamp}] Daily report triggered`)
+
   try {
     const orgId = process.env.ZORINA_ORG_ID
     if (!orgId) {
+      console.error(`[${timestamp}] ZORINA_ORG_ID not configured`)
       return Response.json({ error: 'ZORINA_ORG_ID not configured' }, { status: 500 })
     }
 
@@ -45,6 +49,9 @@ export async function POST(request) {
     const pstDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }))
     const startOfDay = new Date(pstDate.getFullYear(), pstDate.getMonth(), pstDate.getDate())
     const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000)
+
+    console.log(`[${timestamp}] Fetching feedback for: ${pstDate.toLocaleDateString('en-US')} Pacific`)
+    console.log(`[${timestamp}] Date range: ${startOfDay.toISOString()} to ${endOfDay.toISOString()}`)
 
     // Fetch today's feedback
     const feedback = await db.customerFeedback.findMany({
@@ -68,10 +75,14 @@ export async function POST(request) {
       orderBy: { submitted_at: 'desc' }
     })
 
+    console.log(`[${timestamp}] Found ${feedback.length} feedback entries`)
+
     if (feedback.length === 0) {
       const msg = `📊 <b>Daily Feedback Report</b>\n\n📅 ${startOfDay.toLocaleDateString('en-US')}\n\n❌ No feedback received today`
-      await sendTelegramMessage(msg)
-      return Response.json({ message: 'No feedback today', count: 0 })
+      console.log(`[${timestamp}] Sending "no feedback" message to Telegram`)
+      const sent = await sendTelegramMessage(msg)
+      console.log(`[${timestamp}] Telegram send result: ${sent}`)
+      return Response.json({ message: 'No feedback today', count: 0, telegramSent: sent })
     }
 
     // Calculate statistics
@@ -131,16 +142,20 @@ export async function POST(request) {
       table += `\n... and ${feedback.length - 10} more`
     }
 
+    console.log(`[${timestamp}] Sending report to Telegram...`)
     const success = await sendTelegramMessage(table)
+    console.log(`[${timestamp}] Telegram send result: ${success}`)
 
     return Response.json({
       success,
       count: feedback.length,
       avgRating,
-      topIssues: issueCount
+      topIssues: issueCount,
+      telegramSent: success
     }, { status: 200 })
   } catch (err) {
-    console.error('Error generating daily report:', err.message)
-    return Response.json({ error: err.message }, { status: 500 })
+    console.error(`[${timestamp}] ERROR: ${err.message}`)
+    console.error(`[${timestamp}] Stack:`, err.stack)
+    return Response.json({ error: err.message, stack: err.stack }, { status: 500 })
   }
 }
