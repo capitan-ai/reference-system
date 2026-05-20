@@ -200,7 +200,12 @@ export async function POST(request) {
     }
 
     console.log(`[${timestamp}] Sending report to Telegram...`)
-    const success = await sendTelegramMessage(table)
+
+    // Send link to HTML report instead of text
+    const reportUrl = 'https://referral-system-salon.vercel.app/api/feedback/report-html'
+    const telegramMessage = `<b>📊 Daily Feedback Report</b>\n\n<a href="${reportUrl}">📋 View Full Report</a>\n\n<b>Quick Stats:</b>\n✅ Total: ${feedback.length}\n⭐ Avg Rating: ${avgRating}\n😊 Positive: ${Math.round(((ratingDist[5] + ratingDist[4]) / feedback.length) * 100)}%`
+
+    const success = await sendTelegramMessage(telegramMessage)
     console.log(`[${timestamp}] Telegram send result: ${success}`)
 
     return Response.json({
