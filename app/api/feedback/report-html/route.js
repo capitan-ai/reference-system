@@ -28,6 +28,7 @@ export async function GET(request) {
         customer_name: true,
         master_name: true,
         admin_name: true,
+        location_id: true,
         location_name: true,
         rating: true,
         source: true,
@@ -36,6 +37,20 @@ export async function GET(request) {
         submitted_at: true
       },
       orderBy: { submitted_at: 'desc' }
+    })
+
+    // Fetch all locations to map IDs to names (for entries where location_name is NULL)
+    const locations = await db.location.findMany({
+      where: { organization_id: orgId },
+      select: { id: true, name: true }
+    })
+    const locationMap = new Map(locations.map(l => [l.id, l.name]))
+
+    // Ensure all feedback entries have location names
+    feedback.forEach(f => {
+      if (!f.location_name && f.location_id) {
+        f.location_name = locationMap.get(f.location_id)
+      }
     })
 
     // Calculate statistics
@@ -389,11 +404,11 @@ export async function GET(request) {
       </div>
       ` : ''}
 
-      <!-- Recent Feedback -->
+      <!-- All Feedback -->
       <div class="section">
-        <h2 class="section-title">Recent Submissions</h2>
+        <h2 class="section-title">All Submissions (${feedback.length})</h2>
         <div class="feedback-list">
-          ${feedback.slice(0, 8).map(f => {
+          ${feedback.map(f => {
             const time = new Date(f.submitted_at).toLocaleTimeString('en-US', {
               timeZone: 'America/Los_Angeles',
               hour: '2-digit',
@@ -417,7 +432,6 @@ export async function GET(request) {
             `
           }).join('')}
         </div>
-        ${feedback.length > 8 ? `<p style="text-align: center; margin-top: 20px; color: #999;">... and ${feedback.length - 8} more</p>` : ''}
       </div>
 
       <div class="footer">
