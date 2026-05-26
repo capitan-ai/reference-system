@@ -60,6 +60,12 @@
       "schedule": "0 8 * * *"
     }
   ],
+  "rewrites": [
+    {
+      "source": "/feedback/today",
+      "destination": "/api/feedback/report-html"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
