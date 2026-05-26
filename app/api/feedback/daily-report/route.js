@@ -33,7 +33,7 @@ async function sendTelegramMessage(text) {
   }
 }
 
-export async function POST(request) {
+async function handler(request) {
   const timestamp = new Date().toISOString()
   console.log(`[${timestamp}] Daily report triggered`)
 
@@ -220,4 +220,12 @@ export async function POST(request) {
     console.error(`[${timestamp}] Stack:`, err.stack)
     return Response.json({ error: err.message, stack: err.stack }, { status: 500 })
   }
+}
+
+export async function GET(request) {
+  return handler(request)
+}
+
+export async function POST(request) {
+  return handler(request)
 }
