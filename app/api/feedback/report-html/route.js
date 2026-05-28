@@ -88,6 +88,26 @@ export async function GET(request) {
       .sort((a, b) => b.count - a.count)
       .slice(0, 5)
 
+    // Calculate source breakdown
+    const sourceStats = {}
+    feedback.forEach(f => {
+      const src = f.source || 'Unknown'
+      if (!sourceStats[src]) {
+        sourceStats[src] = { count: 0, totalRating: 0 }
+      }
+      sourceStats[src].count++
+      sourceStats[src].totalRating += f.rating || 0
+    })
+
+    const topSources = Object.entries(sourceStats)
+      .map(([name, stats]) => ({
+        name,
+        count: stats.count,
+        avgRating: (stats.totalRating / stats.count).toFixed(1),
+        pct: feedback.length > 0 ? Math.round((stats.count / feedback.length) * 100) : 0
+      }))
+      .sort((a, b) => b.count - a.count)
+
     // Count issues
     const issueCount = {}
     feedback.forEach(f => {
@@ -101,6 +121,8 @@ export async function GET(request) {
     const topIssues = Object.entries(issueCount)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
+
+    const maxRating = Math.max(1, ...Object.values(ratingDist))
 
     // Build HTML
     const dateStr = startOfDay.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
@@ -118,273 +140,314 @@ export async function GET(request) {
       padding: 0;
       box-sizing: border-box;
     }
+    :root {
+      --accent: #6366F1;
+      --accent-soft: #EEF0FE;
+      --bg: #F9FAFB;
+      --card: #FFFFFF;
+      --border: #EAECEF;
+      --text: #111827;
+      --muted: #6B7280;
+      --green: #16A34A;
+      --green-soft: #DCFCE7;
+      --amber: #D97706;
+      --red: #DC2626;
+    }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: var(--bg);
       min-height: 100vh;
-      padding: 20px;
+      padding: 32px 20px;
+      color: var(--text);
     }
     .container {
-      max-width: 900px;
+      max-width: 960px;
       margin: 0 auto;
-      background: white;
-      border-radius: 20px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      overflow: hidden;
     }
     .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 40px 30px;
-      text-align: center;
+      margin-bottom: 28px;
+    }
+    .header .eyebrow {
+      font-size: 0.8em;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 6px;
     }
     .header h1 {
-      font-size: 2.5em;
-      margin-bottom: 10px;
+      font-size: 2em;
       font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 4px;
     }
     .header p {
-      font-size: 1.2em;
-      opacity: 0.9;
-    }
-    .content {
-      padding: 40px 30px;
+      color: var(--muted);
+      font-size: 1em;
     }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 20px;
-      margin-bottom: 40px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
     }
     .stat-card {
-      background: #f8f9fa;
-      padding: 25px;
-      border-radius: 15px;
-      text-align: center;
-      border-left: 5px solid #667eea;
+      background: var(--card);
+      padding: 22px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
     }
     .stat-card h3 {
-      color: #666;
-      font-size: 0.9em;
-      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 0.72em;
+      font-weight: 600;
+      margin-bottom: 12px;
       text-transform: uppercase;
-      letter-spacing: 1px;
+      letter-spacing: 0.06em;
     }
     .stat-card .value {
-      font-size: 2.5em;
+      font-size: 2.2em;
       font-weight: 700;
-      color: #667eea;
+      letter-spacing: -0.02em;
+      color: var(--text);
     }
-    .section {
-      margin-bottom: 40px;
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
     }
     .section-title {
-      font-size: 1.5em;
-      color: #667eea;
-      margin-bottom: 20px;
-      padding-bottom: 10px;
-      border-bottom: 3px solid #667eea;
+      font-size: 1.05em;
       font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 18px;
+      color: var(--text);
     }
-    .rating-bars {
-      display: space-between;
-    }
+    /* Rating bars */
     .rating-bar {
       display: flex;
       align-items: center;
-      margin-bottom: 15px;
-      gap: 15px;
+      margin-bottom: 12px;
+      gap: 14px;
     }
+    .rating-bar:last-child { margin-bottom: 0; }
     .rating-label {
       font-weight: 600;
-      width: 60px;
-      color: #333;
+      width: 42px;
+      color: var(--muted);
+      font-size: 0.9em;
     }
-    .rating-bar-fill {
+    .rating-track {
       flex: 1;
-      height: 30px;
-      background: #f0f0f0;
+      height: 28px;
+      background: #F3F4F6;
       border-radius: 8px;
       overflow: hidden;
-      position: relative;
     }
-    .rating-bar-fill.star5 { background: linear-gradient(90deg, #FFD700 0%, #FFA500 100%); }
-    .rating-bar-fill.star4 { background: linear-gradient(90deg, #90EE90 0%, #32CD32 100%); }
-    .rating-bar-fill.star3 { background: linear-gradient(90deg, #87CEEB 0%, #4169E1 100%); }
-    .rating-bar-fill.star2 { background: linear-gradient(90deg, #FFB6C1 0%, #FF69B4 100%); }
-    .rating-bar-fill.star1 { background: linear-gradient(90deg, #FF6347 0%, #DC143C 100%); }
-    .rating-bar-fill.fill {
+    .rating-fill {
       height: 100%;
+      background: var(--accent);
+      border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: flex-end;
       padding-right: 10px;
       color: white;
       font-weight: 600;
-      font-size: 0.9em;
+      font-size: 0.85em;
+      min-width: 28px;
+      transition: width 0.3s ease;
     }
+    .rating-fill.zero {
+      background: transparent;
+      color: var(--muted);
+      justify-content: flex-start;
+      padding-left: 10px;
+      padding-right: 0;
+    }
+    /* Masters */
     .masters-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 15px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
     }
     .master-card {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 20px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 18px;
       border-radius: 12px;
-      text-align: center;
+      display: flex;
+      align-items: center;
+      gap: 14px;
     }
-    .master-card .rank {
-      font-size: 2em;
-      margin-bottom: 10px;
+    .master-rank {
+      font-size: 1.5em;
+      flex-shrink: 0;
     }
-    .master-card h4 {
-      font-size: 1.1em;
-      margin-bottom: 8px;
+    .master-info h4 {
+      font-size: 1em;
+      font-weight: 600;
+      margin-bottom: 3px;
     }
-    .master-card p {
-      opacity: 0.9;
+    .master-info p {
+      color: var(--muted);
+      font-size: 0.88em;
+    }
+    /* Source table */
+    .source-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .source-row:last-child { border-bottom: none; }
+    .source-name {
+      font-weight: 600;
       font-size: 0.95em;
     }
+    .source-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 0.9em;
+    }
+    .source-pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 0.85em;
+    }
+    /* Issues */
     .issues-list {
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
+      gap: 8px;
     }
     .issue-tag {
-      background: #f0f0f0;
-      padding: 8px 15px;
-      border-radius: 20px;
-      font-size: 0.95em;
-      color: #667eea;
+      background: var(--accent-soft);
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 0.9em;
+      color: var(--accent);
       font-weight: 600;
     }
-    .feedback-list {
-      display: grid;
-      gap: 15px;
-    }
+    /* Feedback list */
     .feedback-item {
-      background: #f8f9fa;
-      padding: 20px;
-      border-radius: 12px;
-      border-left: 5px solid #667eea;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--border);
     }
+    .feedback-item:last-child { border-bottom: none; padding-bottom: 0; }
+    .feedback-item:first-child { padding-top: 0; }
     .feedback-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: 6px;
     }
     .feedback-header h4 {
-      color: #333;
-      font-size: 1.1em;
+      font-size: 1em;
+      font-weight: 600;
     }
     .feedback-time {
-      color: #999;
-      font-size: 0.9em;
+      color: var(--muted);
+      font-size: 0.85em;
     }
     .feedback-rating {
-      color: #FFD700;
-      font-size: 1.2em;
-      letter-spacing: 2px;
+      font-size: 0.95em;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
     }
     .feedback-meta {
-      color: #666;
-      font-size: 0.95em;
-      margin: 8px 0;
+      color: var(--muted);
+      font-size: 0.9em;
     }
     .feedback-comment {
-      color: #333;
-      font-style: italic;
+      color: var(--text);
       margin-top: 10px;
-      padding: 10px;
-      background: white;
-      border-radius: 8px;
-      border-left: 3px solid #667eea;
+      padding: 12px 14px;
+      background: var(--bg);
+      border-radius: 10px;
+      border-left: 3px solid var(--accent);
+      font-size: 0.92em;
+    }
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 40px 0;
     }
     .footer {
       text-align: center;
-      color: #999;
-      font-size: 0.9em;
-      padding-top: 20px;
-      border-top: 1px solid #eee;
+      color: var(--muted);
+      font-size: 0.82em;
+      padding: 16px 0 0;
     }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>📊 Daily Feedback Report</h1>
+      <div class="eyebrow">Studio Zorina</div>
+      <h1>Daily Feedback Report</h1>
       <p>${dateStr}</p>
     </div>
 
-    <div class="content">
+    ${feedback.length === 0 ? `
+      <div class="card empty">No feedback received today.</div>
+    ` : `
       <!-- Key Stats -->
       <div class="stats-grid">
         <div class="stat-card">
-          <h3>📝 Total Feedback</h3>
+          <h3>Total Feedback</h3>
           <div class="value">${feedback.length}</div>
         </div>
         <div class="stat-card">
-          <h3>⭐ Average Rating</h3>
+          <h3>Average Rating</h3>
           <div class="value">${avgRating}</div>
         </div>
         <div class="stat-card">
-          <h3>😊 Positive Rate</h3>
+          <h3>Positive Rate</h3>
           <div class="value">${positiveRate}%</div>
         </div>
       </div>
 
       <!-- Rating Distribution -->
-      <div class="section">
+      <div class="card">
         <h2 class="section-title">Rating Distribution</h2>
-        <div class="rating-bars">
+        ${[5, 4, 3, 2, 1].map(star => {
+          const count = ratingDist[star]
+          const width = (count / maxRating) * 100
+          return `
           <div class="rating-bar">
-            <span class="rating-label">5⭐</span>
-            <div class="rating-bar-fill star5">
-              <div class="fill" style="width: ${(ratingDist[5] / feedback.length) * 100}%">${ratingDist[5]}</div>
+            <span class="rating-label">${star}★</span>
+            <div class="rating-track">
+              <div class="rating-fill ${count === 0 ? 'zero' : ''}" style="width: ${count === 0 ? 100 : width}%">${count}</div>
             </div>
           </div>
-          <div class="rating-bar">
-            <span class="rating-label">4⭐</span>
-            <div class="rating-bar-fill star4">
-              <div class="fill" style="width: ${(ratingDist[4] / feedback.length) * 100}%">${ratingDist[4]}</div>
-            </div>
-          </div>
-          <div class="rating-bar">
-            <span class="rating-label">3⭐</span>
-            <div class="rating-bar-fill star3">
-              <div class="fill" style="width: ${(ratingDist[3] / feedback.length) * 100}%">${ratingDist[3]}</div>
-            </div>
-          </div>
-          <div class="rating-bar">
-            <span class="rating-label">2⭐</span>
-            <div class="rating-bar-fill star2">
-              <div class="fill" style="width: ${(ratingDist[2] / feedback.length) * 100}%">${ratingDist[2]}</div>
-            </div>
-          </div>
-          <div class="rating-bar">
-            <span class="rating-label">1⭐</span>
-            <div class="rating-bar-fill star1">
-              <div class="fill" style="width: ${(ratingDist[1] / feedback.length) * 100}%">${ratingDist[1]}</div>
-            </div>
-          </div>
-        </div>
+          `
+        }).join('')}
       </div>
 
-      <!-- Top Masters -->
       ${topMasters.length > 0 ? `
-      <div class="section">
-        <h2 class="section-title">👑 Top Masters</h2>
+      <div class="card">
+        <h2 class="section-title">Top Masters</h2>
         <div class="masters-grid">
           ${topMasters.map((master, i) => {
             const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣']
             return `
             <div class="master-card">
-              <div class="rank">${medals[i]}</div>
-              <h4>${master.name}</h4>
-              <p>${master.count} feedback • ${master.avgRating}⭐</p>
+              <div class="master-rank">${medals[i]}</div>
+              <div class="master-info">
+                <h4>${master.name}</h4>
+                <p>${master.count} feedback • ${master.avgRating}★</p>
+              </div>
             </div>
             `
           }).join('')}
@@ -392,10 +455,25 @@ export async function GET(request) {
       </div>
       ` : ''}
 
-      <!-- Top Issues -->
+      ${topSources.length > 0 ? `
+      <div class="card">
+        <h2 class="section-title">By Source</h2>
+        ${topSources.map(s => `
+          <div class="source-row">
+            <span class="source-name">${s.name}</span>
+            <div class="source-meta">
+              <span>${s.avgRating}★ avg</span>
+              <span>${s.count}</span>
+              <span class="source-pill">${s.pct}%</span>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      ` : ''}
+
       ${topIssues.length > 0 ? `
-      <div class="section">
-        <h2 class="section-title">🎯 Top Feedback Topics</h2>
+      <div class="card">
+        <h2 class="section-title">Top Feedback Topics</h2>
         <div class="issues-list">
           ${topIssues.map(([issue, count]) =>
             `<div class="issue-tag">${issue}: ${count}</div>`
@@ -404,39 +482,34 @@ export async function GET(request) {
       </div>
       ` : ''}
 
-      <!-- All Feedback -->
-      <div class="section">
+      <div class="card">
         <h2 class="section-title">All Submissions (${feedback.length})</h2>
-        <div class="feedback-list">
-          ${feedback.map(f => {
-            const time = new Date(f.submitted_at).toLocaleTimeString('en-US', {
-              timeZone: 'America/Los_Angeles',
-              hour: '2-digit',
-              minute: '2-digit'
-            })
-            const stars = f.rating ? '⭐'.repeat(f.rating) : '❓'
-            return `
-            <div class="feedback-item">
-              <div class="feedback-header">
-                <h4>${f.customer_name}</h4>
-                <div class="feedback-time">${time}</div>
-              </div>
-              <div class="feedback-rating">${stars}</div>
-              <div class="feedback-meta">
-                👨‍💼 <strong>${f.master_name}</strong>
-                ${f.admin_name ? ` • Admin: <strong>${f.admin_name}</strong>` : ''}
-                ${f.location_name ? ` • ${f.location_name}` : ''}
-              </div>
-              ${f.improve_text ? `<div class="feedback-comment">"${f.improve_text}"</div>` : ''}
+        ${feedback.map(f => {
+          const time = new Date(f.submitted_at).toLocaleTimeString('en-US', {
+            timeZone: 'America/Los_Angeles',
+            hour: '2-digit',
+            minute: '2-digit'
+          })
+          const stars = f.rating ? '⭐'.repeat(f.rating) : '❓'
+          return `
+          <div class="feedback-item">
+            <div class="feedback-header">
+              <h4>${f.customer_name}</h4>
+              <div class="feedback-time">${time}</div>
             </div>
-            `
-          }).join('')}
-        </div>
+            <div class="feedback-rating">${stars}</div>
+            <div class="feedback-meta">
+              ${f.master_name}${f.admin_name ? ` • Admin: ${f.admin_name}` : ''}${f.location_name ? ` • ${f.location_name}` : ''}
+            </div>
+            ${f.improve_text ? `<div class="feedback-comment">"${f.improve_text}"</div>` : ''}
+          </div>
+          `
+        }).join('')}
       </div>
+    `}
 
-      <div class="footer">
-        <p>Generated at ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles' })} PDT</p>
-      </div>
+    <div class="footer">
+      Generated at ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles' })} PT
     </div>
   </div>
 </body>
