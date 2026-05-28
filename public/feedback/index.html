@@ -1290,7 +1290,7 @@
       },
       booking_id: session.bookingId,
       source: document.querySelector('input[name="source"]:checked')?.value || null,
-      source_other: document.getElementById('sourceOtherField')?.value?.trim() || null,
+      source_other_detail: document.getElementById('sourceOtherField')?.value?.trim() || null,
       rating: ratingInput.value || null,
       improve: document.querySelector('textarea[name="improve"]')?.value || '',
       issues: Array.from(document.querySelectorAll('input[name="issue"]:checked')).map(cb => cb.value),
