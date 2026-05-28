@@ -17,42 +17,41 @@ function addMonths(d, n) {
   return new Date(d.getFullYear(), d.getMonth() + n, d.getDate())
 }
 
-// Resolve the selected period -> { start, end, label, key }
+// Resolve the selected period AND its natural comparison period in one place.
+// Each period is compared to an equal-length previous period (day vs day,
+// week vs week, month vs month) so the comparison is always meaningful.
 function resolveRange(rangeKey) {
   const today = startOfDayPT(pacificNow())
-  let start, end, label
+  let start, end, label, prevStart, prevEnd, compareLabel
 
   switch (rangeKey) {
     case 'yesterday':
-      start = addDays(today, -1); end = today; label = 'Yesterday'; break
+      start = addDays(today, -1); end = today; label = 'Yesterday'
+      prevStart = addDays(today, -2); prevEnd = addDays(today, -1); compareLabel = 'previous day'
+      break
     case '7days':
-      start = addDays(today, -6); end = addDays(today, 1); label = 'Last 7 Days'; break
+      start = addDays(today, -6); end = addDays(today, 1); label = 'Last 7 Days'
+      prevStart = addDays(today, -13); prevEnd = addDays(today, -6); compareLabel = 'previous 7 days'
+      break
     case '30days':
-      start = addDays(today, -29); end = addDays(today, 1); label = 'Last 30 Days'; break
+      start = addDays(today, -29); end = addDays(today, 1); label = 'Last 30 Days'
+      prevStart = addDays(today, -59); prevEnd = addDays(today, -29); compareLabel = 'previous 30 days'
+      break
     case 'thismonth':
-      start = new Date(today.getFullYear(), today.getMonth(), 1); end = addDays(today, 1); label = 'This Month'; break
+      start = new Date(today.getFullYear(), today.getMonth(), 1); end = addDays(today, 1); label = 'This Month'
+      // same slice of the previous month (e.g. May 1–27 vs Apr 1–27)
+      prevStart = addMonths(start, -1); prevEnd = addMonths(end, -1); compareLabel = 'same period last month'
+      break
     case 'lastmonth':
-      start = new Date(today.getFullYear(), today.getMonth() - 1, 1); end = new Date(today.getFullYear(), today.getMonth(), 1); label = 'Last Month'; break
+      start = new Date(today.getFullYear(), today.getMonth() - 1, 1); end = new Date(today.getFullYear(), today.getMonth(), 1); label = 'Last Month'
+      prevStart = new Date(today.getFullYear(), today.getMonth() - 2, 1); prevEnd = start; compareLabel = 'previous month'
+      break
     case 'today':
     default:
       start = today; end = addDays(today, 1); label = 'Today'; rangeKey = 'today'
+      prevStart = addDays(today, -1); prevEnd = today; compareLabel = 'previous day'
   }
-  return { rangeKey, start, end, label }
-}
-
-// Resolve the comparison period by shifting the current period back by one day/week/month
-function resolveCompare(compareKey, start, end) {
-  let prevStart, prevEnd, label
-  switch (compareKey) {
-    case 'week':
-      prevStart = addDays(start, -7); prevEnd = addDays(end, -7); label = 'previous week'; break
-    case 'month':
-      prevStart = addMonths(start, -1); prevEnd = addMonths(end, -1); label = 'previous month'; break
-    case 'day':
-    default:
-      prevStart = addDays(start, -1); prevEnd = addDays(end, -1); label = 'previous day'; compareKey = 'day'
-  }
-  return { compareKey, prevStart, prevEnd, label }
+  return { rangeKey, start, end, label, prevStart, prevEnd, compareLabel }
 }
 
 export async function GET(request) {
@@ -64,14 +63,12 @@ export async function GET(request) {
 
     const url = new URL(request.url)
     const rangeParam = url.searchParams.get('range') || 'today'
-    const compareParam = url.searchParams.get('compare') || 'day'
-    const { rangeKey, start, end, label } = resolveRange(rangeParam)
-    const { compareKey, prevStart, prevEnd, label: compareLabel } = resolveCompare(compareParam, start, end)
+    const { rangeKey, start, end, label, prevStart, prevEnd, compareLabel } = resolveRange(rangeParam)
 
     const selectFields = {
       customer_name: true, master_name: true, admin_name: true,
       location_id: true, location_name: true, rating: true,
-      source: true, issues: true, improve_text: true, submitted_at: true
+      source: true, source_other_detail: true, issues: true, improve_text: true, submitted_at: true
     }
 
     const feedback = await db.customerFeedback.findMany({
@@ -150,6 +147,16 @@ export async function GET(request) {
       .map(([name, s]) => ({ name, count: s.count, avgRating: (s.totalRating / s.count).toFixed(1), pct: feedback.length > 0 ? Math.round((s.count / feedback.length) * 100) : 0 }))
       .sort((a, b) => b.count - a.count)
 
+    // Breakdown of free-text details entered when source = "other"
+    const otherDetailCount = {}
+    feedback.forEach(f => {
+      if (f.source === 'other' && f.source_other_detail && f.source_other_detail.trim()) {
+        const key = f.source_other_detail.trim()
+        otherDetailCount[key] = (otherDetailCount[key] || 0) + 1
+      }
+    })
+    const otherDetails = Object.entries(otherDetailCount).sort((a, b) => b[1] - a[1])
+
     // ---- By Location ----
     const locStats = {}
     feedback.forEach(f => {
@@ -189,19 +196,13 @@ export async function GET(request) {
       return `<span class="delta ${cls}">${arrow} ${Math.abs(d).toFixed(unit === 'int' ? 0 : 1)} vs ${compareLabel}</span>`
     }
 
-    // Range buttons (preserve current compare selection)
+    // Range buttons
     const ranges = [
       ['today', 'Today'], ['yesterday', 'Yesterday'], ['7days', '7 Days'],
       ['30days', '30 Days'], ['thismonth', 'This Month'], ['lastmonth', 'Last Month']
     ]
     const rangeButtons = ranges.map(([key, lbl]) =>
-      `<a class="range-btn ${key === rangeKey ? 'active' : ''}" href="?range=${key}&compare=${compareKey}">${lbl}</a>`
-    ).join('')
-
-    // Compare buttons (preserve current range selection)
-    const compares = [['day', 'Previous day'], ['week', 'Previous week'], ['month', 'Previous month']]
-    const compareButtons = compares.map(([key, lbl]) =>
-      `<a class="cmp-btn ${key === compareKey ? 'active' : ''}" href="?range=${rangeKey}&compare=${key}">${lbl}</a>`
+      `<a class="range-btn ${key === rangeKey ? 'active' : ''}" href="?range=${key}">${lbl}</a>`
     ).join('')
 
     const html = `
@@ -229,16 +230,15 @@ export async function GET(request) {
     .header h1 { font-size: 1.9em; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 4px; }
     .header p { color: var(--muted); }
     .controls { margin-bottom: 22px; }
-    .control-label { font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-bottom: 8px; }
-    .ranges, .compares { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-    .range-btn, .cmp-btn {
+    .ranges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .range-btn {
       text-decoration: none; font-size: 0.85em; font-weight: 600; color: var(--muted);
       background: var(--card); border: 1px solid var(--border); padding: 7px 14px;
       border-radius: 20px; transition: all 0.15s;
     }
-    .range-btn:hover, .cmp-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .range-btn:hover { border-color: var(--accent); color: var(--accent); }
     .range-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .cmp-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+    .compare-note { font-size: 0.8em; color: var(--faint); font-weight: 500; }
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
     .stat-card { background: var(--card); padding: 18px 20px; border-radius: 14px; border: 1px solid var(--border); box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
     .stat-card h3 { color: var(--muted); font-size: 0.7em; font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -263,6 +263,10 @@ export async function GET(request) {
     tr:last-child td { border-bottom: none; }
     .name-cell { font-weight: 600; }
     .pill { display: inline-block; background: var(--accent-soft); color: var(--accent); padding: 2px 9px; border-radius: 12px; font-weight: 600; font-size: 0.85em; }
+    .other-detail { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+    .other-detail-label { font-size: 0.72em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); margin-bottom: 8px; }
+    .other-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; font-size: 0.9em; color: var(--text); }
+    .other-cnt { color: var(--muted); font-weight: 600; font-size: 0.9em; }
     .rating-good { color: var(--green); font-weight: 600; }
     .rating-mid { color: var(--amber); font-weight: 600; }
     .rating-bad { color: var(--red); font-weight: 600; }
@@ -303,10 +307,8 @@ export async function GET(request) {
       <p>${label} &middot; ${rangeStr}</p>
     </div>
     <div class="controls">
-      <div class="control-label">Period</div>
       <div class="ranges">${rangeButtons}</div>
-      <div class="control-label">Compare to</div>
-      <div class="compares">${compareButtons}</div>
+      <div class="compare-note">Compared to ${compareLabel}</div>
     </div>
 
     ${feedback.length === 0 ? `<div class="card empty">No feedback in this period.</div>` : `
@@ -332,7 +334,7 @@ export async function GET(request) {
           const rc = r >= 4.5 ? 'rating-good' : r >= 4 ? 'rating-mid' : 'rating-bad'
           return `<tr><td class="name-cell">${m.name}</td><td class="num">${m.count}</td><td class="num ${rc}">${m.avgRating}</td><td class="num ${m.low > 0 ? 'flag' : ''}">${m.low || '&mdash;'}</td></tr>`
         }).join('')}</tbody></table></div>` : ''}
-        ${sources.length > 0 ? `<div class="card"><h2 class="section-title">By Source</h2><table><thead><tr><th>Source</th><th class="num">Count</th><th class="num">Share</th><th class="num">Avg</th></tr></thead><tbody>${sources.map(s => `<tr><td class="name-cell">${s.name}</td><td class="num">${s.count}</td><td class="num"><span class="pill">${s.pct}%</span></td><td class="num">${s.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${sources.length > 0 ? `<div class="card"><h2 class="section-title">By Source</h2><table><thead><tr><th>Source</th><th class="num">Count</th><th class="num">Share</th><th class="num">Avg</th></tr></thead><tbody>${sources.map(s => `<tr><td class="name-cell">${s.name}</td><td class="num">${s.count}</td><td class="num"><span class="pill">${s.pct}%</span></td><td class="num">${s.avgRating}</td></tr>`).join('')}</tbody></table>${otherDetails.length > 0 ? `<div class="other-detail"><div class="other-detail-label">"Other" responses</div>${otherDetails.map(([txt, cnt]) => `<div class="other-row"><span>${txt}</span><span class="other-cnt">${cnt}</span></div>`).join('')}</div>` : ''}</div>` : ''}
       </div>
       <div class="two-col">
         ${admins.length > 0 ? `<div class="card"><h2 class="section-title">By Admin<span class="note">feedback collected</span></h2><table><thead><tr><th>Admin</th><th class="num">Collected</th><th class="num">Avg</th></tr></thead><tbody>${admins.map(a => `<tr><td class="name-cell">${a.name}</td><td class="num">${a.count}</td><td class="num">${a.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
