@@ -2,6 +2,69 @@ import db from '../../../../lib/prisma-client'
 
 export const dynamic = 'force-dynamic'
 
+// ---- Date range helpers (all in Pacific time) ----
+function pacificNow() {
+  const now = new Date()
+  return new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }))
+}
+function startOfDayPT(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+function addDays(d, n) {
+  return new Date(d.getTime() + n * 24 * 60 * 60 * 1000)
+}
+
+// Returns { start, end, prevStart, prevEnd, label } for a given range key
+function resolveRange(rangeKey) {
+  const today = startOfDayPT(pacificNow())
+  let start, end, prevStart, prevEnd, label
+
+  switch (rangeKey) {
+    case 'yesterday': {
+      start = addDays(today, -1); end = today
+      prevStart = addDays(today, -2); prevEnd = addDays(today, -1)
+      label = 'Yesterday'
+      break
+    }
+    case '7days': {
+      start = addDays(today, -6); end = addDays(today, 1) // include today
+      prevStart = addDays(today, -13); prevEnd = addDays(today, -6)
+      label = 'Last 7 Days'
+      break
+    }
+    case '30days': {
+      start = addDays(today, -29); end = addDays(today, 1)
+      prevStart = addDays(today, -59); prevEnd = addDays(today, -29)
+      label = 'Last 30 Days'
+      break
+    }
+    case 'thismonth': {
+      start = new Date(today.getFullYear(), today.getMonth(), 1)
+      end = addDays(today, 1)
+      prevStart = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+      prevEnd = start
+      label = 'This Month'
+      break
+    }
+    case 'lastmonth': {
+      start = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+      end = new Date(today.getFullYear(), today.getMonth(), 1)
+      prevStart = new Date(today.getFullYear(), today.getMonth() - 2, 1)
+      prevEnd = start
+      label = 'Last Month'
+      break
+    }
+    case 'today':
+    default: {
+      start = today; end = addDays(today, 1)
+      prevStart = addDays(today, -1); prevEnd = today
+      label = 'Today'
+      rangeKey = 'today'
+    }
+  }
+  return { rangeKey, start, end, prevStart, prevEnd, label }
+}
+
 export async function GET(request) {
   try {
     const orgId = process.env.ZORINA_ORG_ID
@@ -9,11 +72,10 @@ export async function GET(request) {
       return new Response('ZORINA_ORG_ID not configured', { status: 500 })
     }
 
-    const now = new Date()
-    const pstDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }))
-    const startOfDay = new Date(pstDate.getFullYear(), pstDate.getMonth(), pstDate.getDate())
-    const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000)
-    const sevenDaysAgo = new Date(startOfDay.getTime() - 7 * 24 * 60 * 60 * 1000)
+    // Read selected range from URL (?range=today|yesterday|7days|30days|thismonth|lastmonth)
+    const url = new URL(request.url)
+    const rangeParam = url.searchParams.get('range') || 'today'
+    const { rangeKey, start, end, prevStart, prevEnd, label } = resolveRange(rangeParam)
 
     const selectFields = {
       customer_name: true, master_name: true, admin_name: true,
@@ -21,14 +83,16 @@ export async function GET(request) {
       source: true, issues: true, improve_text: true, submitted_at: true
     }
 
+    // Current period feedback
     const feedback = await db.customerFeedback.findMany({
-      where: { organization_id: orgId, submitted_at: { gte: startOfDay, lt: endOfDay } },
+      where: { organization_id: orgId, submitted_at: { gte: start, lt: end } },
       select: selectFields,
       orderBy: { submitted_at: 'desc' }
     })
 
-    const priorFeedback = await db.customerFeedback.findMany({
-      where: { organization_id: orgId, submitted_at: { gte: sevenDaysAgo, lt: startOfDay } },
+    // Previous comparable period (ratings only, for comparison)
+    const prevFeedback = await db.customerFeedback.findMany({
+      where: { organization_id: orgId, submitted_at: { gte: prevStart, lt: prevEnd } },
       select: { rating: true }
     })
 
@@ -39,6 +103,7 @@ export async function GET(request) {
     const locationMap = new Map(locations.map(l => [l.id, l.name]))
     feedback.forEach(f => { if (!f.location_name && f.location_id) f.location_name = locationMap.get(f.location_id) })
 
+    // ---- Current stats ----
     const ratings = feedback.filter(f => f.rating).map(f => f.rating)
     const avgRating = ratings.length > 0 ? (ratings.reduce((a, b) => a + b, 0) / ratings.length) : 0
     const avgRatingStr = ratings.length > 0 ? avgRating.toFixed(1) : 'N/A'
@@ -53,11 +118,13 @@ export async function GET(request) {
     const positiveRate = feedback.length > 0 ? Math.round(((ratingDist[5] + ratingDist[4]) / feedback.length) * 100) : 0
     const negativeCount = ratingDist[1] + ratingDist[2]
 
-    const priorRatings = priorFeedback.filter(f => f.rating).map(f => f.rating)
-    const priorAvg = priorRatings.length > 0 ? (priorRatings.reduce((a, b) => a + b, 0) / priorRatings.length) : 0
-    const ratingDelta = priorAvg > 0 ? (avgRating - priorAvg) : 0
-    const priorDailyAvgCount = priorRatings.length > 0 ? (priorFeedback.length / 7) : 0
+    // ---- Previous period stats ----
+    const prevRatings = prevFeedback.filter(f => f.rating).map(f => f.rating)
+    const prevAvg = prevRatings.length > 0 ? (prevRatings.reduce((a, b) => a + b, 0) / prevRatings.length) : 0
+    const avgDelta = prevAvg > 0 ? (avgRating - prevAvg) : 0
+    const countDelta = feedback.length - prevFeedback.length
 
+    // ---- By Master ----
     const masterStats = {}
     feedback.forEach(f => {
       if (!f.master_name) return
@@ -70,6 +137,19 @@ export async function GET(request) {
       .map(([name, s]) => ({ name, count: s.count, avgRating: (s.totalRating / s.count).toFixed(1), low: s.low }))
       .sort((a, b) => b.count - a.count)
 
+    // ---- By Admin ----
+    const adminStats = {}
+    feedback.forEach(f => {
+      if (!f.admin_name) return
+      if (!adminStats[f.admin_name]) adminStats[f.admin_name] = { count: 0, totalRating: 0 }
+      adminStats[f.admin_name].count++
+      adminStats[f.admin_name].totalRating += f.rating || 0
+    })
+    const admins = Object.entries(adminStats)
+      .map(([name, s]) => ({ name, count: s.count, avgRating: (s.totalRating / s.count).toFixed(1) }))
+      .sort((a, b) => b.count - a.count)
+
+    // ---- By Source ----
     const sourceStats = {}
     feedback.forEach(f => {
       const src = f.source || 'Unknown'
@@ -81,6 +161,7 @@ export async function GET(request) {
       .map(([name, s]) => ({ name, count: s.count, avgRating: (s.totalRating / s.count).toFixed(1), pct: feedback.length > 0 ? Math.round((s.count / feedback.length) * 100) : 0 }))
       .sort((a, b) => b.count - a.count)
 
+    // ---- By Location ----
     const locStats = {}
     feedback.forEach(f => {
       const loc = f.location_name || 'Unknown'
@@ -92,6 +173,7 @@ export async function GET(request) {
       .map(([name, s]) => ({ name, count: s.count, avgRating: (s.totalRating / s.count).toFixed(1) }))
       .sort((a, b) => b.count - a.count)
 
+    // ---- Issues ----
     const issueCount = {}
     feedback.forEach(f => {
       if (f.issues && Array.isArray(f.issues)) f.issues.forEach(issue => { issueCount[issue] = (issueCount[issue] || 0) + 1 })
@@ -99,19 +181,34 @@ export async function GET(request) {
     const topIssues = Object.entries(issueCount).sort((a, b) => b[1] - a[1])
 
     const needsAttention = feedback.filter(f => f.rating && f.rating <= 3).sort((a, b) => a.rating - b.rating)
-
-    // All submissions that include a written comment
     const comments = feedback.filter(f => f.improve_text && f.improve_text.trim())
 
     const maxRating = Math.max(1, ...Object.values(ratingDist))
-    const dateStr = startOfDay.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 
-    const fmtDelta = (d) => {
-      if (Math.abs(d) < 0.05) return '<span class="delta flat">no change vs 7-day avg</span>'
+    // Date label for header
+    const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    const displayEnd = addDays(end, -1)
+    const rangeStr = rangeKey === 'today' || rangeKey === 'yesterday'
+      ? start.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      : `${fmtD(start)} – ${fmtD(displayEnd)}`
+
+    const showTime = (rangeKey === 'today' || rangeKey === 'yesterday')
+
+    const fmtDelta = (d, unit) => {
+      if (Math.abs(d) < 0.05) return `<span class="delta flat">no change vs prev</span>`
       const arrow = d > 0 ? '&#9650;' : '&#9660;'
       const cls = d > 0 ? 'up' : 'down'
-      return `<span class="delta ${cls}">${arrow} ${Math.abs(d).toFixed(1)} vs 7-day avg</span>`
+      return `<span class="delta ${cls}">${arrow} ${Math.abs(d).toFixed(unit === 'int' ? 0 : 1)} vs prev</span>`
     }
+
+    // Range buttons
+    const ranges = [
+      ['today', 'Today'], ['yesterday', 'Yesterday'], ['7days', '7 Days'],
+      ['30days', '30 Days'], ['thismonth', 'This Month'], ['lastmonth', 'Last Month']
+    ]
+    const rangeButtons = ranges.map(([key, lbl]) =>
+      `<a class="range-btn ${key === rangeKey ? 'active' : ''}" href="?range=${key}">${lbl}</a>`
+    ).join('')
 
     const html = `
 <!DOCTYPE html>
@@ -119,7 +216,7 @@ export async function GET(request) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Daily Feedback Report</title>
+  <title>Feedback Report</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
@@ -133,10 +230,18 @@ export async function GET(request) {
       color: var(--text); font-size: 15px; line-height: 1.45;
     }
     .container { max-width: 980px; margin: 0 auto; }
-    .header { margin-bottom: 24px; }
+    .header { margin-bottom: 18px; }
     .header .eyebrow { font-size: 0.72em; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
     .header h1 { font-size: 1.9em; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 4px; }
     .header p { color: var(--muted); }
+    .ranges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+    .range-btn {
+      text-decoration: none; font-size: 0.85em; font-weight: 600; color: var(--muted);
+      background: var(--card); border: 1px solid var(--border); padding: 7px 14px;
+      border-radius: 20px; transition: all 0.15s;
+    }
+    .range-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .range-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
     .stat-card { background: var(--card); padding: 18px 20px; border-radius: 14px; border: 1px solid var(--border); box-shadow: 0 1px 2px rgba(16,24,40,0.04); }
     .stat-card h3 { color: var(--muted); font-size: 0.7em; font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -197,14 +302,16 @@ export async function GET(request) {
   <div class="container">
     <div class="header">
       <div class="eyebrow">Studio Zorina</div>
-      <h1>Daily Feedback Report</h1>
-      <p>${dateStr}</p>
+      <h1>Feedback Report</h1>
+      <p>${label} &middot; ${rangeStr}</p>
     </div>
-    ${feedback.length === 0 ? `<div class="card empty">No feedback received today.</div>` : `
-      ${negativeCount > 0 ? `<div class="attention-banner">${negativeCount} submission${negativeCount > 1 ? 's' : ''} rated 2 stars or below today &mdash; see "Needs Attention" below.</div>` : ''}
+    <div class="ranges">${rangeButtons}</div>
+
+    ${feedback.length === 0 ? `<div class="card empty">No feedback in this period.</div>` : `
+      ${negativeCount > 0 ? `<div class="attention-banner">${negativeCount} submission${negativeCount > 1 ? 's' : ''} rated 2 stars or below &mdash; see "Needs Attention" below.</div>` : ''}
       <div class="stats-grid">
-        <div class="stat-card"><h3>Total Feedback</h3><div class="value">${feedback.length}</div><div class="sub">${priorDailyAvgCount > 0 ? `${priorDailyAvgCount.toFixed(1)} avg/day last 7 days` : 'no prior data'}</div></div>
-        <div class="stat-card"><h3>Average Rating</h3><div class="value">${avgRatingStr}</div><div class="sub">${priorAvg > 0 ? fmtDelta(ratingDelta) : 'no prior data'}</div></div>
+        <div class="stat-card"><h3>Total Feedback</h3><div class="value">${feedback.length}</div><div class="sub">${prevFeedback.length > 0 ? fmtDelta(countDelta, 'int') : 'no prior data'}</div></div>
+        <div class="stat-card"><h3>Average Rating</h3><div class="value">${avgRatingStr}</div><div class="sub">${prevAvg > 0 ? fmtDelta(avgDelta) : 'no prior data'}</div></div>
         <div class="stat-card"><h3>Positive Rate</h3><div class="value">${positiveRate}%</div><div class="sub">${ratingDist[5] + ratingDist[4]} of ${feedback.length} rated 4&ndash;5</div></div>
         <div class="stat-card"><h3>Low Ratings</h3><div class="value">${negativeCount}</div><div class="sub">1&ndash;2 star submissions</div></div>
       </div>
@@ -223,9 +330,12 @@ export async function GET(request) {
           const rc = r >= 4.5 ? 'rating-good' : r >= 4 ? 'rating-mid' : 'rating-bad'
           return `<tr><td class="name-cell">${m.name}</td><td class="num">${m.count}</td><td class="num ${rc}">${m.avgRating}</td><td class="num ${m.low > 0 ? 'flag' : ''}">${m.low || '&mdash;'}</td></tr>`
         }).join('')}</tbody></table></div>` : ''}
-        ${sources.length > 0 ? `<div class="card"><h2 class="section-title">By Source</h2><table><thead><tr><th>Source</th><th class="num">Count</th><th class="num">Share</th><th class="num">Avg</th></tr></thead><tbody>${sources.map(s => `<tr><td class="name-cell">${s.name}</td><td class="num">${s.count}</td><td class="num"><span class="pill">${s.pct}%</span></td><td class="num">${s.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${admins.length > 0 ? `<div class="card"><h2 class="section-title">By Admin<span class="note">feedback collected</span></h2><table><thead><tr><th>Admin</th><th class="num">Collected</th><th class="num">Avg</th></tr></thead><tbody>${admins.map(a => `<tr><td class="name-cell">${a.name}</td><td class="num">${a.count}</td><td class="num">${a.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
       </div>
-      ${locs.length > 1 ? `<div class="card"><h2 class="section-title">By Location</h2><table><thead><tr><th>Location</th><th class="num">Count</th><th class="num">Avg Rating</th></tr></thead><tbody>${locs.map(l => `<tr><td class="name-cell">${l.name}</td><td class="num">${l.count}</td><td class="num">${l.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      <div class="two-col">
+        ${sources.length > 0 ? `<div class="card"><h2 class="section-title">By Source</h2><table><thead><tr><th>Source</th><th class="num">Count</th><th class="num">Share</th><th class="num">Avg</th></tr></thead><tbody>${sources.map(s => `<tr><td class="name-cell">${s.name}</td><td class="num">${s.count}</td><td class="num"><span class="pill">${s.pct}%</span></td><td class="num">${s.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${locs.length > 1 ? `<div class="card"><h2 class="section-title">By Location</h2><table><thead><tr><th>Location</th><th class="num">Count</th><th class="num">Avg</th></tr></thead><tbody>${locs.map(l => `<tr><td class="name-cell">${l.name}</td><td class="num">${l.count}</td><td class="num">${l.avgRating}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      </div>
       ${comments.length > 0 ? `<div class="card"><h2 class="section-title">Comments<span class="note">${comments.length} with written feedback</span></h2>${comments.map(f => {
         const r = f.rating || 0
         const rc = r >= 4 ? 'rating-good' : r === 3 ? 'rating-mid' : 'rating-bad'
@@ -233,11 +343,11 @@ export async function GET(request) {
       }).join('')}</div>` : ''}
       ${topIssues.length > 0 ? `<div class="card"><h2 class="section-title">Feedback Topics<span class="note">issues flagged by customers</span></h2><div class="issues-list">${topIssues.map(([issue, count]) => `<div class="issue-tag">${issue}: ${count}</div>`).join('')}</div></div>` : ''}
       ${needsAttention.length > 0 ? `<div class="card"><h2 class="section-title">Needs Attention<span class="note">rated 3 stars or below</span></h2>${needsAttention.map(f => {
-        const time = new Date(f.submitted_at).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' })
+        const time = showTime ? new Date(f.submitted_at).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' }) : new Date(f.submitted_at).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric' })
         return `<div class="sub-item"><div class="sub-head"><h4>${f.customer_name}</h4><span class="sub-time">${time}</span></div><div class="sub-rating rating-bad">${f.rating} / 5</div><div class="sub-meta">${f.master_name}${f.admin_name ? ` &middot; Admin: ${f.admin_name}` : ''}${f.location_name ? ` &middot; ${f.location_name}` : ''}${f.source ? ` &middot; ${f.source}` : ''}</div>${f.improve_text ? `<div class="sub-comment neg">"${f.improve_text}"</div>` : ''}</div>`
       }).join('')}</div>` : ''}
       <div class="card"><h2 class="section-title">All Submissions<span class="note">${feedback.length} total</span></h2>${feedback.map(f => {
-        const time = new Date(f.submitted_at).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' })
+        const time = showTime ? new Date(f.submitted_at).toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' }) : new Date(f.submitted_at).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric' })
         const r = f.rating || 0
         const rc = r >= 4 ? 'rating-good' : r === 3 ? 'rating-mid' : 'rating-bad'
         return `<div class="sub-item"><div class="sub-head"><h4>${f.customer_name}</h4><span class="sub-time">${time}</span></div><div class="sub-rating ${rc}">${f.rating ? f.rating + ' / 5' : 'No rating'}</div><div class="sub-meta">${f.master_name}${f.admin_name ? ` &middot; Admin: ${f.admin_name}` : ''}${f.location_name ? ` &middot; ${f.location_name}` : ''}${f.source ? ` &middot; ${f.source}` : ''}</div>${f.improve_text ? `<div class="sub-comment">"${f.improve_text}"</div>` : ''}</div>`
