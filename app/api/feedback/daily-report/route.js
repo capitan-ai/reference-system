@@ -57,7 +57,7 @@ async function handler(request) {
     const feedback = await db.customerFeedback.findMany({
       where: {
         organization_id: orgId,
-        submitted_at: {
+        service_date: {
           gte: startOfDay,
           lt: endOfDay
         }
